@@ -55,23 +55,23 @@
 
 - name: Download the pinned esbuild binary
   ansible.builtin.get_url:
-    url: "https://registry.npmjs.org/@esbuild/linux-{{ esbuild_arch }}/-/linux-{{ esbuild_arch }}-{{ esbuild_version }}.tgz"
-    dest: "/var/cache/secbot/esbuild-{{ esbuild_version }}-{{ ansible_architecture }}.tgz"
-    checksum: "sha512:{{ esbuild_sha512[ansible_architecture] }}"
+    url: "https://registry.npmjs.org/@esbuild/linux-{{ esbuild_arch }}/-/linux-{{ esbuild_arch }}-{{ celld_esbuild_version }}.tgz"
+    dest: "/var/cache/secbot/esbuild-{{ celld_esbuild_version }}-{{ ansible_architecture }}.tgz"
+    checksum: "sha512:{{ celld_esbuild_sha512[ansible_architecture] }}"
     mode: "0644"
   vars:
     esbuild_arch: "{{ 'x64' if ansible_architecture == 'x86_64' else 'arm64' }}"
-  register: esbuild_download
+  register: celld_esbuild_download
 
 - name: Install the esbuild binary
   ansible.builtin.shell: |
     set -o pipefail
-    tar -xzOf "{{ esbuild_download.dest }}" package/bin/esbuild > /usr/local/bin/esbuild.new
+    tar -xzOf "{{ celld_esbuild_download.dest }}" package/bin/esbuild > /usr/local/bin/esbuild.new
     chmod 0755 /usr/local/bin/esbuild.new
     mv -f /usr/local/bin/esbuild.new /usr/local/bin/esbuild
   args:
     executable: /bin/bash
-    creates: "{{ omit if esbuild_download.changed else '/usr/local/bin/esbuild' }}"
+    creates: "{{ omit if celld_esbuild_download.changed else '/usr/local/bin/esbuild' }}"
   changed_when: true
 
 - name: Create the secbot configuration directory

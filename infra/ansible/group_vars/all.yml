@@ -1,0 +1,5 @@
+# Shared by the celld role (listen address and ports) and the firewall role (rules).
+celld_worker_port: 8787
+celld_internal_port: 8081
+# The private-network interface; the worker listens on its address only.
+celld_private_interface: tailscale0

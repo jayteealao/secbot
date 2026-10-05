@@ -24,7 +24,7 @@
 
 - name: Read whether ufw is active
   ansible.builtin.command: ufw status
-  register: ufw_status
+  register: firewall_ufw_status
   changed_when: false
 
 - name: Warn when ufw is inactive (the rules above wait until the owner enables it)
@@ -32,4 +32,4 @@
     msg: >-
       ufw is inactive, so the rules above are not enforced yet. The listeners are still private
       by binding. Enable ufw yourself after checking your SSH rule; this play never does.
-  when: "'Status: active' not in ufw_status.stdout"
+  when: "'Status: active' not in firewall_ufw_status.stdout"

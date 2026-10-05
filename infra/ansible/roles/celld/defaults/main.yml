@@ -6,15 +6,13 @@ celld_sha256:
   aarch64: "ab99053bcced225bb5b54f428792260c905b782b8a61947362a12ce3a9c22def"
 # celld deploy runs esbuild from PATH (celld README); same version as pnpm-lock.yaml
 # (npm registry integrity of @esbuild/linux-* 0.28.2, as hex).
-esbuild_version: "0.28.2"
-esbuild_sha512:
+celld_esbuild_version: "0.28.2"
+celld_esbuild_sha512:
   x86_64: "e314d9af5154992a105b85c85a68addedcd0ad44d933e3773f45d5f3144e298179d177c8ef178ef74fb56d9bcdc3122e7d0f610d0551247e588603d517c03f1d"
   aarch64: "a56e000b43f78adf1cedda3d315338a79d45cc7cdd33f4d9adeaeeae045c1c9d964dad55435088ab5f319dc7e9049c38a23922659aca5b6c8805604ff768fa52"
 
-celld_worker_port: 8787
-celld_internal_port: 8081
-# The private-network interface; the worker listens on its address only.
-celld_private_interface: tailscale0
+# celld_worker_port, celld_internal_port, and celld_private_interface live in
+# group_vars/all.yml, because the firewall role reads them too.
 
 # Instances: test now; the production rollout adds prod (its own bucket and group secbot-prod).
 celld_instances:

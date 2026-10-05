@@ -1,3 +1,0 @@
-celld_worker_port: 8787
-celld_internal_port: 8081
-celld_private_interface: tailscale0

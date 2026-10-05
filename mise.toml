@@ -55,15 +55,21 @@ run = "tofu apply -input=false secbot.tfplan"
 
 [tasks."infra:check"]
 description = "Static checks of infra/: tofu fmt and validate, ansible-lint, playbook syntax"
+# Ansible skips an ansible.cfg in a world-writable working directory (a Windows drive under WSL2);
+# ANSIBLE_CONFIG is always read (ansible/config/manager.py find_ini_config_file).
+env = { ANSIBLE_CONFIG = "{{config_root}}/infra/ansible/ansible.cfg" }
 run = [
   "tofu -chdir=infra/tofu fmt -check -recursive",
   "tofu -chdir=infra/tofu init -backend=false -input=false",
   "tofu -chdir=infra/tofu validate",
-  "cd infra/ansible && ansible-lint && ansible-playbook --syntax-check site.yml",
+  "cd infra/ansible && ansible-galaxy collection install -r requirements.yml && ansible-lint && ansible-playbook --syntax-check site.yml",
 ]
 
 [tasks."host:setup"]
 description = "Run the Ansible host setup on the VPS (SECBOT_VPS_SSH names your SSH alias); prints the diff"
+# Ansible skips an ansible.cfg in a world-writable working directory (a Windows drive under WSL2);
+# ANSIBLE_CONFIG is always read (ansible/config/manager.py find_ini_config_file).
+env = { ANSIBLE_CONFIG = "{{config_root}}/infra/ansible/ansible.cfg" }
 dir = "infra/ansible"
 run = ["ansible-galaxy collection install -r requirements.yml", "ansible-playbook site.yml --diff"]
 

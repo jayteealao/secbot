@@ -15,7 +15,6 @@
         fail_msg: "Set SECBOT_VPS_SSH to the SSH config alias of the VPS."
       delegate_to: localhost
       become: false
-      run_once: true
   roles:
     - role: deploy_users
     - role: celld
