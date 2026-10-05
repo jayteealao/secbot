@@ -15,9 +15,10 @@ resource "cloudflare_r2_bucket" "cells" {
   jurisdiction = "eu"
 }
 
-data "cloudflare_account_api_token_permission_groups_list" "r2_write" {
-  account_id = var.cloudflare_account_id
-  name       = "Workers%20R2%20Storage%20Bucket%20Item%20Write"
+# User-scope list (/user/tokens/permission_groups): the bucket tokens below are user tokens, so the
+# "API Tokens Edit" user permission covers both this read and the token creation.
+data "cloudflare_api_token_permission_groups_list" "r2_write" {
+  name = "Workers%20R2%20Storage%20Bucket%20Item%20Write"
 }
 
 # One token per bucket, scoped to that bucket's objects. celld uses it as S3 credentials:
@@ -27,7 +28,7 @@ resource "cloudflare_api_token" "bucket" {
   name     = "${each.value}-celld"
   policies = [{
     effect            = "allow"
-    permission_groups = [{ id = data.cloudflare_account_api_token_permission_groups_list.r2_write.result[0].id }]
+    permission_groups = [{ id = data.cloudflare_api_token_permission_groups_list.r2_write.result[0].id }]
     resources = jsonencode({
       "com.cloudflare.edge.r2.bucket.${var.cloudflare_account_id}_eu_${each.value}" = "*"
     })
