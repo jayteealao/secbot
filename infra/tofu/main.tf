@@ -34,28 +34,9 @@ resource "cloudflare_api_token" "bucket" {
   }]
 }
 
-# --- Tailscale: who reaches what on the private network ---
-# ci-test reaches only SSH on the VPS (the forced command limits it further); ci-prod the same
-# for the production user; owner devices reach SSH and the celld worker port. Nothing reaches
-# the celld internal port, which listens on loopback only.
-
-resource "tailscale_acl" "secbot" {
-  overwrite_existing_content = true
-  acl = jsonencode({
-    tagOwners = {
-      "tag:secbot-vps"   = [var.owner_login]
-      "tag:ci-test"      = [var.owner_login]
-      "tag:ci-prod"      = [var.owner_login]
-      "tag:owner-device" = [var.owner_login]
-    }
-    acls = [
-      { action = "accept", src = ["tag:ci-test", "tag:ci-prod"], dst = ["tag:secbot-vps:22"] },
-      { action = "accept", src = ["tag:owner-device"], dst = ["tag:secbot-vps:22", "tag:secbot-vps:${var.worker_port}"] },
-      { action = "accept", src = ["tag:secbot-vps"], dst = ["tag:secbot-vps:${var.worker_port}"] },
-    ]
-    ssh = []
-  })
-}
+# --- Tailscale: not managed here ---
+# The tailscale_acl resource owns the whole tailnet policy and would replace the owner's
+# existing rules. The owner adds the Secbot rules by hand: docs/runbooks/tailnet-access.md.
 
 # --- Better Stack: the test cell's heartbeat (one per cell; the others come with production) ---
 

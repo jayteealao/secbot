@@ -12,20 +12,3 @@ variable "cloudflare_account_id" {
   sensitive   = true
 }
 
-variable "tailnet" {
-  description = "Tailscale tailnet name."
-  type        = string
-  sensitive   = true
-}
-
-variable "owner_login" {
-  description = "Tailscale login of the owner, who may tag owner devices."
-  type        = string
-  sensitive   = true
-}
-
-variable "worker_port" {
-  description = "celld worker listener port on the VPS private-network address."
-  type        = number
-  default     = 8787
-}

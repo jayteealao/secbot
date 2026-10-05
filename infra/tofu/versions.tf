@@ -9,10 +9,6 @@ terraform {
       source  = "cloudflare/cloudflare"
       version = "~> 5.27"
     }
-    tailscale = {
-      source  = "tailscale/tailscale"
-      version = "~> 0.29"
-    }
     betteruptime = {
       source  = "BetterStackHQ/better-uptime"
       version = "~> 0.22"
@@ -38,11 +34,7 @@ terraform {
 }
 
 # Each provider reads its token from the environment: CLOUDFLARE_API_TOKEN,
-# TAILSCALE_API_KEY (or OAuth client variables), BETTERUPTIME_API_TOKEN.
+# BETTERUPTIME_API_TOKEN.
 provider "cloudflare" {}
-
-provider "tailscale" {
-  tailnet = var.tailnet
-}
 
 provider "betteruptime" {}

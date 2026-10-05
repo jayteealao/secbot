@@ -44,7 +44,7 @@ description = "Fail when a tracked file holds an IP address, private-network hos
 run = "node scripts/check-identifiers.mjs"
 
 [tasks."infra:plan"]
-description = "OpenTofu plan for the R2 buckets, the private-network rules, and the heartbeat (reads TF_VAR_* from your shell)"
+description = "OpenTofu plan for the R2 buckets, their tokens, and the heartbeat (reads TF_VAR_* from your shell)"
 dir = "infra/tofu"
 run = ["tofu init -input=false", "tofu plan -input=false -out=secbot.tfplan"]
 
