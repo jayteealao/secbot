@@ -1,0 +1,17 @@
+# Created by wf ship-plan build — plan v1, 2026-10-05
+# Code-owner review is required on main. An agent cannot weaken its own guards:
+# every change below waits for the owner's approval.
+
+# Safety paths (provisional; wave 2 sets the real package paths)
+/packages/safety/        @jayteealao
+/packages/tool-hook/     @jayteealao
+/packages/reviewer/      @jayteealao
+/packages/secrets-cell/  @jayteealao
+/packages/budgets/       @jayteealao
+/packages/rules/         @jayteealao
+
+# The gates themselves
+/.github/                @jayteealao
+/lefthook.yml            @jayteealao
+/renovate.json           @jayteealao
+/.ai/ship-plan.md        @jayteealao

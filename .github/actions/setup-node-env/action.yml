@@ -1,0 +1,49 @@
+# Created by wf ship-plan build — plan v1, 2026-10-05
+name: Set up the Node environment
+description: Install the mise-pinned tools, restore the pnpm store, and install dependencies.
+
+inputs:
+  tools:
+    description: Space-separated mise tools to install.
+    required: false
+    default: node pnpm
+  forks-token:
+    description: Read-only token for the private pi-durable and celld forks. Empty for outside PRs.
+    required: false
+    default: ""
+  install:
+    description: Run pnpm install --frozen-lockfile.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - uses: jdx/mise-action@v5
+      with:
+        install_args: ${{ inputs.tools }}
+        cache: true
+
+    - name: Locate the pnpm store
+      id: pnpm-store
+      shell: bash
+      run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache the pnpm store
+      uses: actions/cache@v6
+      with:
+        path: ${{ steps.pnpm-store.outputs.path }}
+        key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: pnpm-${{ runner.os }}-
+
+    - name: Allow fetching the private forks
+      if: ${{ inputs.forks-token != '' }}
+      shell: bash
+      env:
+        FORKS_READ_TOKEN: ${{ inputs.forks-token }}
+      run: git config --global url."https://x-access-token:${FORKS_READ_TOKEN}@github.com/jayteealao/".insteadOf "https://github.com/jayteealao/"
+
+    - name: Install dependencies
+      if: ${{ inputs.install == 'true' }}
+      shell: bash
+      run: pnpm install --frozen-lockfile

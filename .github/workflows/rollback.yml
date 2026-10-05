@@ -1,0 +1,99 @@
+# Created by wf ship-plan build — plan v1, 2026-10-05
+# Rollback (ship plan Block E): redeploy a prior server tag, then rerun the checks.
+# Site reliability dispatches this after the owner's yes; the production
+# environment approval is that yes on GitHub.
+#
+# A workflow_dispatch workflow is usable only after it is on main. Before the
+# first merge, roll back by hand: mise run deploy -- --env production --version <prior-tag>
+# (from a machine on the private network).
+#
+# Inert until SDLC_GATE_SERVER_RELEASE is "true".
+name: Rollback (server)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Prior server tag to redeploy (for example v0.3.1); must be one of the last 5 releases"
+        required: true
+      reason:
+        description: "Why the rollback is needed"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-server
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    if: ${{ vars.SDLC_GATE_SERVER_RELEASE == 'true' }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Validate the requested tag
+        env:
+          VERSION: ${{ inputs.version }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          if ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$VERSION' is not a server tag like v1.2.3"
+            exit 1
+          fi
+          echo "Rollback to $VERSION approved. Reason: $REASON"
+
+  rollback:
+    needs: approve
+    runs-on: ubuntu-latest
+    environment: production-rollout
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          install: "false"
+      - uses: ./.github/actions/vps-access
+        with:
+          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          host: ${{ secrets.VPS_DEPLOY_HOST }}
+          ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+          known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+      - name: Redeploy the prior tag
+        env:
+          VERSION: ${{ inputs.version }}
+        run: mise run deploy -- --env production --version "$VERSION"
+
+  verify-rollback:
+    needs: rollback
+    runs-on: ubuntu-latest
+    environment: production-rollout
+    env:
+      HEARTBEAT_API_TOKEN: ${{ secrets.HEARTBEAT_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          install: "false"
+      - uses: ./.github/actions/vps-access
+        with:
+          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          host: ${{ secrets.VPS_DEPLOY_HOST }}
+          ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+          known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+      - name: Check cell health on the prior tag
+        uses: ./.github/actions/poll-check
+        with:
+          cmd: mise run check:cells -- --env production --version ${{ inputs.version }}
+      - name: Check alarms
+        uses: ./.github/actions/poll-check
+        with:
+          cmd: mise run check:alarms -- --env production
+          min-minutes: "0"
+      - name: Check heartbeats
+        uses: ./.github/actions/poll-check
+        with:
+          cmd: mise run check:heartbeats -- --since-deploy
+          min-minutes: "0"

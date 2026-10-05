@@ -1,0 +1,181 @@
+# Created by wf ship-plan build — plan v1, 2026-10-05
+# Required pre-merge checks for main (ship plan Blocks C, H, K).
+# Gates whose code does not exist yet are inert until their repo variable is "true":
+#   SDLC_GATE_NODE   — a committed pnpm-lock.yaml exists
+#   SDLC_GATE_SERVER — server or extension packages exist under packages/
+#   SDLC_GATE_APP    — the Gradle app exists under app/
+# A skipped job still reports success, so inert gates never block a merge.
+name: PR Checks
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  biome:
+    name: biome
+    if: ${{ vars.SDLC_GATE_NODE == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          forks-token: ${{ secrets.FORKS_READ_TOKEN }}
+      - name: Format and lint (Biome)
+        run: pnpm biome ci .
+
+  type-check:
+    name: type-check
+    if: ${{ vars.SDLC_GATE_SERVER == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          forks-token: ${{ secrets.FORKS_READ_TOKEN }}
+      - name: Type-check (tsc strict)
+        run: pnpm -r exec tsc --noEmit
+
+  test-server:
+    name: test-server
+    if: ${{ vars.SDLC_GATE_SERVER == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          forks-token: ${{ secrets.FORKS_READ_TOKEN }}
+      - name: Test with coverage (80% lines minimum)
+        run: pnpm -r exec vitest run --coverage --coverage.thresholds.lines=80
+
+  ktlint:
+    name: ktlint
+    if: ${{ vars.SDLC_GATE_APP == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: java
+          cache: true
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Kotlin format (ktlint)
+        run: ./gradlew -p app ktlintCheck
+
+  detekt:
+    name: detekt
+    if: ${{ vars.SDLC_GATE_APP == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: java
+          cache: true
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Kotlin lint (detekt)
+        run: ./gradlew -p app detekt
+
+  app-build:
+    name: app-build
+    if: ${{ vars.SDLC_GATE_APP == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: java
+          cache: true
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Build the Android debug app
+        run: ./gradlew -p app assembleDebug
+
+  commitlint:
+    name: commitlint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Lint commit messages (conventional)
+        uses: wagoid/commitlint-github-action@v6
+        with:
+          configFile: commitlint.config.mjs
+
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Scan for secrets (gitleaks)
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  osv-scanner:
+    name: osv-scanner
+    if: ${{ vars.SDLC_GATE_NODE == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: osv-scanner
+          cache: true
+      - name: Scan dependencies (fail on high or critical)
+        run: |
+          set +e
+          osv-scanner scan source --recursive --format json --output-file osv.json .
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+            echo "::error::osv-scanner failed with exit code $status"
+            exit "$status"
+          fi
+          high=$(jq '[.results[]?.packages[]?.groups[]? | (.max_severity // "0" | tonumber? // 0) | select(. >= 7.0)] | length' osv.json)
+          echo "Vulnerability groups with severity 7.0 or higher: $high"
+          if [ "$high" -gt 0 ]; then
+            osv-scanner scan source --recursive . || true
+            echo "::error::$high high or critical vulnerability groups found"
+            exit 1
+          fi
+
+  license-check:
+    name: license-check
+    if: ${{ vars.SDLC_GATE_NODE == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: osv-scanner
+          cache: true
+      - name: Enforce the license allowlist
+        run: osv-scanner scan source --recursive --licenses="MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0" .
+
+  dry-run:
+    name: dry-run
+    if: ${{ vars.SDLC_GATE_SERVER == 'true' }}
+    needs: [biome, type-check, test-server]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          forks-token: ${{ secrets.FORKS_READ_TOKEN }}
+      # No deploy credentials on PRs: the dry-run builds the bundle only.
+      # The diff against the live test cell runs in release-server.yml.
+      - name: Publish dry-run
+        run: mise run deploy:dry-run

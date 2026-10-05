@@ -1,0 +1,75 @@
+# Created by wf ship-plan build — plan v1, 2026-10-05
+# Single source for tool versions (local, CI, VPS, home Mac) and project tasks.
+# Bootstrap a new checkout: mise install && mise run setup
+
+[tools]
+node = "24"
+pnpm = "10"
+java = "temurin-21"
+lefthook = "2"
+gitleaks = "8"
+osv-scanner = "2"
+
+[tasks.setup]
+description = "Install dependencies and the git hooks"
+run = ["pnpm install", "lefthook install"]
+
+[tasks.check]
+description = "Format, lint, and type-check the TypeScript code"
+run = ["pnpm biome ci .", "pnpm -r exec tsc --noEmit"]
+
+[tasks."check:app"]
+description = "Lint the Kotlin app (ktlint + detekt)"
+run = "./gradlew -p app ktlintCheck detekt"
+run_windows = "gradlew.bat -p app ktlintCheck detekt"
+
+[tasks.test]
+description = "Run the server and extension tests with coverage (80% lines minimum)"
+run = "pnpm -r exec vitest run --coverage --coverage.thresholds.lines=80"
+
+[tasks.build]
+description = "Build the server bundle"
+run = "pnpm -r run build"
+
+# The tasks below are stubs. Each one fails with a clear message until the
+# work packet named in the message replaces it with a real implementation.
+
+[tasks."test:conformance"]
+description = "Run the pi-durable storage conformance suite against the cell storage adapter"
+run = "node -e \"console.error('test:conformance arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+
+[tasks."deploy:dry-run"]
+description = "Build the server bundle and show what a deploy would change"
+run = "node -e \"console.error('deploy:dry-run arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+
+[tasks.deploy]
+description = "Deploy a tag to an environment over the private network"
+run = "node -e \"console.error('deploy arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+
+[tasks.snapshot]
+description = "Confirm a fresh off-provider bucket snapshot of every cell in an environment"
+run = "node -e \"console.error('snapshot arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+
+[tasks."check:cells"]
+description = "Check that every cell in an environment is up on a version"
+run = "node -e \"console.error('check:cells arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+
+[tasks."check:alarms"]
+description = "Check that every cell has its next alarm at or before its earliest routine timer"
+run = "node -e \"console.error('check:alarms arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+
+[tasks."check:heartbeats"]
+description = "Check heartbeat freshness for every cell and routine since the deploy"
+run = "node -e \"console.error('check:heartbeats arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+
+[tasks."check:app-builds"]
+description = "Check the processing state in Play internal testing and TestFlight"
+run = "node -e \"console.error('check:app-builds arrives with the access-and-app packet'); process.exit(1)\""
+
+[tasks."app:build-ios"]
+description = "Build an unsigned iOS archive"
+run = "node -e \"console.error('app:build-ios arrives with the access-and-app packet'); process.exit(1)\""
+
+[tasks."app:sign"]
+description = "Sign the Android bundle and export the signed iOS build"
+run = "node -e \"console.error('app:sign arrives with the access-and-app packet'); process.exit(1)\""

@@ -1,0 +1,42 @@
+# Created by wf ship-plan build — plan v1, 2026-10-05
+name: Poll a post-publish check
+description: Run a check command until it passes or the propagation window closes.
+
+inputs:
+  cmd:
+    description: The check command.
+    required: true
+  min-minutes:
+    description: Minutes to wait before the first attempt.
+    required: false
+    default: "1"
+  max-minutes:
+    description: Minutes after the start of this step when the check fails.
+    required: false
+    default: "15"
+  interval-seconds:
+    description: Seconds between attempts.
+    required: false
+    default: "30"
+
+runs:
+  using: composite
+  steps:
+    - name: Poll the check
+      shell: bash
+      env:
+        CHECK_CMD: ${{ inputs.cmd }}
+        MIN_MINUTES: ${{ inputs.min-minutes }}
+        MAX_MINUTES: ${{ inputs.max-minutes }}
+        INTERVAL: ${{ inputs.interval-seconds }}
+      run: |
+        deadline=$(( SECONDS + MAX_MINUTES * 60 ))
+        sleep $(( MIN_MINUTES * 60 ))
+        until bash -c "$CHECK_CMD"; do
+          if [ "$SECONDS" -ge "$deadline" ]; then
+            echo "::error::Check did not pass within ${MAX_MINUTES} minutes: $CHECK_CMD"
+            exit 1
+          fi
+          sleep "$INTERVAL"
+        done
+        echo "Check passed: $CHECK_CMD"

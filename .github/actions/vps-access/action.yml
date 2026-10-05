@@ -1,0 +1,55 @@
+# Created by wf ship-plan build — plan v1, 2026-10-05
+name: Reach the VPS
+description: Join the private network with an ephemeral node and configure SSH as the restricted deploy user.
+
+inputs:
+  oauth-client-id:
+    description: Private-network OAuth client id.
+    required: true
+  oauth-secret:
+    description: Private-network OAuth client secret.
+    required: true
+  host:
+    description: Private-network address of the VPS.
+    required: true
+  ssh-key:
+    description: Private SSH key of the deploy user.
+    required: true
+  known-hosts:
+    description: Pinned known_hosts line for the VPS.
+    required: true
+  user:
+    description: Restricted deploy user on the VPS.
+    required: false
+    default: deploy
+
+runs:
+  using: composite
+  steps:
+    - name: Join the private network
+      uses: tailscale/github-action@v4
+      with:
+        oauth-client-id: ${{ inputs.oauth-client-id }}
+        oauth-secret: ${{ inputs.oauth-secret }}
+        tags: tag:ci
+
+    - name: Configure SSH for the VPS
+      shell: bash
+      env:
+        SSH_KEY: ${{ inputs.ssh-key }}
+        KNOWN_HOSTS: ${{ inputs.known-hosts }}
+        VPS_HOST: ${{ inputs.host }}
+        VPS_USER: ${{ inputs.user }}
+      run: |
+        install -m 700 -d ~/.ssh
+        printf '%s\n' "$SSH_KEY" > ~/.ssh/secbot_deploy
+        chmod 600 ~/.ssh/secbot_deploy
+        printf '%s\n' "$KNOWN_HOSTS" >> ~/.ssh/known_hosts
+        {
+          echo "Host secbot-vps"
+          echo "  HostName $VPS_HOST"
+          echo "  User $VPS_USER"
+          echo "  IdentityFile ~/.ssh/secbot_deploy"
+          echo "  IdentitiesOnly yes"
+          echo "  StrictHostKeyChecking yes"
+        } >> ~/.ssh/config

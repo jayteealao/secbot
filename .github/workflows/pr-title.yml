@@ -1,0 +1,20 @@
+# Created by wf ship-plan build — plan v1, 2026-10-05
+# Squash merges use the PR title as the commit, and release-please reads it.
+name: PR Title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  pr-title:
+    name: pr-title
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lint the PR title (conventional)
+        uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

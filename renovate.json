@@ -1,0 +1,16 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", ":semanticCommits"],
+  "timezone": "UTC",
+  "schedule": ["before 6am on monday"],
+  "enabledManagers": ["npm", "gradle", "gradle-wrapper", "github-actions", "mise"],
+  "labels": ["deps"],
+  "packageRules": [
+    {
+      "description": "Private pi-durable and celld forks: one PR per fork tag bump; the test cell gates the release",
+      "matchPackageNames": ["/pi-durable/", "/celld/"],
+      "automerge": false,
+      "labels": ["deps", "fork-sync"]
+    }
+  ]
+}

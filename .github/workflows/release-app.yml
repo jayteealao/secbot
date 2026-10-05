@@ -1,0 +1,190 @@
+# Created by wf ship-plan build — plan v1, 2026-10-05
+# App release (ship plan contract mobile-app-store): unsigned builds → one
+# production approval at signing → Play internal testing + TestFlight → SBOM.
+# Signing material lives only in the production environment. iOS builds run on
+# GitHub-hosted macOS, never on a self-hosted runner.
+#
+# Inert until SDLC_GATE_APP_RELEASE is "true" (the app exists, the store accounts
+# and signing material are in place, and the app:* mise tasks are real).
+# Set the repo variable APP_PACKAGE_NAME to the Android application id.
+name: Release (app)
+
+on:
+  push:
+    tags: ["app-v[0-9]*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-app
+  cancel-in-progress: false
+
+jobs:
+  build-android:
+    if: ${{ vars.SDLC_GATE_APP_RELEASE == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: java
+          cache: true
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Build the unsigned Android bundle
+        run: ./gradlew -p app bundleRelease
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-unsigned
+          path: app/androidApp/build/outputs/bundle/release/
+          if-no-files-found: error
+
+  build-ios:
+    if: ${{ vars.SDLC_GATE_APP_RELEASE == 'true' }}
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: node java
+          cache: true
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Build the unsigned iOS archive
+        run: mise run app:build-ios
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ios-unsigned
+          path: build/ios/
+          if-no-files-found: error
+
+  sign:
+    needs: [build-android, build-ios]
+    runs-on: macos-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: node java
+          cache: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: android-unsigned
+          path: build/android/
+      - uses: actions/download-artifact@v8
+        with:
+          name: ios-unsigned
+          path: build/ios/
+      - name: Sign the Android bundle and export the signed iOS build
+        run: mise run app:sign
+        env:
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          IOS_DIST_CERT_P12: ${{ secrets.IOS_DIST_CERT_P12 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: android-signed
+          path: build/signed/android/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ios-signed
+          path: build/signed/ios/
+          if-no-files-found: error
+
+  upload-play-internal:
+    needs: sign
+    runs-on: ubuntu-latest
+    environment: production-rollout
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: android-signed
+          path: build/signed/android/
+      - name: Upload to Play internal testing
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: ${{ vars.APP_PACKAGE_NAME }}
+          releaseFiles: build/signed/android/*.aab
+          track: internal
+          status: completed
+
+  upload-testflight:
+    needs: sign
+    runs-on: macos-latest
+    environment: production-rollout
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ios-signed
+          path: build/signed/ios/
+      - name: Upload to TestFlight
+        uses: apple-actions/upload-testflight-build@v5
+        with:
+          app-path: build/signed/ios/Secbot.ipa
+          app-type: ios
+          issuer-id: ${{ secrets.ASC_ISSUER_ID }}
+          api-key-id: ${{ secrets.ASC_KEY_ID }}
+          api-private-key: ${{ secrets.ASC_PRIVATE_KEY }}
+
+  verify-app-builds:
+    needs: [upload-play-internal, upload-testflight]
+    runs-on: ubuntu-latest
+    environment: production-rollout
+    env:
+      PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+      ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          install: "false"
+      - name: Check that both test tracks processed the build
+        uses: ./.github/actions/poll-check
+        with:
+          cmd: mise run check:app-builds -- --version ${{ github.ref_name }}
+          max-minutes: "60"
+          interval-seconds: "60"
+
+  sbom:
+    needs: verify-app-builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Generate the SPDX SBOM for the app
+        uses: anchore/sbom-action@v0
+        with:
+          path: app
+          format: spdx-json
+          output-file: secbot-${{ github.ref_name }}.spdx.json
+          upload-artifact: false
+      - uses: actions/upload-artifact@v7
+        with:
+          name: app-sbom
+          path: secbot-${{ github.ref_name }}.spdx.json
+
+  github-release:
+    needs: sbom
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: app-sbom
+      # release-please already created the release for this tag; this adds the SBOM.
+      - name: Attach the SBOM to the release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: secbot-${{ github.ref_name }}.spdx.json
+          fail_on_unmatched_files: true

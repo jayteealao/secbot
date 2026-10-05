@@ -1,0 +1,5 @@
+# Created by wf ship-plan build — plan v1, 2026-10-05
+# Server and pi-durable extension packages live under packages/ (from wave 1).
+# The Compose Multiplatform app under app/ is a Gradle project, not a workspace package.
+packages:
+  - "packages/*"

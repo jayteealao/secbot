@@ -1,0 +1,23 @@
+# Created by wf ship-plan build — plan v1, 2026-10-05
+# Install once per checkout: mise run setup (runs lefthook install).
+
+pre-commit:
+  commands:
+    gitleaks:
+      run: gitleaks git --staged --redact --no-banner
+    biome:
+      glob: "*.{js,jsx,ts,tsx,mjs,cjs,json,jsonc,css}"
+      run: pnpm biome check --staged --no-errors-on-unmatched --files-ignore-unknown=true
+    ktlint:
+      glob: "app/**/*.{kt,kts}"
+      run: ./gradlew -p app ktlintCheck
+
+commit-msg:
+  commands:
+    commitlint:
+      run: pnpm commitlint --edit {1}
+
+pre-push:
+  commands:
+    vitest:
+      run: pnpm -r exec vitest run --changed
