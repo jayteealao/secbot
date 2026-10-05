@@ -1,0 +1,27 @@
+{
+  "artifactTracking": "ignored",
+  "campaign": {
+    "output": {
+      "build-cmd": "mise run build",
+      "artifacts": "the server bundle of each package (pnpm -r run build)",
+      "try": "open the app against the test cell, which runs the wave tag, and talk to the lead"
+    },
+    "width": 3,
+    "isolation": {
+      "parallel": true,
+      "port-env": {
+        "PORT": 3000
+      },
+      "build-dirs": [
+        "node_modules",
+        "dist",
+        "app/build"
+      ],
+      "heavy-suites": [
+        "mise run test:conformance",
+        "./gradlew -p app"
+      ],
+      "min-free-gb": 20
+    }
+  }
+}

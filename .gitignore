@@ -1,0 +1,6 @@
+.scratch/
+
+# sdlc-workflow artifacts — policy: ignored (.ai/sdlc-config.json artifactTracking)
+.ai/*
+!.ai/ship-plan.md
+!.ai/sdlc-config.json
