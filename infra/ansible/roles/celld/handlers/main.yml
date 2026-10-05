@@ -1,0 +1,12 @@
+- name: Reload systemd
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Restart celld instances
+  ansible.builtin.systemd_service:
+    name: "celld@{{ item.name }}"
+    state: restarted
+  loop: "{{ celld_instances }}"
+  loop_control:
+    label: "celld@{{ item.name }}"
+  when: celld_replication_confirmed | bool

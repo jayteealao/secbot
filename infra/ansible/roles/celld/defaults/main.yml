@@ -1,0 +1,30 @@
+# celld release pin. Renovate's fork-sync group bumps celld_version; update the digests with it
+# (GitHub release asset digests for denoland/celld v0.6.1, read 2026-10-05).
+celld_version: "0.6.1"
+celld_sha256:
+  x86_64: "79a8253cff5d4e8a4a9f7a2611e393390f7fe9025f00e88467875b007c44866b"
+  aarch64: "ab99053bcced225bb5b54f428792260c905b782b8a61947362a12ce3a9c22def"
+# celld deploy runs esbuild from PATH (celld README); same version as pnpm-lock.yaml
+# (npm registry integrity of @esbuild/linux-* 0.28.2, as hex).
+esbuild_version: "0.28.2"
+esbuild_sha512:
+  x86_64: "e314d9af5154992a105b85c85a68addedcd0ad44d933e3773f45d5f3144e298179d177c8ef178ef74fb56d9bcdc3122e7d0f610d0551247e588603d517c03f1d"
+  aarch64: "a56e000b43f78adf1cedda3d315338a79d45cc7cdd33f4d9adeaeeae045c1c9d964dad55435088ab5f319dc7e9049c38a23922659aca5b6c8805604ff768fa52"
+
+celld_worker_port: 8787
+celld_internal_port: 8081
+# The private-network interface; the worker listens on its address only.
+celld_private_interface: tailscale0
+
+# Instances: test now; the production rollout adds prod (its own bucket and group secbot-prod).
+celld_instances:
+  - name: test
+    env: test-cell
+    bucket_env: SECBOT_TEST_BUCKET
+    access_key_env: SECBOT_TEST_R2_ACCESS_KEY_ID
+    secret_key_env: SECBOT_TEST_R2_SECRET_ACCESS_KEY
+    heartbeat_env: SECBOT_TEST_HEARTBEAT_URL
+
+# Replication starts only after the bucket smoke test passed (mise run smoke:r2 and the
+# celld diagnose task). Pass -e celld_replication_confirmed=true on that run.
+celld_replication_confirmed: false

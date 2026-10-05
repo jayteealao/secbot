@@ -1,0 +1,10 @@
+// Test-cell deployment: the person-cell routes plus ConformanceCell. Never deployed to a person cell.
+{
+  "name": "secbot",
+  "main": "index.js",
+  "compatibility_date": "2026-10-01",
+  "durable_objects": {
+    "bindings": [{ "name": "CONFORMANCE", "class_name": "ConformanceCell" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ConformanceCell"] }]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "@secbot/cell-storage",
+  "version": "0.0.0",
+  "private": true,
+  "description": "pi-durable SqliteDatabase driver over celld Durable Object storage.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.0.3",
+    "@earendil-works/pi-durable": "1.0.3"
+  }
+}

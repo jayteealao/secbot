@@ -10,6 +10,10 @@ java = "temurin-21"
 lefthook = "2"
 gitleaks = "8"
 osv-scanner = "2"
+# Infrastructure code (infra/). Ansible runs from Linux or macOS (WSL2 on Windows).
+opentofu = "1"
+"pipx:ansible-core" = "2"
+"pipx:ansible-lint" = "latest"
 
 [tasks.setup]
 description = "Install dependencies and the git hooks"
@@ -25,12 +29,51 @@ run = "./gradlew -p app ktlintCheck detekt"
 run_windows = "gradlew.bat -p app ktlintCheck detekt"
 
 [tasks.test]
-description = "Run the server and extension tests with coverage (80% lines minimum)"
-run = "pnpm -r exec vitest run --coverage --coverage.thresholds.lines=80"
+description = "Run the server and extension tests with coverage (80% lines minimum), then the task-script tests"
+run = [
+  "pnpm -r exec vitest run --coverage --coverage.thresholds.lines=80",
+  "node --test scripts/*.test.mjs",
+]
 
 [tasks.build]
-description = "Build the server bundle"
-run = "pnpm -r run build"
+description = "Type-check the packages and build the server bundle into dist/ (worker, test-cell worker, VPS tool, manifest)"
+run = ["pnpm -r run build", "node scripts/build-bundle.mjs"]
+
+[tasks."check:identifiers"]
+description = "Fail when a tracked file holds an IP address, private-network hostname, account id, ping URL, or private key (--staged for the staged files)"
+run = "node scripts/check-identifiers.mjs"
+
+[tasks."infra:plan"]
+description = "OpenTofu plan for the R2 buckets, the private-network rules, and the heartbeat (reads TF_VAR_* from your shell)"
+dir = "infra/tofu"
+run = ["tofu init -input=false", "tofu plan -input=false -out=secbot.tfplan"]
+
+[tasks."infra:apply"]
+description = "Apply the reviewed OpenTofu plan (owner only, after reading infra:plan)"
+dir = "infra/tofu"
+run = "tofu apply -input=false secbot.tfplan"
+
+[tasks."infra:check"]
+description = "Static checks of infra/: tofu fmt and validate, ansible-lint, playbook syntax"
+run = [
+  "tofu -chdir=infra/tofu fmt -check -recursive",
+  "tofu -chdir=infra/tofu init -backend=false -input=false",
+  "tofu -chdir=infra/tofu validate",
+  "cd infra/ansible && ansible-lint && ansible-playbook --syntax-check site.yml",
+]
+
+[tasks."host:setup"]
+description = "Run the Ansible host setup on the VPS (SECBOT_VPS_SSH names your SSH alias); prints the diff"
+dir = "infra/ansible"
+run = ["ansible-galaxy collection install -r requirements.yml", "ansible-playbook site.yml --diff"]
+
+[tasks."smoke:r2"]
+description = "Prove the bucket refuses a second If-None-Match: * create with 412 (run before replication is turned on)"
+run = "node scripts/r2-smoke.mjs"
+
+[tasks."probe:ports"]
+description = "Probe the celld ports at SECBOT_PROBE_HOST; every port must refuse or drop the connection"
+run = "node scripts/probe-ports.mjs"
 
 [tasks."audit:deps"]
 description = "Dependency audit: fail on CVSS >= 7.0, unscored findings, or MAL-* ids unless osv-scanner.toml lists them with a reason and an expiry"
@@ -40,8 +83,8 @@ run = "node scripts/audit-deps.mjs"
 description = "License gate: fail on any dependency license outside the plan's allowlist"
 run = "node scripts/check-licenses.mjs"
 
-# The tasks below are stubs. Each one fails with a clear message until the
-# work packet named in the message replaces it with a real implementation.
+# Cell tasks. test:conformance, deploy:dry-run, stage, and deploy are real; the tasks after them
+# are stubs that fail with a clear message until the production pipeline replaces them.
 #
 # VPS-side contract for the real tasks (ship plan v2, Blocks A, C, and E):
 # - Two VPS users. deploy-test has a forced command that only stages bundles and deploys
@@ -55,20 +98,20 @@ run = "node scripts/check-licenses.mjs"
 # - The release store keeps the last 5 bundles and mirrors each one to the off-provider bucket.
 
 [tasks."test:conformance"]
-description = "Run the pi-durable storage conformance suite against the cell storage adapter"
-run = "node -e \"console.error('test:conformance arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+description = "Run the pi-durable storage conformance suite inside a real celld cell (--target test-cell|local, --long-transaction)"
+run = "node scripts/conformance.mjs"
 
 [tasks."deploy:dry-run"]
-description = "Build the server bundle and show what a deploy would change"
-run = "node -e \"console.error('deploy:dry-run arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+description = "Build the server bundle and print its manifest; needs no credentials (deploy prints the diff against the live cell)"
+run = ["node scripts/build-bundle.mjs", "node scripts/vps.mjs dry-run"]
 
 [tasks.stage]
-description = "Stage a server bundle in the VPS release store by tag and SHA-256"
-run = "node -e \"console.error('stage arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+description = "Stage a server bundle in the VPS release store by tag and SHA-256 (--version --sha256 --file)"
+run = "node scripts/vps.mjs stage"
 
 [tasks.deploy]
-description = "Deploy a staged tag to some or all cells of an environment; holds the VPS lock and refuses a downgrade past a contract step"
-run = "node -e \"console.error('deploy arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+description = "Deploy a staged tag to an environment (--env test-cell|production --version [--sha256]); holds the VPS lock and refuses a downgrade past a contract step"
+run = "node scripts/vps.mjs deploy"
 
 [tasks.snapshot]
 description = "Snapshot every cell of an environment to the off-provider bucket under a run-pinned id (pre-<tag>-<run-id>)"

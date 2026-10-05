@@ -1,0 +1,6 @@
+// Person-cell deployment (owner, second person, household). Never binds the conformance cell.
+{
+  "name": "secbot",
+  "main": "index.js",
+  "compatibility_date": "2026-10-01"
+}

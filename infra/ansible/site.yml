@@ -1,0 +1,22 @@
+# Host setup for the existing VPS: celld, the deploy users, and the firewall rules for the
+# celld ports. It installs and changes nothing else; a second run reports changed=0.
+#
+#   SECBOT_VPS_SSH=<your ssh alias> mise run host:setup
+#
+# Secrets come from the owner's shell (see roles/celld/defaults/main.yml) and land only in
+# root-owned files on the VPS.
+- name: Set up celld on the VPS
+  hosts: secbot_vps
+  gather_facts: true
+  pre_tasks:
+    - name: Refuse to run without the SSH alias
+      ansible.builtin.assert:
+        that: lookup('ansible.builtin.env', 'SECBOT_VPS_SSH') | length > 0
+        fail_msg: "Set SECBOT_VPS_SSH to the SSH config alias of the VPS."
+      delegate_to: localhost
+      become: false
+      run_once: true
+  roles:
+    - role: deploy_users
+    - role: celld
+    - role: firewall

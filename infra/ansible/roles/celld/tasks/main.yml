@@ -1,0 +1,161 @@
+- name: Check that every value the instances need is in the environment
+  ansible.builtin.assert:
+    that: lookup('ansible.builtin.env', item) | length > 0
+    fail_msg: "Set {{ item }} in your shell (see the infra/tofu outputs)."
+    quiet: true
+  loop: >-
+    {{ ['SECBOT_R2_ENDPOINT']
+       + (celld_instances | map(attribute='bucket_env') | list)
+       + (celld_instances | map(attribute='access_key_env') | list)
+       + (celld_instances | map(attribute='secret_key_env') | list)
+       + (celld_instances | map(attribute='heartbeat_env') | list) }}
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Read the private-network address of the VPS
+  ansible.builtin.set_fact:
+    celld_private_address: "{{ hostvars[inventory_hostname]['ansible_' + celld_private_interface]['ipv4']['address'] }}"
+
+- name: Create the celld system user
+  ansible.builtin.user:
+    name: celld
+    system: true
+    shell: /usr/sbin/nologin
+    home: /var/lib/celld
+    create_home: false
+
+- name: Create the download cache
+  ansible.builtin.file:
+    path: /var/cache/secbot
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download the pinned celld release
+  ansible.builtin.get_url:
+    url: "https://github.com/denoland/celld/releases/download/v{{ celld_version }}/celld-{{ ansible_architecture }}-unknown-linux-gnu.gz"
+    dest: "/var/cache/secbot/celld-{{ celld_version }}-{{ ansible_architecture }}.gz"
+    checksum: "sha256:{{ celld_sha256[ansible_architecture] }}"
+    mode: "0644"
+  register: celld_download
+
+- name: Install the celld binary
+  ansible.builtin.shell: |
+    set -o pipefail
+    gunzip -c "{{ celld_download.dest }}" > /usr/local/bin/celld.new
+    chmod 0755 /usr/local/bin/celld.new
+    mv -f /usr/local/bin/celld.new /usr/local/bin/celld
+  args:
+    executable: /bin/bash
+    creates: "{{ omit if celld_download.changed else '/usr/local/bin/celld' }}"
+  changed_when: true
+  notify: Restart celld instances
+
+- name: Download the pinned esbuild binary
+  ansible.builtin.get_url:
+    url: "https://registry.npmjs.org/@esbuild/linux-{{ esbuild_arch }}/-/linux-{{ esbuild_arch }}-{{ esbuild_version }}.tgz"
+    dest: "/var/cache/secbot/esbuild-{{ esbuild_version }}-{{ ansible_architecture }}.tgz"
+    checksum: "sha512:{{ esbuild_sha512[ansible_architecture] }}"
+    mode: "0644"
+  vars:
+    esbuild_arch: "{{ 'x64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+  register: esbuild_download
+
+- name: Install the esbuild binary
+  ansible.builtin.shell: |
+    set -o pipefail
+    tar -xzOf "{{ esbuild_download.dest }}" package/bin/esbuild > /usr/local/bin/esbuild.new
+    chmod 0755 /usr/local/bin/esbuild.new
+    mv -f /usr/local/bin/esbuild.new /usr/local/bin/esbuild
+  args:
+    executable: /bin/bash
+    creates: "{{ omit if esbuild_download.changed else '/usr/local/bin/esbuild' }}"
+  changed_when: true
+
+- name: Create the secbot configuration directory
+  ansible.builtin.file:
+    path: /etc/secbot
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Write each instance's environment file (root and celld only)
+  ansible.builtin.template:
+    src: celld.env.j2
+    dest: "/etc/secbot/celld-{{ item.name }}.env"
+    owner: root
+    group: celld
+    mode: "0640"
+  loop: "{{ celld_instances }}"
+  loop_control:
+    label: "celld-{{ item.name }}.env"
+  no_log: true
+  notify: Restart celld instances
+
+- name: Write each environment's release-tool file (readable by its deploy users only)
+  ansible.builtin.template:
+    src: celld.env.j2
+    dest: "/etc/secbot/{{ item.env }}.env"
+    owner: root
+    group: "secbot-{{ item.name }}"
+    mode: "0640"
+  loop: "{{ celld_instances }}"
+  loop_control:
+    label: "{{ item.env }}.env"
+  no_log: true
+
+- name: Install the celld unit template
+  ansible.builtin.template:
+    src: celld@.service.j2
+    dest: /etc/systemd/system/celld@.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart celld instances
+
+- name: Check each bucket's conditional writes (celld diagnose)
+  ansible.builtin.shell: |
+    set -o pipefail
+    set -a; . "/etc/secbot/celld-{{ item.name }}.env"; set +a
+    /usr/local/bin/celld diagnose --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto
+  args:
+    executable: /bin/bash
+  loop: "{{ celld_instances }}"
+  loop_control:
+    label: "celld diagnose ({{ item.name }})"
+  register: celld_diagnose
+  changed_when: false
+
+- name: Stop here until the bucket smoke test has passed
+  ansible.builtin.debug:
+    msg: >-
+      celld is installed but not started. Run mise run smoke:r2 against each bucket; when it
+      passes, run host:setup again with -e celld_replication_confirmed=true to start celld.
+  when: not (celld_replication_confirmed | bool)
+
+- name: Record the smoke test pass that the release tool checks
+  ansible.builtin.copy:
+    dest: "/var/lib/secbot/smoke-{{ item.name }}.ok"
+    content: "celld diagnose and smoke:r2 passed before replication was turned on\n"
+    owner: root
+    group: secbot
+    mode: "0644"
+  loop: "{{ celld_instances }}"
+  loop_control:
+    label: "smoke-{{ item.name }}.ok"
+  when: celld_replication_confirmed | bool
+
+- name: Enable and start each instance (replication on)
+  ansible.builtin.systemd_service:
+    name: "celld@{{ item.name }}"
+    enabled: true
+    state: started
+  loop: "{{ celld_instances }}"
+  loop_control:
+    label: "celld@{{ item.name }}"
+  when: celld_replication_confirmed | bool

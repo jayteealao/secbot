@@ -1,0 +1,21 @@
+{
+  "name": "@secbot/cell-worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The celld worker: health route and the in-cell storage conformance run.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./conformance": "./src/conformance-entry.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.0.3",
+    "@earendil-works/pi-durable": "1.0.3",
+    "@secbot/cell-storage": "workspace:*"
+  }
+}

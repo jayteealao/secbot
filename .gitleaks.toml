@@ -1,0 +1,20 @@
+# gitleaks: the default rules plus the identifiers this project must never commit.
+# scripts/check-identifiers.mjs covers addresses and account ids, which regex rules here
+# would flag too broadly.
+title = "secbot"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "betterstack-heartbeat-url"
+description = "Better Stack heartbeat URL (anyone holding it can mark a cell healthy)"
+regex = '''(?i)better(?:stack|uptime)\.com/api/v\d+/heartbeat/[A-Za-z0-9]+'''
+keywords = ["heartbeat"]
+
+[[rules]]
+id = "tailnet-hostname"
+description = "Private-network (Tailscale) hostname"
+regex = '''(?i)\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.ts\.net\b'''
+keywords = ["ts.net"]
+

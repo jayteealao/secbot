@@ -1,0 +1,33 @@
+# Managed by Ansible (infra/ansible/roles/celld). One instance per environment: celld@test, celld@prod.
+[Unit]
+Description=celld cells (%i)
+After=network-online.target tailscaled.service
+Wants=network-online.target
+# Unlimited restarts: never give up on the cells.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=celld
+Group=celld
+EnvironmentFile=/etc/secbot/celld-%i.env
+StateDirectory=celld/%i
+WorkingDirectory=/var/lib/celld/%i
+Environment=CELLD_WATCH=/var/lib/celld/%i
+# The worker listens on the private-network address only; the internal listener stays on loopback.
+ExecStart=/usr/local/bin/celld \
+  --bucket ${CELLD_BUCKET} \
+  --endpoint ${CELLD_ENDPOINT} \
+  --region auto \
+  --listen ${CELLD_LISTEN} \
+  --internal-listen 127.0.0.1:${CELLD_INTERNAL_PORT} \
+  --advertise 127.0.0.1:${CELLD_INTERNAL_PORT}
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,76 @@
+# Two restricted users. Their SSH keys can run only secbot-release (forced command):
+# deploy-test stages bundles and deploys the test cell; deploy also reaches production.
+# Public keys come from the owner's shell: SECBOT_DEPLOY_TEST_PUBKEY, SECBOT_DEPLOY_PUBKEY.
+- name: Check that both deploy public keys are in the environment
+  ansible.builtin.assert:
+    that: lookup('ansible.builtin.env', item) | length > 0
+    fail_msg: "Set {{ item }} in your shell (the public half of the CI deploy key)."
+    quiet: true
+  loop:
+    - SECBOT_DEPLOY_TEST_PUBKEY
+    - SECBOT_DEPLOY_PUBKEY
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Create the release groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+  loop:
+    - secbot
+    - secbot-test
+
+- name: Create the deploy users
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    groups: "{{ item.groups }}"
+    shell: /bin/bash
+    password: "!"
+    create_home: true
+  loop:
+    - { name: deploy-test, groups: [secbot, secbot-test] }
+    - { name: deploy, groups: [secbot, secbot-test] }
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create the release state directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: secbot
+    mode: "2770"
+  loop:
+    - /var/lib/secbot
+    - /var/lib/secbot/releases
+    - /var/lib/secbot/deploy
+
+- name: Create the VPS deploy lock file
+  ansible.builtin.copy:
+    dest: /var/lib/secbot/deploy.lock
+    content: ""
+    owner: root
+    group: secbot
+    mode: "0660"
+    force: false
+
+- name: Install the release tool
+  ansible.builtin.copy:
+    src: secbot-release
+    dest: /usr/local/bin/secbot-release
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Allow each deploy key to run only the release tool
+  ansible.posix.authorized_key:
+    user: "{{ item.user }}"
+    key: "{{ lookup('ansible.builtin.env', item.key_env) }}"
+    key_options: 'command="/usr/local/bin/secbot-release {{ item.user }}",restrict'
+    exclusive: true
+  loop:
+    - { user: deploy-test, key_env: SECBOT_DEPLOY_TEST_PUBKEY }
+    - { user: deploy, key_env: SECBOT_DEPLOY_PUBKEY }
+  loop_control:
+    label: "{{ item.user }}"

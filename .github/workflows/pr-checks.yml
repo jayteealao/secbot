@@ -124,6 +124,9 @@ jobs:
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Addresses, private-network hostnames, account ids, and ping URLs (no dependencies needed).
+      - name: Scan for identifiers
+        run: node scripts/check-identifiers.mjs
 
   osv-scanner:
     name: osv-scanner

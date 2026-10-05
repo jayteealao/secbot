@@ -1,0 +1,35 @@
+# Firewall rules for the celld ports only. The role never resets ufw, never enables or disables
+# it, and never touches the SSH rules or any other rule: the VPS runs other software.
+# Binding already keeps the ports private (worker on the private-network address, internal
+# listener on loopback); these rules are the second layer.
+- name: Admit the celld worker port on the private-network interface
+  community.general.ufw:
+    rule: allow
+    direction: in
+    interface_in: "{{ celld_private_interface }}"
+    port: "{{ celld_worker_port | string }}"
+    proto: tcp
+    comment: secbot celld worker (private network)
+
+- name: Refuse the celld ports on every other interface
+  community.general.ufw:
+    rule: deny
+    direction: in
+    port: "{{ item | string }}"
+    proto: tcp
+    comment: secbot celld (not public)
+  loop:
+    - "{{ celld_worker_port }}"
+    - "{{ celld_internal_port }}"
+
+- name: Read whether ufw is active
+  ansible.builtin.command: ufw status
+  register: ufw_status
+  changed_when: false
+
+- name: Warn when ufw is inactive (the rules above wait until the owner enables it)
+  ansible.builtin.debug:
+    msg: >-
+      ufw is inactive, so the rules above are not enforced yet. The listeners are still private
+      by binding. Enable ufw yourself after checking your SSH rule; this play never does.
+  when: "'Status: active' not in ufw_status.stdout"

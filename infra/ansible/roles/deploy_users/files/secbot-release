@@ -1,0 +1,172 @@
+#!/usr/bin/env bash
+# secbot-release: the only command the deploy and deploy-test users can run over SSH.
+# authorized_keys forces it: command="/usr/local/bin/secbot-release <user>",restrict
+# The client's request arrives in SSH_ORIGINAL_COMMAND and is parsed here, never run by a shell.
+#
+#   stage       --version V --sha256 S          bundle on stdin; kept only if its SHA-256 is S
+#   deploy      --env E --version V [--sha256 S] deploy a staged bundle to an environment
+#   conformance --version V [--long-transaction] deploy V to the test cell, run the in-cell suite
+#   manifest    --env E                          print the deployed manifest
+#
+# Every command that changes the release store or a cell holds one lock for its whole run, so a
+# release, a rollback, a restore, and a development test run never overlap.
+set -euo pipefail
+umask 027
+
+caller="${1:-}"
+STATE=/var/lib/secbot
+RELEASES="$STATE/releases"
+DEPLOYS="$STATE/deploy"
+LOCK="$STATE/deploy.lock"
+KEEP=5
+
+die() { echo "secbot-release: $*" >&2; exit 1; }
+
+case "$caller" in
+  deploy-test) allowed_envs="test-cell" ;;
+  deploy) allowed_envs="test-cell production" ;;
+  *) die "unknown caller '$caller'" ;;
+esac
+
+read -r -a argv <<<"${SSH_ORIGINAL_COMMAND:-}"
+[ "${#argv[@]}" -gt 0 ] || die "no command; expected stage, deploy, conformance, or manifest"
+command="${argv[0]}"
+version="" sha256="" env="" long_transaction=0
+i=1
+while [ "$i" -lt "${#argv[@]}" ]; do
+  flag="${argv[$i]}"
+  value="${argv[$((i + 1))]:-}"
+  case "$flag" in
+    --version) version="$value"; i=$((i + 2)) ;;
+    --sha256) sha256="$value"; i=$((i + 2)) ;;
+    --env) env="$value"; i=$((i + 2)) ;;
+    --long-transaction) long_transaction=1; i=$((i + 1)) ;;
+    --cells) die "deploy --cells arrives with the production rollout; this release deploys the whole environment" ;;
+    *) die "unknown argument '$flag'" ;;
+  esac
+done
+
+[ -z "$version" ] || [[ "$version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || die "bad version '$version'"
+[ -z "$sha256" ] || [[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || die "bad sha256"
+[ -z "$env" ] || [[ " $allowed_envs " == *" $env "* ]] || die "$caller may not use environment '$env'"
+
+with_lock() {
+  exec 9<"$LOCK"
+  flock -w 1800 9 || die "the VPS deploy lock is busy"
+}
+
+env_file() {
+  local file="/etc/secbot/$1.env"
+  [ -r "$file" ] || die "environment '$1' is not set up on this host ($file is missing)"
+  # shellcheck disable=SC1090 # written by Ansible from the owner's environment
+  set -a; . "$file"; set +a
+  : "${CELLD_BUCKET:?}" "${CELLD_ENDPOINT:?}" "${CELLD_LISTEN:?}"
+}
+
+unit_for() { case "$1" in test-cell) echo "celld@test" ;; production) echo "celld@prod" ;; esac; }
+
+staged_bundle() {
+  local file="$RELEASES/$1.tar.gz"
+  [ -f "$file" ] || die "version $1 is not staged"
+  local recorded actual
+  recorded="$(cat "$RELEASES/$1.sha256")"
+  actual="$(sha256sum "$file" | cut -d' ' -f1)"
+  [ "$actual" = "$recorded" ] || die "staged bundle $1 no longer matches its recorded SHA-256"
+  if [ -n "$sha256" ] && [ "$sha256" != "$recorded" ]; then
+    die "SHA-256 mismatch for $1: requested $sha256, staged $recorded"
+  fi
+  echo "$file"
+}
+
+contract_step() { grep -o '"contractStep": *[0-9]*' "$1" | grep -o '[0-9]*$' || echo 0; }
+
+do_stage() {
+  [ -n "$version" ] && [ -n "$sha256" ] || die "stage needs --version and --sha256"
+  with_lock
+  local partial="$RELEASES/.$version.partial"
+  cat >"$partial"
+  local actual
+  actual="$(sha256sum "$partial" | cut -d' ' -f1)"
+  if [ "$actual" != "$sha256" ]; then
+    rm -f "$partial"
+    die "SHA-256 mismatch: received $actual, expected $sha256"
+  fi
+  mv -f "$partial" "$RELEASES/$version.tar.gz"
+  echo "$sha256" >"$RELEASES/$version.sha256"
+  # Keep the newest $KEEP bundles; a deployed version is never removed.
+  local deployed
+  deployed="$(readlink -f "$DEPLOYS"/*/current 2>/dev/null | xargs -r -n1 basename || true)"
+  ls -1t "$RELEASES"/*.tar.gz | tail -n +$((KEEP + 1)) | while read -r old; do
+    local name
+    name="$(basename "$old" .tar.gz)"
+    grep -qx "$name" <<<"$deployed" || rm -f "$old" "$RELEASES/$name.sha256"
+  done
+  echo "staged $version ($sha256)"
+}
+
+deploy_to() {
+  local target_env="$1" bundle="$2"
+  env_file "$target_env"
+  systemctl is-active --quiet "$(unit_for "$target_env")" ||
+    die "$(unit_for "$target_env") is not running; host setup enables it after the bucket smoke test passes"
+  local dir="$DEPLOYS/$target_env/$version"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  tar -xzf "$bundle" -C "$dir"
+  local current="$DEPLOYS/$target_env/current"
+  if [ -e "$current/manifest.json" ]; then
+    local from to
+    from="$(contract_step "$current/manifest.json")"
+    to="$(contract_step "$dir/manifest.json")"
+    [ "$to" -ge "$from" ] || die "refusing a downgrade past contract step $from (bundle $version has step $to)"
+    echo "manifest diff against the deployed bundle:"
+    diff <(grep -o '"path": *"[^"]*"\|"sha256": *"[^"]*"' "$current/manifest.json") \
+      <(grep -o '"path": *"[^"]*"\|"sha256": *"[^"]*"' "$dir/manifest.json") || true
+  else
+    echo "first deploy to $target_env"
+  fi
+  local app="$dir/worker"
+  [ "$target_env" = "test-cell" ] && app="$dir/conformance"
+  celld deploy "$app" --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto
+  ln -sfn "$dir" "$current"
+  echo "deployed $version to $target_env"
+}
+
+do_deploy() {
+  [ -n "$env" ] && [ -n "$version" ] || die "deploy needs --env and --version"
+  with_lock
+  deploy_to "$env" "$(staged_bundle "$version")"
+}
+
+do_conformance() {
+  [ -n "$version" ] || die "conformance needs --version"
+  with_lock
+  env="test-cell"
+  deploy_to test-cell "$(staged_bundle "$version")" >&2
+  local base="http://$CELLD_LISTEN"
+  if [ "$long_transaction" = 1 ]; then
+    local first
+    first="$(curl -sS --max-time 120 -X POST "$base/conformance/long-transaction?ms=31000" || echo '{"error":"the request ended with the cell reset"}')"
+    local marker
+    marker="$(curl -sS --fail --max-time 60 "$base/conformance/marker")"
+    printf '{"longTransaction":%s,"after":%s}\n' "$first" "$marker"
+  else
+    curl -sS --fail --max-time 3600 -X POST "$base/conformance/run"
+    echo
+  fi
+}
+
+do_manifest() {
+  [ -n "$env" ] || die "manifest needs --env"
+  local file="$DEPLOYS/$env/current/manifest.json"
+  [ -f "$file" ] || die "nothing deployed to $env"
+  cat "$file"
+}
+
+case "$command" in
+  stage) do_stage ;;
+  deploy) do_deploy ;;
+  conformance) do_conformance ;;
+  manifest) do_manifest ;;
+  *) die "unknown command '$command'; expected stage, deploy, conformance, or manifest" ;;
+esac
