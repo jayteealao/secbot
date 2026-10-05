@@ -1,8 +1,11 @@
 # Created by wf ship-plan build — plan v1, 2026-10-05
+# Patched by wf ship-plan build — plan v2, 2026-10-05
 # Opens one release PR per component (server ".", app "app"). Merging a release PR
-# creates the tag (v* or app-v*) as the developer GitHub App, which starts the
-# matching release workflow. A tag pushed with GITHUB_TOKEN would not start it.
-# Inert until SDLC_GATE_RELEASE_PLEASE is "true" (the developer App exists).
+# creates the tag (v* or app-v*) as the release GitHub App, which starts the matching
+# release workflow. A tag pushed with GITHUB_TOKEN would not start it.
+# The release App is the only App that the release-tags ruleset lets create tags. Its key
+# lives only in the "release" environment, which only main may use; agents never hold it.
+# Inert until SDLC_GATE_RELEASE_PLEASE is "true" (the release App and its environment exist).
 name: Release Please
 
 on:
@@ -20,13 +23,14 @@ jobs:
   release-please:
     if: ${{ vars.SDLC_GATE_RELEASE_PLEASE == 'true' }}
     runs-on: ubuntu-latest
+    environment: release
     steps:
-      - name: Mint a developer App token
+      - name: Mint a release App token
         id: app-token
         uses: actions/create-github-app-token@v3
         with:
-          app-id: ${{ secrets.DEV_APP_ID }}
-          private-key: ${{ secrets.DEV_APP_PRIVATE_KEY }}
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
       - uses: googleapis/release-please-action@v5
         with:
           token: ${{ steps.app-token.outputs.token }}

@@ -9,6 +9,10 @@ inputs:
   oauth-secret:
     description: Private-network OAuth client secret.
     required: true
+  # Added by wf ship-plan build — plan v2, 2026-10-05
+  network-tag:
+    description: Private-network ACL tag of the ephemeral node; tag:ci-test reaches only the test-cell path, tag:ci-prod is production.
+    required: true
   host:
     description: Private-network address of the VPS.
     required: true
@@ -19,9 +23,8 @@ inputs:
     description: Pinned known_hosts line for the VPS.
     required: true
   user:
-    description: Restricted deploy user on the VPS.
-    required: false
-    default: deploy
+    description: Restricted deploy user on the VPS; deploy-test for the test cell, deploy for production.
+    required: true
 
 runs:
   using: composite
@@ -31,7 +34,7 @@ runs:
       with:
         oauth-client-id: ${{ inputs.oauth-client-id }}
         oauth-secret: ${{ inputs.oauth-secret }}
-        tags: tag:ci
+        tags: ${{ inputs.network-tag }}
 
     - name: Configure SSH for the VPS
       shell: bash

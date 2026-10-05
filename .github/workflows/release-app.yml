@@ -1,8 +1,12 @@
 # Created by wf ship-plan build — plan v1, 2026-10-05
+# Patched by wf ship-plan build — plan v2, 2026-10-05
 # App release (ship plan contract mobile-app-store): unsigned builds → one
-# production approval at signing → Play internal testing + TestFlight → SBOM.
-# Signing material lives only in the production environment. iOS builds run on
-# GitHub-hosted macOS, never on a self-hosted runner.
+# production approval → sign, upload to Play internal testing and TestFlight, and
+# check processing in one job → SBOM.
+# Signing material and store credentials live only in the production environment.
+# GitHub asks for an approval on every job in that environment, so signing, both
+# uploads, and the processing check share one job, and signed builds never become
+# workflow artifacts. iOS builds run on GitHub-hosted macOS, never on a self-hosted runner.
 #
 # Inert until SDLC_GATE_APP_RELEASE is "true" (the app exists, the store accounts
 # and signing material are in place, and the app:* mise tasks are real).
@@ -26,6 +30,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Refuse a tag whose commit is not on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::The tag commit $GITHUB_SHA is not on main"
+            exit 1
+          fi
       - uses: jdx/mise-action@v5
         with:
           install_args: java
@@ -38,12 +51,22 @@ jobs:
           name: android-unsigned
           path: app/androidApp/build/outputs/bundle/release/
           if-no-files-found: error
+          retention-days: 1
 
   build-ios:
     if: ${{ vars.SDLC_GATE_APP_RELEASE == 'true' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Refuse a tag whose commit is not on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::The tag commit $GITHUB_SHA is not on main"
+            exit 1
+          fi
       - uses: jdx/mise-action@v5
         with:
           install_args: node java
@@ -56,8 +79,9 @@ jobs:
           name: ios-unsigned
           path: build/ios/
           if-no-files-found: error
+          retention-days: 1
 
-  sign:
+  sign-and-upload:
     needs: [build-android, build-ios]
     runs-on: macos-latest
     environment: production
@@ -87,26 +111,6 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
-      - uses: actions/upload-artifact@v7
-        with:
-          name: android-signed
-          path: build/signed/android/
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v7
-        with:
-          name: ios-signed
-          path: build/signed/ios/
-          if-no-files-found: error
-
-  upload-play-internal:
-    needs: sign
-    runs-on: ubuntu-latest
-    environment: production-rollout
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: android-signed
-          path: build/signed/android/
       - name: Upload to Play internal testing
         uses: r0adkll/upload-google-play@v1
         with:
@@ -115,16 +119,6 @@ jobs:
           releaseFiles: build/signed/android/*.aab
           track: internal
           status: completed
-
-  upload-testflight:
-    needs: sign
-    runs-on: macos-latest
-    environment: production-rollout
-    steps:
-      - uses: actions/download-artifact@v8
-        with:
-          name: ios-signed
-          path: build/signed/ios/
       - name: Upload to TestFlight
         uses: apple-actions/upload-testflight-build@v5
         with:
@@ -133,30 +127,20 @@ jobs:
           issuer-id: ${{ secrets.ASC_ISSUER_ID }}
           api-key-id: ${{ secrets.ASC_KEY_ID }}
           api-private-key: ${{ secrets.ASC_PRIVATE_KEY }}
-
-  verify-app-builds:
-    needs: [upload-play-internal, upload-testflight]
-    runs-on: ubuntu-latest
-    environment: production-rollout
-    env:
-      PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
-      ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-      ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-      ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-node-env
-        with:
-          install: "false"
       - name: Check that both test tracks processed the build
         uses: ./.github/actions/poll-check
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.ASC_PRIVATE_KEY }}
         with:
-          cmd: mise run check:app-builds -- --version ${{ github.ref_name }}
+          cmd: mise run check:app-builds -- --version "$GITHUB_REF_NAME"
           max-minutes: "60"
           interval-seconds: "60"
 
   sbom:
-    needs: verify-app-builds
+    needs: sign-and-upload
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

@@ -1,11 +1,24 @@
 # Created by wf ship-plan build — plan v1, 2026-10-05
-# Rollback (ship plan Block E): redeploy a prior server tag, then rerun the checks.
-# Site reliability dispatches this after the owner's yes; the production
-# environment approval is that yes on GitHub.
+# Patched by wf ship-plan build — plan v2, 2026-10-05
+# Rollback (ship plan Block E): redeploy a prior server tag to some or all cells,
+# then rerun the checks. Storage follows expand–contract, so a rollback restores no
+# data. The deploy refuses a downgrade past a contract step; that case goes to
+# restore.yml (runbook cell-restore).
 #
-# A workflow_dispatch workflow is usable only after it is on main. Before the
-# first merge, roll back by hand: mise run deploy -- --env production --version <prior-tag>
-# (from a machine on the private network).
+# Site reliability dispatches this after the owner's yes; the production environment
+# approval is that yes on GitHub. The approve job writes a rollback record to the VPS
+# deploy ledger, so an older release run cannot deploy over the rollback.
+#
+# This workflow has its own concurrency group: a pending rollback never waits behind a
+# release run, and a release run never cancels it. The VPS deploy lock keeps the two
+# from changing a cell at the same time.
+#
+# The inputs reach shell commands only through environment variables, after a
+# whole-string match.
+#
+# A workflow_dispatch workflow is usable only after it is on main. Before the first
+# merge, roll back by hand from a machine on the private network:
+#   mise run deploy -- --env production --cells <cells> --version <prior-tag>
 #
 # Inert until SDLC_GATE_SERVER_RELEASE is "true".
 name: Rollback (server)
@@ -14,18 +27,34 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Prior server tag to redeploy (for example v0.3.1); must be one of the last 5 releases"
+        description: "Prior server tag to redeploy (for example v0.3.1); one of the last 5 releases"
         required: true
+        type: string
+      cells:
+        description: "Cells to roll back"
+        required: true
+        type: choice
+        default: owner,person,household,secrets
+        options:
+          - owner,person,household,secrets
+          - owner
+          - person,household
+          - secrets
       reason:
         description: "Why the rollback is needed"
         required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-server
+  group: rollback-server
   cancel-in-progress: false
+
+env:
+  VERSION: ${{ inputs.version }}
+  CELLS: ${{ inputs.cells }}
 
 jobs:
   approve:
@@ -33,16 +62,42 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: Validate the requested tag
+      - name: Validate the inputs
         env:
-          VERSION: ${{ inputs.version }}
           REASON: ${{ inputs.reason }}
         run: |
-          if ! printf '%s' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::'$VERSION' is not a server tag like v1.2.3"
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::The version input is not a server tag like v1.2.3"
             exit 1
           fi
-          echo "Rollback to $VERSION approved. Reason: $REASON"
+          if ! [[ "$CELLS" =~ ^(owner,person,household,secrets|owner|person,household|secrets)$ ]]; then
+            echo "::error::The cells input is not one of the allowed values"
+            exit 1
+          fi
+          {
+            echo "## Rollback"
+            echo "Cells: $CELLS · version: $VERSION"
+            echo
+            echo "Reason:"
+            printf '%s\n' "$REASON"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          install: "false"
+      - uses: ./.github/actions/vps-access
+        with:
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
+          host: ${{ secrets.VPS_DEPLOY_HOST }}
+          ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+          known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Record the approved rollback in the deploy ledger
+        run: >-
+          mise run ledger:record -- --kind rollback --version "$VERSION" --cells "$CELLS"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
 
   rollback:
     needs: approve
@@ -55,15 +110,17 @@ jobs:
           install: "false"
       - uses: ./.github/actions/vps-access
         with:
-          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
           host: ${{ secrets.VPS_DEPLOY_HOST }}
           ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Refuse unless the ledger holds this approved attempt
+        run: mise run ledger:verify -- --kind rollback --version "$VERSION" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Redeploy the prior tag
-        env:
-          VERSION: ${{ inputs.version }}
-        run: mise run deploy -- --env production --version "$VERSION"
+        run: mise run deploy -- --env production --cells "$CELLS" --version "$VERSION"
 
   verify-rollback:
     needs: rollback
@@ -78,15 +135,17 @@ jobs:
           install: "false"
       - uses: ./.github/actions/vps-access
         with:
-          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
           host: ${{ secrets.VPS_DEPLOY_HOST }}
           ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
       - name: Check cell health on the prior tag
         uses: ./.github/actions/poll-check
         with:
-          cmd: mise run check:cells -- --env production --version ${{ inputs.version }}
+          cmd: mise run check:cells -- --env production --cells "$CELLS" --version "$VERSION"
       - name: Check alarms
         uses: ./.github/actions/poll-check
         with:

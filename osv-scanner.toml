@@ -1,0 +1,9 @@
+# Created by wf ship-plan build — plan v2, 2026-10-05
+# Dependency-audit exceptions (ship plan Block K). The owner reviews every change to this file.
+# Each entry needs an id, a reason, and an ignoreUntil date. scripts/audit-deps.mjs fails on
+# an entry without a reason or a date, and osv-scanner reports the finding again after the date.
+#
+# [[IgnoredVulns]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# ignoreUntil = 2026-12-31
+# reason = "Not reachable: the vulnerable function is never called. Remove after the upstream fix."

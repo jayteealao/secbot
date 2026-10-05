@@ -1,15 +1,22 @@
 # Created by wf ship-plan build — plan v1, 2026-10-05
+# Patched by wf ship-plan build — plan v2, 2026-10-05
 # Server release (ship plan Blocks A–E): build → conformance → SBOM → test cell →
 # one production approval → staged in-place rollout → GitHub release.
 #
 # Environments:
-#   test-cell          — no reviewer; auto-promotes when verify-test-cell passes
-#   production         — @jayteealao must approve; used once, by snapshot-cells
-#   production-rollout — no reviewer; v* and app-v* tags only; used by the later stages
-# Each environment holds the PRIVATE_NET_* and VPS_* secrets.
+#   test-cell          — no reviewer. Its SSH key (user deploy-test) and network tag
+#                        (tag:ci-test) can stage a bundle and deploy the test cell, nothing else.
+#   production         — @jayteealao must approve. Used once, by snapshot-cells.
+#   production-rollout — no reviewer. Every job first checks that the VPS deploy ledger
+#                        holds this run's approved attempt and no newer deploy or rollback.
+# The production key (user deploy) and tag:ci-prod exist only in the two production environments.
 #
-# Inert until SDLC_GATE_SERVER_RELEASE is "true" (the VPS, the test cell, and the
-# environments exist, and the mise deploy and check tasks are real).
+# The bundle contains private fork code, so it is never a workflow artifact or a release
+# asset. build stages it in the VPS release store; later jobs name it by tag and SHA-256.
+# The public release carries the SBOM and the checksum. GitHub stores the provenance attestation.
+#
+# Inert until SDLC_GATE_SERVER_RELEASE is "true" (the VPS, the test cell, the environments,
+# and real mise stage, deploy, snapshot, ledger, and check tasks exist).
 name: Release (server)
 
 on:
@@ -19,6 +26,9 @@ on:
 permissions:
   contents: read
 
+# Releases queue behind each other; a newer tag replaces a pending older one.
+# rollback.yml and restore.yml use their own groups, and the VPS deploy lock
+# keeps any two of them from changing a cell at the same time.
 concurrency:
   group: release-server
   cancel-in-progress: false
@@ -27,20 +37,50 @@ jobs:
   build:
     if: ${{ vars.SDLC_GATE_SERVER_RELEASE == 'true' }}
     runs-on: ubuntu-latest
+    environment: test-cell
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      sha256: ${{ steps.bundle.outputs.sha256 }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - name: Refuse a tag whose commit is not on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" FETCH_HEAD; then
+            echo "::error::The tag commit $GITHUB_SHA is not on main"
+            exit 1
+          fi
       - uses: ./.github/actions/setup-node-env
         with:
           forks-token: ${{ secrets.FORKS_READ_TOKEN }}
-      - name: Build the server bundle
-        run: mise run build
-      - uses: actions/upload-artifact@v7
+      - name: Build and package the server bundle
+        id: bundle
+        run: |
+          mise run build
+          tar -czf "secbot-$GITHUB_REF_NAME.tar.gz" -C dist .
+          echo "sha256=$(sha256sum "secbot-$GITHUB_REF_NAME.tar.gz" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - name: Attest the build provenance
+        uses: actions/attest-build-provenance@v4
         with:
-          name: server-bundle
-          path: dist/
-          if-no-files-found: error
+          subject-path: secbot-${{ github.ref_name }}.tar.gz
+      - uses: ./.github/actions/vps-access
+        with:
+          oauth-client-id: ${{ secrets.PRIVATE_NET_TEST_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_TEST_OAUTH_SECRET }}
+          network-tag: tag:ci-test
+          host: ${{ secrets.VPS_DEPLOY_HOST }}
+          ssh-key: ${{ secrets.TEST_CELL_DEPLOY_SSH_KEY }}
+          known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy-test
+      - name: Stage the bundle in the VPS release store
+        env:
+          SHA256: ${{ steps.bundle.outputs.sha256 }}
+        run: mise run stage -- --version "$GITHUB_REF_NAME" --sha256 "$SHA256" --file "secbot-$GITHUB_REF_NAME.tar.gz"
 
   conformance:
     needs: build
@@ -71,7 +111,7 @@ jobs:
           path: secbot-${{ github.ref_name }}.spdx.json
 
   deploy-test-cell:
-    needs: [conformance, sbom]
+    needs: [build, conformance, sbom]
     runs-on: ubuntu-latest
     environment: test-cell
     steps:
@@ -79,19 +119,19 @@ jobs:
       - uses: ./.github/actions/setup-node-env
         with:
           install: "false"
-      - uses: actions/download-artifact@v8
-        with:
-          name: server-bundle
-          path: dist/
       - uses: ./.github/actions/vps-access
         with:
-          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.PRIVATE_NET_TEST_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_TEST_OAUTH_SECRET }}
+          network-tag: tag:ci-test
           host: ${{ secrets.VPS_DEPLOY_HOST }}
-          ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+          ssh-key: ${{ secrets.TEST_CELL_DEPLOY_SSH_KEY }}
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy-test
       - name: Deploy to the test cell
-        run: mise run deploy -- --env test-cell --version ${{ github.ref_name }}
+        env:
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: mise run deploy -- --env test-cell --version "$GITHUB_REF_NAME" --sha256 "$SHA256"
 
   verify-test-cell:
     needs: deploy-test-cell
@@ -106,15 +146,17 @@ jobs:
           install: "false"
       - uses: ./.github/actions/vps-access
         with:
-          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.PRIVATE_NET_TEST_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_TEST_OAUTH_SECRET }}
+          network-tag: tag:ci-test
           host: ${{ secrets.VPS_DEPLOY_HOST }}
-          ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+          ssh-key: ${{ secrets.TEST_CELL_DEPLOY_SSH_KEY }}
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy-test
       - name: Check cell health
         uses: ./.github/actions/poll-check
         with:
-          cmd: mise run check:cells -- --env test-cell --version ${{ github.ref_name }}
+          cmd: mise run check:cells -- --env test-cell --version "$GITHUB_REF_NAME"
       - name: Check alarms
         uses: ./.github/actions/poll-check
         with:
@@ -130,6 +172,8 @@ jobs:
     needs: verify-test-cell
     runs-on: ubuntu-latest
     environment: production
+    env:
+      SNAPSHOT_ID: pre-${{ github.ref_name }}-${{ github.run_id }}
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-node-env
@@ -137,16 +181,22 @@ jobs:
           install: "false"
       - uses: ./.github/actions/vps-access
         with:
-          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
           host: ${{ secrets.VPS_DEPLOY_HOST }}
           ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
-      - name: Confirm a fresh bucket snapshot of every production cell
-        run: mise run snapshot -- --env production
+          user: deploy
+      - name: Snapshot every production cell to the off-provider bucket
+        run: mise run snapshot -- --env production --snapshot-id "$SNAPSHOT_ID"
+      - name: Record the approved attempt in the deploy ledger
+        run: >-
+          mise run ledger:record -- --kind release --version "$GITHUB_REF_NAME"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT" --snapshot-id "$SNAPSHOT_ID"
 
   deploy-owner-cell:
-    needs: snapshot-cells
+    needs: [build, snapshot-cells]
     runs-on: ubuntu-latest
     environment: production-rollout
     steps:
@@ -154,19 +204,21 @@ jobs:
       - uses: ./.github/actions/setup-node-env
         with:
           install: "false"
-      - uses: actions/download-artifact@v8
-        with:
-          name: server-bundle
-          path: dist/
       - uses: ./.github/actions/vps-access
         with:
-          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
           host: ${{ secrets.VPS_DEPLOY_HOST }}
           ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Refuse unless the ledger holds this approved attempt
+        run: mise run ledger:verify -- --kind release --version "$GITHUB_REF_NAME" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Deploy to the owner cell
-        run: mise run deploy -- --env production --version ${{ github.ref_name }} --cells owner
+        env:
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: mise run deploy -- --env production --version "$GITHUB_REF_NAME" --sha256 "$SHA256" --cells owner
 
   verify-owner-cell:
     needs: deploy-owner-cell
@@ -181,15 +233,19 @@ jobs:
           install: "false"
       - uses: ./.github/actions/vps-access
         with:
-          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
           host: ${{ secrets.VPS_DEPLOY_HOST }}
           ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Refuse unless the ledger holds this approved attempt
+        run: mise run ledger:verify -- --kind release --version "$GITHUB_REF_NAME" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Check cell health
         uses: ./.github/actions/poll-check
         with:
-          cmd: mise run check:cells -- --env production --version ${{ github.ref_name }} --cells owner
+          cmd: mise run check:cells -- --env production --version "$GITHUB_REF_NAME" --cells owner
       - name: Check alarms
         uses: ./.github/actions/poll-check
         with:
@@ -202,7 +258,7 @@ jobs:
           min-minutes: "0"
 
   deploy-person-and-household-cells:
-    needs: verify-owner-cell
+    needs: [build, verify-owner-cell]
     runs-on: ubuntu-latest
     environment: production-rollout
     steps:
@@ -210,19 +266,21 @@ jobs:
       - uses: ./.github/actions/setup-node-env
         with:
           install: "false"
-      - uses: actions/download-artifact@v8
-        with:
-          name: server-bundle
-          path: dist/
       - uses: ./.github/actions/vps-access
         with:
-          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
           host: ${{ secrets.VPS_DEPLOY_HOST }}
           ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Refuse unless the ledger holds this approved attempt
+        run: mise run ledger:verify -- --kind release --version "$GITHUB_REF_NAME" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Deploy to the second person cell and the household cell
-        run: mise run deploy -- --env production --version ${{ github.ref_name }} --cells person,household
+        env:
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: mise run deploy -- --env production --version "$GITHUB_REF_NAME" --sha256 "$SHA256" --cells person,household
 
   verify-person-and-household-cells:
     needs: deploy-person-and-household-cells
@@ -237,15 +295,19 @@ jobs:
           install: "false"
       - uses: ./.github/actions/vps-access
         with:
-          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
           host: ${{ secrets.VPS_DEPLOY_HOST }}
           ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Refuse unless the ledger holds this approved attempt
+        run: mise run ledger:verify -- --kind release --version "$GITHUB_REF_NAME" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Check cell health
         uses: ./.github/actions/poll-check
         with:
-          cmd: mise run check:cells -- --env production --version ${{ github.ref_name }} --cells person,household
+          cmd: mise run check:cells -- --env production --version "$GITHUB_REF_NAME" --cells person,household
       - name: Check alarms
         uses: ./.github/actions/poll-check
         with:
@@ -258,7 +320,7 @@ jobs:
           min-minutes: "0"
 
   deploy-secrets-cell:
-    needs: verify-person-and-household-cells
+    needs: [build, verify-person-and-household-cells]
     runs-on: ubuntu-latest
     environment: production-rollout
     steps:
@@ -266,19 +328,21 @@ jobs:
       - uses: ./.github/actions/setup-node-env
         with:
           install: "false"
-      - uses: actions/download-artifact@v8
-        with:
-          name: server-bundle
-          path: dist/
       - uses: ./.github/actions/vps-access
         with:
-          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
           host: ${{ secrets.VPS_DEPLOY_HOST }}
           ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Refuse unless the ledger holds this approved attempt
+        run: mise run ledger:verify -- --kind release --version "$GITHUB_REF_NAME" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Deploy to the secrets cell
-        run: mise run deploy -- --env production --version ${{ github.ref_name }} --cells secrets
+        env:
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: mise run deploy -- --env production --version "$GITHUB_REF_NAME" --sha256 "$SHA256" --cells secrets
 
   verify-all-cells:
     needs: deploy-secrets-cell
@@ -293,15 +357,19 @@ jobs:
           install: "false"
       - uses: ./.github/actions/vps-access
         with:
-          oauth-client-id: ${{ secrets.PRIVATE_NET_OAUTH_CLIENT_ID }}
-          oauth-secret: ${{ secrets.PRIVATE_NET_OAUTH_SECRET }}
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
           host: ${{ secrets.VPS_DEPLOY_HOST }}
           ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
           known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Refuse unless the ledger holds this approved attempt
+        run: mise run ledger:verify -- --kind release --version "$GITHUB_REF_NAME" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
       - name: Check cell health
         uses: ./.github/actions/poll-check
         with:
-          cmd: mise run check:cells -- --env production --version ${{ github.ref_name }}
+          cmd: mise run check:cells -- --env production --version "$GITHUB_REF_NAME"
       - name: Check alarms
         uses: ./.github/actions/poll-check
         with:
@@ -314,7 +382,7 @@ jobs:
           min-minutes: "0"
 
   github-release:
-    needs: verify-all-cells
+    needs: [build, verify-all-cells]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -322,18 +390,18 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: sbom
-      - uses: actions/download-artifact@v8
-        with:
-          name: server-bundle
-          path: dist/
-      - name: Package the server bundle
-        run: tar -czf secbot-${{ github.ref_name }}.tar.gz -C dist .
-      # release-please already created the release for this tag; this adds the assets.
-      - name: Attach the bundle and the SBOM to the release
+      - name: Write the bundle checksum
+        env:
+          SHA256: ${{ needs.build.outputs.sha256 }}
+        run: printf '%s  %s\n' "$SHA256" "secbot-$GITHUB_REF_NAME.tar.gz" > "secbot-$GITHUB_REF_NAME.sha256"
+      # release-please already created the release for this tag. The bundle stays private;
+      # the release carries only public evidence. Check a bundle from the VPS release store
+      # against its attestation with: gh attestation verify <bundle> --repo jayteealao/secbot
+      - name: Attach the SBOM and the checksum to the release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           files: |
-            secbot-${{ github.ref_name }}.tar.gz
+            secbot-${{ github.ref_name }}.sha256
             secbot-${{ github.ref_name }}.spdx.json
           fail_on_unmatched_files: true

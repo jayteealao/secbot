@@ -1,0 +1,9 @@
+# Created by wf ship-plan build — plan v2, 2026-10-05
+# actionlint's bundled metadata for actions/create-github-app-token predates the
+# client-id input. The action's own action.yml at v3.2.0 defines client-id and
+# deprecates app-id. Remove these ignores when actionlint's metadata catches up.
+paths:
+  .github/workflows/release-please.yml:
+    ignore:
+      - 'missing input "app-id" which is required by action "actions/create-github-app-token@v3"'
+      - 'input "client-id" is not defined in action "actions/create-github-app-token@v3"'

@@ -36,14 +36,21 @@ runs:
         key: pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
         restore-keys: pnpm-${{ runner.os }}-
 
-    - name: Allow fetching the private forks
-      if: ${{ inputs.forks-token != '' }}
-      shell: bash
-      env:
-        FORKS_READ_TOKEN: ${{ inputs.forks-token }}
-      run: git config --global url."https://x-access-token:${FORKS_READ_TOKEN}@github.com/jayteealao/".insteadOf "https://github.com/jayteealao/"
-
+    # Patched by wf ship-plan build — plan v2, 2026-10-05
+    # The fork token exists only in this step's environment, as GIT_CONFIG_* variables.
+    # Nothing writes it to ~/.gitconfig, and --ignore-scripts keeps every package
+    # script from running while the token is present. Later steps never see it.
+    # When pnpm-workspace.yaml onlyBuiltDependencies gains an entry, add a
+    # "pnpm rebuild <package>" step after this one, without the token.
     - name: Install dependencies
       if: ${{ inputs.install == 'true' }}
       shell: bash
-      run: pnpm install --frozen-lockfile
+      env:
+        FORKS_READ_TOKEN: ${{ inputs.forks-token }}
+      run: |
+        if [ -n "$FORKS_READ_TOKEN" ]; then
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="url.https://x-access-token:${FORKS_READ_TOKEN}@github.com/jayteealao/.insteadOf"
+          export GIT_CONFIG_VALUE_0="https://github.com/jayteealao/"
+        fi
+        pnpm install --frozen-lockfile --ignore-scripts

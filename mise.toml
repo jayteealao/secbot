@@ -1,4 +1,5 @@
 # Created by wf ship-plan build — plan v1, 2026-10-05
+# Patched by wf ship-plan build — plan v2, 2026-10-05
 # Single source for tool versions (local, CI, VPS, home Mac) and project tasks.
 # Bootstrap a new checkout: mise install && mise run setup
 
@@ -31,8 +32,27 @@ run = "pnpm -r exec vitest run --coverage --coverage.thresholds.lines=80"
 description = "Build the server bundle"
 run = "pnpm -r run build"
 
+[tasks."audit:deps"]
+description = "Dependency audit: fail on CVSS >= 7.0, unscored findings, or MAL-* ids unless osv-scanner.toml lists them with a reason and an expiry"
+run = "node scripts/audit-deps.mjs"
+
+[tasks."audit:licenses"]
+description = "License gate: fail on any dependency license outside the plan's allowlist"
+run = "node scripts/check-licenses.mjs"
+
 # The tasks below are stubs. Each one fails with a clear message until the
 # work packet named in the message replaces it with a real implementation.
+#
+# VPS-side contract for the real tasks (ship plan v2, Blocks A, C, and E):
+# - Two VPS users. deploy-test has a forced command that only stages bundles and deploys
+#   the test cell. deploy reaches the production cells. Network tags: tag:ci-test, tag:ci-prod.
+# - deploy, rollback, and restore each hold one VPS lock for their whole run.
+# - The deploy ledger records each approved release, rollback, and restore attempt.
+#   ledger:verify fails unless the record matches the run id and attempt and no newer
+#   deploy, rollback, or restore exists.
+# - deploy refuses a downgrade past a contract step, and refuses a bundle whose
+#   SHA-256 differs from the staged one.
+# - The release store keeps the last 5 bundles and mirrors each one to the off-provider bucket.
 
 [tasks."test:conformance"]
 description = "Run the pi-durable storage conformance suite against the cell storage adapter"
@@ -42,13 +62,29 @@ run = "node -e \"console.error('test:conformance arrives with the cell-runtime p
 description = "Build the server bundle and show what a deploy would change"
 run = "node -e \"console.error('deploy:dry-run arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
 
+[tasks.stage]
+description = "Stage a server bundle in the VPS release store by tag and SHA-256"
+run = "node -e \"console.error('stage arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+
 [tasks.deploy]
-description = "Deploy a tag to an environment over the private network"
+description = "Deploy a staged tag to some or all cells of an environment; holds the VPS lock and refuses a downgrade past a contract step"
 run = "node -e \"console.error('deploy arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
 
 [tasks.snapshot]
-description = "Confirm a fresh off-provider bucket snapshot of every cell in an environment"
+description = "Snapshot every cell of an environment to the off-provider bucket under a run-pinned id (pre-<tag>-<run-id>)"
 run = "node -e \"console.error('snapshot arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+
+[tasks."ledger:record"]
+description = "Record an approved release, rollback, or restore attempt in the VPS deploy ledger"
+run = "node -e \"console.error('ledger:record arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+
+[tasks."ledger:verify"]
+description = "Fail unless the deploy ledger holds this run's approved attempt and no newer deploy, rollback, or restore"
+run = "node -e \"console.error('ledger:verify arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+
+[tasks.restore]
+description = "Disaster step: restore one cell from a snapshot under the VPS lock, then confirm it read the outbound-effects log; never the secrets cell"
+run = "node -e \"console.error('restore arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
 
 [tasks."check:cells"]
 description = "Check that every cell in an environment is up on a version"

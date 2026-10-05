@@ -1,0 +1,171 @@
+# Created by wf ship-plan build — plan v2, 2026-10-05
+# Restore (ship plan Block E restore-policy; runbook cell-restore). This is a disaster
+# step, not a rollback step. Use it only when a cell's data is corrupt, or when a needed
+# downgrade crosses a contract step and the deploy refuses it.
+#
+# One run restores one cell, so the owner approves each cell separately. The secrets
+# cell is not an option: a restore would revive rotated or revoked credentials, so
+# rebuild that cell and rotate its credentials instead.
+#
+# The window job writes the data-loss window to the run summary before the production
+# approval. The owner reads it, then approves or rejects the run.
+#
+# The inputs reach shell commands only through environment variables, after a
+# whole-string match.
+#
+# Inert until SDLC_GATE_SERVER_RELEASE is "true".
+name: Restore (server, disaster only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      cell:
+        description: "The one cell to restore (the secrets cell is never restored)"
+        required: true
+        type: choice
+        options:
+          - owner
+          - person
+          - household
+      snapshot:
+        description: "Snapshot id from the deploy ledger, for example pre-v0.5.0-1234567890"
+        required: true
+        type: string
+      reason:
+        description: "Why a restore is needed: corrupt data, or a downgrade across a contract step"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: restore-server
+  cancel-in-progress: false
+
+env:
+  CELL: ${{ inputs.cell }}
+  SNAPSHOT: ${{ inputs.snapshot }}
+
+jobs:
+  window:
+    if: ${{ vars.SDLC_GATE_SERVER_RELEASE == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    steps:
+      - name: Validate the inputs
+        run: |
+          if ! [[ "$CELL" =~ ^(owner|person|household)$ ]]; then
+            echo "::error::The cell input is not owner, person, or household"
+            exit 1
+          fi
+          if ! [[ "$SNAPSHOT" =~ ^pre-v[0-9]+\.[0-9]+\.[0-9]+-[0-9]+$ ]]; then
+            echo "::error::The snapshot input is not a snapshot id like pre-v0.5.0-1234567890"
+            exit 1
+          fi
+      - name: State the data-loss window
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          run_id="${SNAPSHOT##*-}"
+          taken=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/jobs" --paginate \
+            --jq '.jobs[] | select(.name == "snapshot-cells" and .conclusion == "success") | .completed_at' | tail -n 1)
+          if [ -z "$taken" ]; then
+            echo "::error::Run $run_id has no successful snapshot-cells job"
+            exit 1
+          fi
+          {
+            echo "## Data-loss window"
+            echo "Restoring the **$CELL** cell from snapshot \`$SNAPSHOT\` discards every write to that cell"
+            echo "from **$taken** until the restore finishes (window computed at $(date -u +%Y-%m-%dT%H:%M:%SZ))."
+            echo
+            echo "Approve the production environment only if that loss is acceptable."
+            echo
+            echo "Reason:"
+            printf '%s\n' "$REASON"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  approve:
+    needs: window
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          install: "false"
+      - uses: ./.github/actions/vps-access
+        with:
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
+          host: ${{ secrets.VPS_DEPLOY_HOST }}
+          ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+          known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Record the approved restore in the deploy ledger
+        run: >-
+          mise run ledger:record -- --kind restore --cells "$CELL" --snapshot-id "$SNAPSHOT"
+          --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+
+  restore:
+    needs: approve
+    runs-on: ubuntu-latest
+    environment: production-rollout
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          install: "false"
+      - uses: ./.github/actions/vps-access
+        with:
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
+          host: ${{ secrets.VPS_DEPLOY_HOST }}
+          ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+          known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Refuse unless the ledger holds this approved attempt
+        run: mise run ledger:verify -- --kind restore --cells "$CELL" --run-id "$GITHUB_RUN_ID" --run-attempt "$GITHUB_RUN_ATTEMPT"
+      # The restore task holds the VPS deploy lock, restores the cell, and confirms that the
+      # cell has read the outbound-effects log, so it repeats no sent mail or calendar write.
+      - name: Restore the cell from the snapshot
+        run: mise run restore -- --env production --cells "$CELL" --snapshot "$SNAPSHOT"
+
+  verify-restore:
+    needs: restore
+    runs-on: ubuntu-latest
+    environment: production-rollout
+    env:
+      HEARTBEAT_API_TOKEN: ${{ secrets.HEARTBEAT_API_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          install: "false"
+      - uses: ./.github/actions/vps-access
+        with:
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
+          host: ${{ secrets.VPS_DEPLOY_HOST }}
+          ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+          known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Check cell health
+        uses: ./.github/actions/poll-check
+        with:
+          cmd: mise run check:cells -- --env production --cells "$CELL"
+      - name: Check alarms
+        uses: ./.github/actions/poll-check
+        with:
+          cmd: mise run check:alarms -- --env production --cells "$CELL"
+          min-minutes: "0"
+      - name: Check heartbeats
+        uses: ./.github/actions/poll-check
+        with:
+          cmd: mise run check:heartbeats -- --since-deploy --cells "$CELL"
+          min-minutes: "0"

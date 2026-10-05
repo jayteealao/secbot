@@ -15,3 +15,22 @@
 /lefthook.yml            @jayteealao
 /renovate.json           @jayteealao
 /.ai/ship-plan.md        @jayteealao
+
+# Added by wf ship-plan build — plan v2, 2026-10-05
+# Files that change what CI runs, installs, or trusts are gates too.
+/mise.toml                       @jayteealao
+/package.json                    @jayteealao
+/pnpm-workspace.yaml             @jayteealao
+/pnpm-lock.yaml                  @jayteealao
+/release-please-config.json      @jayteealao
+/.release-please-manifest.json   @jayteealao
+/biome.json                      @jayteealao
+/commitlint.config.mjs           @jayteealao
+vitest.config.*                  @jayteealao
+/.gitleaks.toml                  @jayteealao
+/osv-scanner.toml                @jayteealao
+/scripts/audit-deps.mjs          @jayteealao
+/scripts/check-licenses.mjs      @jayteealao
+/AGENTS.md                       @jayteealao
+/CLAUDE.md                       @jayteealao
+/infra/                          @jayteealao

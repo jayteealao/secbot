@@ -3,3 +3,8 @@
 # The Compose Multiplatform app under app/ is a Gradle project, not a workspace package.
 packages:
   - "packages/*"
+
+# Added by wf ship-plan build — plan v2, 2026-10-05
+# Dependencies whose install scripts may run. CI installs with --ignore-scripts, so an
+# entry here also needs a "pnpm rebuild <package>" step in setup-node-env.
+onlyBuiltDependencies: []
