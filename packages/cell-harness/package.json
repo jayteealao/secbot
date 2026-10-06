@@ -1,12 +1,12 @@
 {
-  "name": "@secbot/cell-worker",
+  "name": "@secbot/cell-harness",
   "version": "0.0.0",
   "private": true,
-  "description": "The celld worker: person cells with the harness and the CLI routes, health, and the in-cell storage conformance run.",
+  "description": "The per-person pi-durable harness that runs inside a celld cell: lead, specialists, hand-off, model gateway.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./conformance": "./src/conformance-entry.ts"
+    "./testing": "./test/fixtures.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",
@@ -15,8 +15,8 @@
   },
   "dependencies": {
     "@earendil-works/chord": "1.0.3",
+    "@earendil-works/pi-ai": "1.0.3",
     "@earendil-works/pi-durable": "github:jayteealao/pi#v1.0.3-secbot.1&path:/packages/durable",
-    "@secbot/cell-harness": "workspace:*",
     "@secbot/cell-storage": "workspace:*"
   }
 }

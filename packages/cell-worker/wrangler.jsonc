@@ -1,6 +1,19 @@
 // Person-cell deployment (owner, second person, household). Never binds the conformance cell.
+// The vars are names only: secbot-release fills them on the VPS from the runtime settings file at
+// deploy time, so no key, token, device hash, or host name is ever in the repo.
 {
   "name": "secbot",
   "main": "index.js",
-  "compatibility_date": "2026-10-01"
+  "compatibility_date": "2026-10-01",
+  "durable_objects": {
+    "bindings": [{ "name": "PERSON_CELL", "class_name": "PersonCell" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PersonCell"] }],
+  "vars": {
+    "OPENROUTER_API_KEY": "",
+    "BETTERSTACK_INCIDENTS_TOKEN": "",
+    "BETTERSTACK_REQUESTER_EMAIL": "",
+    "SECBOT_DEVICE_KEYS": "",
+    "SECBOT_PRIVATE_HOSTS": ""
+  }
 }

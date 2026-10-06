@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Builds the server bundle into dist/ at the repo root (the release tars dist/).
-//   dist/worker/       person-cell worker (index.js, wrangler.jsonc)
+//   dist/worker/       person-cell worker with the harness (index.js, wrangler.jsonc)
 //   dist/conformance/  test-cell worker with the in-cell conformance run
 //   dist/vps/          the VPS release tool, so a staged bundle carries the tool it was tested with
 //   dist/manifest.json version, contract step, and SHA-256 of every file
@@ -12,8 +12,9 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { build } from "esbuild";
 
-/** Raise when a release changes stored data so that an older bundle can no longer read it. */
-export const CONTRACT_STEP = 1;
+/** Raise when a release changes stored data so that an older bundle can no longer read it.
+ * Step 2: the PersonCell Durable Object class and its migration (the per-person harness). */
+export const CONTRACT_STEP = 2;
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");

@@ -74,3 +74,30 @@
     - { user: deploy, key_env: SECBOT_DEPLOY_PUBKEY }
   loop_control:
     label: "{{ item.user }}"
+
+- name: Check the test cell's runtime values are in the shell environment
+  ansible.builtin.assert:
+    that: lookup('ansible.builtin.env', item) | length > 0
+    fail_msg: "set {{ item }} in your shell before host setup; the release tool fills the cell's config from it"
+    quiet: true
+  loop:
+    - OPENROUTER_API_KEY
+    - BETTERSTACK_INCIDENTS_TOKEN
+    - BETTERSTACK_REQUESTER_EMAIL
+    - SECBOT_DEVICE_KEYS
+    - SECBOT_PRIVATE_HOSTS
+  no_log: true
+
+- name: Write the test cell's runtime settings (readable by its deploy users only)
+  ansible.builtin.copy:
+    dest: /etc/secbot/test-cell-runtime.env
+    content: |
+      OPENROUTER_API_KEY={{ lookup('ansible.builtin.env', 'OPENROUTER_API_KEY') }}
+      BETTERSTACK_INCIDENTS_TOKEN={{ lookup('ansible.builtin.env', 'BETTERSTACK_INCIDENTS_TOKEN') }}
+      BETTERSTACK_REQUESTER_EMAIL={{ lookup('ansible.builtin.env', 'BETTERSTACK_REQUESTER_EMAIL') }}
+      SECBOT_DEVICE_KEYS={{ lookup('ansible.builtin.env', 'SECBOT_DEVICE_KEYS') }}
+      SECBOT_PRIVATE_HOSTS={{ lookup('ansible.builtin.env', 'SECBOT_PRIVATE_HOSTS') }}
+    owner: root
+    group: secbot-test
+    mode: "0640"
+  no_log: true

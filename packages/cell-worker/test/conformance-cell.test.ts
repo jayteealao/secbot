@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
 import { ConformanceCell, runConformance, runLongTransaction } from "../src/conformance-cell.ts";
 import conformanceWorker, { type ConformanceEnv } from "../src/conformance-entry.ts";
-import worker from "../src/index.ts";
+import worker, { type WorkerEnv } from "../src/index.ts";
 
 const post = (path: string) => new Request(`http://cell${path}`, { method: "POST" });
 
@@ -66,9 +66,15 @@ describe("ConformanceCell", () => {
 
 describe("worker entries", () => {
   it("reports health with the version and the driver", async () => {
-    const response = await worker.fetch(new Request("http://cell/health"));
+    const env: WorkerEnv = {
+      PERSON_CELL: {
+        idFromName: (name) => name,
+        get: () => ({ fetch: async () => Response.json({}, { status: 500 }) }),
+      },
+    };
+    const response = await worker.fetch(new Request("http://cell/health"), env);
     expect(await response.json()).toEqual({ version: "0.0.0-dev", adapter: "CelldSqliteDatabase" });
-    expect((await worker.fetch(new Request("http://cell/conformance/run"))).status).toBe(404);
+    expect((await worker.fetch(new Request("http://cell/conformance/run"), env)).status).toBe(404);
   });
 
   it("routes conformance requests to one named cell on the test cell", async () => {

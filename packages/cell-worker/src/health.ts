@@ -6,6 +6,34 @@ declare const __SECBOT_VERSION__: string | undefined;
 export const releaseVersion = (): string =>
   typeof __SECBOT_VERSION__ === "string" ? __SECBOT_VERSION__ : "0.0.0-dev";
 
-/** GET /health: the release version and the storage driver this bundle uses. */
-export const health = (): Response =>
-  Response.json({ version: releaseVersion(), adapter: ADAPTER_NAME });
+export type CellHealth =
+  | { readonly status: "up"; readonly version: string; readonly roles: readonly string[] }
+  | { readonly status: "down"; readonly reason: string };
+
+/**
+ * GET /health: the release version and the storage driver this bundle uses; with
+ * `?cells=owner,second`, also each named cell's status, read by waking it.
+ */
+export async function health(
+  url: URL,
+  cellStatus: (person: string) => Promise<CellHealth>,
+): Promise<Response> {
+  const requested = url.searchParams.get("cells");
+  if (requested === null)
+    return Response.json({ version: releaseVersion(), adapter: ADAPTER_NAME });
+  const cells: Record<string, CellHealth> = {};
+  for (const person of requested
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean)) {
+    try {
+      cells[person] = await cellStatus(person);
+    } catch (error) {
+      cells[person] = {
+        status: "down",
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+  return Response.json({ version: releaseVersion(), adapter: ADAPTER_NAME, cells });
+}

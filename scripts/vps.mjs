@@ -5,6 +5,7 @@
 //   node scripts/vps.mjs stage   --version V --sha256 S --file F
 //   node scripts/vps.mjs deploy  --env test-cell|production --version V [--sha256 S] [--cells C]
 //   node scripts/vps.mjs dry-run
+//   node scripts/vps.mjs check-cells --env test-cell|production [--version V] [--cells owner,second]
 //
 // The SSH target is SECBOT_VPS_SSH, an alias in the caller's SSH config. In GitHub Actions the
 // vps-access action writes the alias "secbot-vps", which is the default there. The repo never
@@ -39,7 +40,7 @@ export function remoteCommand(words) {
 }
 
 /** Runs the release tool over SSH; resolves with stdout, streams stderr. */
-export function runRemote(words, { input, target = sshTarget() } = {}) {
+export function runRemote(words, { input, target = sshTarget(), echo = true } = {}) {
   const command = remoteCommand(words);
   return new Promise((resolvePromise, reject) => {
     const child = spawn("ssh", ["-o", "BatchMode=yes", target, command], {
@@ -49,7 +50,7 @@ export function runRemote(words, { input, target = sshTarget() } = {}) {
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
-      process.stdout.write(chunk);
+      if (echo) process.stdout.write(chunk);
     });
     if (input) createReadStream(input).pipe(child.stdin);
     child.on("error", reject);
@@ -97,12 +98,53 @@ export async function dryRun() {
   );
 }
 
+/** The person cells of wave 1; the household cell joins with its own change. */
+export const DEFAULT_CELLS = "owner,second";
+
+/**
+ * Turns the release tool's health answer into the check:cells phrases. A cell passes when it is up
+ * and, with --version, on that version. Pure, so the phrases are tested without a VPS.
+ */
+export function reportCells(health, { cells = DEFAULT_CELLS, version } = {}) {
+  const lines = [];
+  let ok = true;
+  for (const name of cells.split(",").filter(Boolean)) {
+    const cell = health?.cells?.[name];
+    if (cell === undefined || cell.status !== "up") {
+      ok = false;
+      lines.push(`cell ${name} down: ${cell?.reason ?? "no answer"}`);
+    } else if (version !== undefined && cell.version !== version) {
+      ok = false;
+      lines.push(`cell ${name} up ${cell.version} (expected ${version})`);
+    } else {
+      lines.push(`cell ${name} up ${cell.version}`);
+    }
+  }
+  return { ok, lines };
+}
+
+export async function checkCells({ env, version, cells = DEFAULT_CELLS }) {
+  if (env !== "test-cell" && env !== "production")
+    throw new Error("check-cells needs --env test-cell|production");
+  const stdout = await runRemote(["health", "--env", env, "--cells", cells], { echo: false });
+  let health;
+  try {
+    health = JSON.parse(stdout);
+  } catch {
+    throw new Error("the VPS health answer was not JSON");
+  }
+  const report = reportCells(health, { cells, version });
+  for (const line of report.lines) console.log(line);
+  if (!report.ok) throw new Error("one or more cells are down or on another version");
+}
+
 const main = async () => {
   const [command, ...rest] = process.argv.slice(2);
   if (command === "stage") await stage(flags(rest));
   else if (command === "deploy") await deploy(flags(rest));
   else if (command === "dry-run") await dryRun();
-  else throw new Error("usage: vps.mjs stage|deploy|dry-run [flags]");
+  else if (command === "check-cells") await checkCells(flags(rest));
+  else throw new Error("usage: vps.mjs stage|deploy|dry-run|check-cells [flags]");
 };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

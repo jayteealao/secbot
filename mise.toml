@@ -137,7 +137,11 @@ run = "node -e \"console.error('restore arrives with the cell-runtime packet (wa
 
 [tasks."check:cells"]
 description = "Check that every cell in an environment is up on a version"
-run = "node -e \"console.error('check:cells arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs check-cells"
+
+[tasks.cli]
+description = "Run the secbot command line (chat, missed, model, specialist, device)"
+run = "node packages/cli/src/main.ts"
 
 [tasks."check:alarms"]
 description = "Check that every cell has its next alarm at or before its earliest routine timer"

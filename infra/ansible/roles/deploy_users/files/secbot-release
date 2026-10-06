@@ -7,6 +7,12 @@
 #   deploy      --env E --version V [--sha256 S] deploy a staged bundle to an environment
 #   conformance --version V [--long-transaction] deploy V to the test cell, run the in-cell suite
 #   manifest    --env E                          print the deployed manifest
+#   health      --env E [--cells C]              print the cell health (version, and each named cell)
+#
+# A deploy fills the worker config's runtime vars (the OpenRouter key, the Better Stack incidents
+# token and e-mail, the device keys, the private host names) from /etc/secbot/<env>-runtime.env into
+# a temporary copy, because celld deploy has no secret mechanism; the values never enter the repo,
+# the bundle, CI, or this tool's output.
 #
 # Every command that changes the release store or a cell holds one lock for its whole run, so a
 # release, a rollback, a restore, and a development test run never overlap.
@@ -29,9 +35,9 @@ case "$caller" in
 esac
 
 read -r -a argv <<<"${SSH_ORIGINAL_COMMAND:-}"
-[ "${#argv[@]}" -gt 0 ] || die "no command; expected stage, deploy, conformance, or manifest"
+[ "${#argv[@]}" -gt 0 ] || die "no command; expected stage, deploy, conformance, manifest, or health"
 command="${argv[0]}"
-version="" sha256="" env="" long_transaction=0
+version="" sha256="" env="" long_transaction=0 cells=""
 i=1
 while [ "$i" -lt "${#argv[@]}" ]; do
   flag="${argv[$i]}"
@@ -41,7 +47,7 @@ while [ "$i" -lt "${#argv[@]}" ]; do
     --sha256) sha256="$value"; i=$((i + 2)) ;;
     --env) env="$value"; i=$((i + 2)) ;;
     --long-transaction) long_transaction=1; i=$((i + 1)) ;;
-    --cells) die "deploy --cells arrives with the production rollout; this release deploys the whole environment" ;;
+    --cells) cells="$value"; i=$((i + 2)) ;;
     *) die "unknown argument '$flag'" ;;
   esac
 done
@@ -49,6 +55,9 @@ done
 [ -z "$version" ] || [[ "$version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || die "bad version '$version'"
 [ -z "$sha256" ] || [[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || die "bad sha256"
 [ -z "$env" ] || [[ " $allowed_envs " == *" $env "* ]] || die "$caller may not use environment '$env'"
+[ -z "$cells" ] || [[ "$cells" =~ ^[a-z][a-z0-9,-]*$ ]] || die "bad cells '$cells'"
+[ -z "$cells" ] || [ "$command" = "health" ] ||
+  die "deploy --cells arrives with the production rollout; this release deploys the whole environment"
 
 with_lock() {
   exec 9<"$LOCK"
@@ -61,6 +70,40 @@ env_file() {
   # shellcheck disable=SC1090 # written by Ansible from the owner's environment
   set -a; . "$file"; set +a
   : "${CELLD_BUCKET:?}" "${CELLD_ENDPOINT:?}" "${CELLD_LISTEN:?}"
+}
+
+# Runtime vars the worker config declares with empty values; each must be set for a deploy.
+RUNTIME_VARS="OPENROUTER_API_KEY BETTERSTACK_INCIDENTS_TOKEN BETTERSTACK_REQUESTER_EMAIL SECBOT_DEVICE_KEYS SECBOT_PRIVATE_HOSTS"
+
+# Copies the app to a private temporary directory and fills its runtime vars; prints the copy's path.
+# Names a missing or unsafe setting, never its value.
+render_app() {
+  local target_env="$1" app="$2"
+  local file="/etc/secbot/$target_env-runtime.env"
+  [ -r "$file" ] || die "runtime settings for $target_env are missing ($file); run host setup with the runtime values in your shell"
+  local copy
+  copy="$(mktemp -d)"
+  cp -a "$app/." "$copy/"
+  if ! (
+    set -a
+    # shellcheck disable=SC1090 # written by Ansible from the owner's environment
+    . "$file"
+    set +a
+    for name in $RUNTIME_VARS; do
+      value="${!name:-}"
+      if [ -z "$value" ]; then echo "secbot-release: runtime setting $name is empty in $file" >&2; exit 1; fi
+      if ! [[ "$value" =~ ^[A-Za-z0-9._@:,+/=-]+$ ]]; then
+        echo "secbot-release: runtime setting $name has characters the config cannot carry" >&2
+        exit 1
+      fi
+      grep -q "\"$name\": \"\"" "$copy/wrangler.jsonc" || { echo "secbot-release: the bundle's config does not declare $name" >&2; exit 1; }
+      sed -i "s|\"$name\": \"\"|\"$name\": \"$value\"|" "$copy/wrangler.jsonc"
+    done
+  ); then
+    rm -rf "$copy"
+    exit 1
+  fi
+  echo "$copy"
 }
 
 unit_for() { case "$1" in test-cell) echo "celld@test" ;; production) echo "celld@prod" ;; esac; }
@@ -127,7 +170,12 @@ deploy_to() {
   fi
   local app="$dir/worker"
   [ "$target_env" = "test-cell" ] && app="$dir/conformance"
-  celld deploy "$app" --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto
+  local rendered
+  rendered="$(render_app "$target_env" "$app")"
+  trap 'rm -rf "$rendered"' EXIT
+  celld deploy "$rendered" --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto
+  rm -rf "$rendered"
+  trap - EXIT
   ln -sfn "$dir" "$current"
   echo "deployed $version to $target_env"
 }
@@ -163,10 +211,18 @@ do_manifest() {
   cat "$file"
 }
 
+do_health() {
+  [ -n "$env" ] || die "health needs --env"
+  env_file "$env"
+  curl -sS --fail --max-time 120 "http://$CELLD_LISTEN/health${cells:+?cells=$cells}"
+  echo
+}
+
 case "$command" in
   stage) do_stage ;;
   deploy) do_deploy ;;
   conformance) do_conformance ;;
   manifest) do_manifest ;;
-  *) die "unknown command '$command'; expected stage, deploy, conformance, or manifest" ;;
+  health) do_health ;;
+  *) die "unknown command '$command'; expected stage, deploy, conformance, manifest, or health" ;;
 esac
