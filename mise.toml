@@ -66,12 +66,12 @@ run = [
 ]
 
 [tasks."host:setup"]
-description = "Run the Ansible host setup on the VPS (SECBOT_VPS_SSH names your SSH alias; asks for your sudo password); prints the diff"
+description = "Run the Ansible host setup on the VPS (SECBOT_VPS_SSH names your SSH alias; its user needs passwordless sudo); prints the diff"
 # Ansible skips an ansible.cfg in a world-writable working directory (a Windows drive under WSL2);
 # ANSIBLE_CONFIG is always read (ansible/config/manager.py find_ini_config_file).
 env = { ANSIBLE_CONFIG = "{{config_root}}/infra/ansible/ansible.cfg" }
 dir = "infra/ansible"
-run = ["ansible-galaxy collection install -r requirements.yml", "ansible-playbook site.yml --diff --ask-become-pass"]
+run = ["ansible-galaxy collection install -r requirements.yml", "ansible-playbook site.yml --diff"]
 
 [tasks."smoke:r2"]
 description = "Prove the bucket refuses a second If-None-Match: * create with 412 (run before replication is turned on)"
