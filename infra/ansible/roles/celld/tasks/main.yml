@@ -41,6 +41,13 @@
     mode: "0644"
   register: celld_download
 
+- name: Read whether the celld binary is installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/celld
+  register: celld_binary
+
+# Runs only for a new download or a missing binary, so a repeat run reports no change and does
+# not restart the cells.
 - name: Install the celld binary
   ansible.builtin.shell: |
     set -o pipefail
@@ -49,7 +56,7 @@
     mv -f /usr/local/bin/celld.new /usr/local/bin/celld
   args:
     executable: /bin/bash
-    creates: "{{ omit if celld_download.changed else '/usr/local/bin/celld' }}"
+  when: celld_download is changed or not celld_binary.stat.exists
   changed_when: true
   notify: Restart celld instances
 
@@ -63,6 +70,11 @@
     esbuild_arch: "{{ 'x64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
   register: celld_esbuild_download
 
+- name: Read whether the esbuild binary is installed
+  ansible.builtin.stat:
+    path: /usr/local/bin/esbuild
+  register: celld_esbuild_binary
+
 - name: Install the esbuild binary
   ansible.builtin.shell: |
     set -o pipefail
@@ -71,7 +83,7 @@
     mv -f /usr/local/bin/esbuild.new /usr/local/bin/esbuild
   args:
     executable: /bin/bash
-    creates: "{{ omit if celld_esbuild_download.changed else '/usr/local/bin/esbuild' }}"
+  when: celld_esbuild_download is changed or not celld_esbuild_binary.stat.exists
   changed_when: true
 
 - name: Create the secbot configuration directory
