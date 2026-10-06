@@ -5,7 +5,7 @@
 - name: Admit the celld worker port on the private-network interface
   community.general.ufw:
     rule: allow
-    direction: in
+    # interface_in already makes this an incoming rule; ufw refuses it together with direction.
     interface_in: "{{ celld_private_interface }}"
     port: "{{ celld_worker_port | string }}"
     proto: tcp

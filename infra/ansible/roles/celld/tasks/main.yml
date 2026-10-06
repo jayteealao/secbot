@@ -15,7 +15,7 @@
 
 - name: Read the private-network address of the VPS
   ansible.builtin.set_fact:
-    celld_private_address: "{{ hostvars[inventory_hostname]['ansible_' + celld_private_interface]['ipv4']['address'] }}"
+    celld_private_address: "{{ ansible_facts[celld_private_interface]['ipv4']['address'] }}"
 
 - name: Create the celld system user
   ansible.builtin.user:
@@ -35,9 +35,9 @@
 
 - name: Download the pinned celld release
   ansible.builtin.get_url:
-    url: "https://github.com/denoland/celld/releases/download/v{{ celld_version }}/celld-{{ ansible_architecture }}-unknown-linux-gnu.gz"
-    dest: "/var/cache/secbot/celld-{{ celld_version }}-{{ ansible_architecture }}.gz"
-    checksum: "sha256:{{ celld_sha256[ansible_architecture] }}"
+    url: "https://github.com/denoland/celld/releases/download/v{{ celld_version }}/celld-{{ ansible_facts['architecture'] }}-unknown-linux-gnu.gz"
+    dest: "/var/cache/secbot/celld-{{ celld_version }}-{{ ansible_facts['architecture'] }}.gz"
+    checksum: "sha256:{{ celld_sha256[ansible_facts['architecture']] }}"
     mode: "0644"
   register: celld_download
 
@@ -56,11 +56,11 @@
 - name: Download the pinned esbuild binary
   ansible.builtin.get_url:
     url: "https://registry.npmjs.org/@esbuild/linux-{{ esbuild_arch }}/-/linux-{{ esbuild_arch }}-{{ celld_esbuild_version }}.tgz"
-    dest: "/var/cache/secbot/esbuild-{{ celld_esbuild_version }}-{{ ansible_architecture }}.tgz"
-    checksum: "sha512:{{ celld_esbuild_sha512[ansible_architecture] }}"
+    dest: "/var/cache/secbot/esbuild-{{ celld_esbuild_version }}-{{ ansible_facts['architecture'] }}.tgz"
+    checksum: "sha512:{{ celld_esbuild_sha512[ansible_facts['architecture']] }}"
     mode: "0644"
   vars:
-    esbuild_arch: "{{ 'x64' if ansible_architecture == 'x86_64' else 'arm64' }}"
+    esbuild_arch: "{{ 'x64' if ansible_facts['architecture'] == 'x86_64' else 'arm64' }}"
   register: celld_esbuild_download
 
 - name: Install the esbuild binary
