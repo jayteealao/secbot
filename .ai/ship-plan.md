@@ -2,9 +2,9 @@
 schema: sdlc/v1
 type: ship-plan
 slug: secbot
-plan-version: 2
+plan-version: 3
 created-at: "2026-10-05T11:00:16Z"
-updated-at: "2026-10-05T12:54:19Z"
+updated-at: "2026-10-07T08:03:52Z"
 project-name: "Secbot"
 template-hint: none
 
@@ -47,9 +47,15 @@ ship-cadence: on-demand
 version-scheme: semver
 version-source-of-truth:
   - { path: "package.json", field: "version" }                       # server track, tag v<semver>
-  - { path: "app/gradle.properties", field: "VERSION_NAME" }         # app track, tag app-v<semver>
-  - { path: "app/gradle.properties", field: "VERSION_CODE" }         # app track, strictly increasing integer
   - { path: ".release-please-manifest.json", field: "<component>" }  # one entry per component: "." (server), "app"
+  # Private workspace packages: release-please does not bump them, and each stays at 0.0.0.
+  - { path: "packages/cell-harness/package.json", field: "version", role: "private workspace package, not bumped" }
+  - { path: "packages/cell-storage/package.json", field: "version", role: "private workspace package, not bumped" }
+  - { path: "packages/cell-worker/package.json", field: "version", role: "private workspace package, not bumped" }
+  - { path: "packages/cli/package.json", field: "version", role: "private workspace package, not bumped" }
+  - { path: "packages/household-cell/package.json", field: "version", role: "private workspace package, not bumped" }
+  # The app track adds app/gradle.properties VERSION_NAME (tag app-v<semver>) and VERSION_CODE
+  # (strictly increasing integer) when app/ exists, in the access-and-app packet.
 version-bump-rule: release-please
 version-bump-cmd: "npx release-please release-pr --repo-url=jayteealao/secbot --config-file=release-please-config.json --manifest-file=.release-please-manifest.json"
 prerelease-suffix: none
@@ -88,6 +94,10 @@ ci-pipeline:
     - deploy-secrets-cell
     - verify-all-cells
     - github-release            # SBOM, SHA-256 checksum, and build-provenance attestation only
+  operational-workflows:
+    - { file: ".github/workflows/rollback.yml", purpose: "roll production cells back to a prior tag" }
+    - { file: ".github/workflows/restore.yml", purpose: "restore cells from a named snapshot" }
+    - { file: ".github/workflows/restore-drill.yml", purpose: "the monthly restore drill on the test cell" }
   bundle-handling:
     public-artifacts: false     # the bundle holds private fork code; no workflow artifact or release asset carries it
     transport: "the build job stages the bundle on the VPS release store through the test-cell deploy path; later jobs refer to it by tag and SHA-256"
