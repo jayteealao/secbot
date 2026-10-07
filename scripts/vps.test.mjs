@@ -1,24 +1,57 @@
-// node:test tests for the check:cells and check:alarms phrases and the durability verdicts
-// (scripts/vps.mjs).
+// node:test tests for the check:cells, check:alarms, and check:heartbeats phrases, the cell names,
+// the ledger, restore, delay, and heap verdicts, and the durability verdicts (scripts/vps.mjs).
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { heartbeatStatuses } from "./betterstack.mjs";
 import {
   DEFAULT_ALARM_CELLS,
   DEFAULT_CELLS,
   expandCells,
+  HEAP_LIMIT_BYTES,
   judgeCrash,
+  judgeHeap,
   judgeLateAlarm,
+  judgeLedger,
+  judgeRestore,
+  normalizeCells,
   printResults,
   reportAlarms,
   reportCells,
+  reportHeartbeats,
+  SECRETS_SKIPPED,
+  summarizeDelays,
 } from "./vps.mjs";
 
 const up = (version) => ({ status: "up", version, roles: ["lead"] });
 
-test("every person cell up passes and prints one line per cell", () => {
-  const report = reportCells({ cells: { owner: up("v1.0.0"), second: up("v1.0.0") } });
-  assert.equal(DEFAULT_CELLS, "owner,second");
-  assert.deepEqual(report, { ok: true, lines: ["cell owner up v1.0.0", "cell second up v1.0.0"] });
+test("every cell up passes and prints one line per cell", () => {
+  const report = reportCells({
+    cells: { owner: up("v1.0.0"), second: up("v1.0.0"), household: up("v1.0.0") },
+  });
+  assert.equal(DEFAULT_CELLS, "owner,second,household");
+  assert.deepEqual(report, {
+    ok: true,
+    lines: ["cell owner up v1.0.0", "cell second up v1.0.0", "cell household up v1.0.0"],
+  });
+});
+
+test("the release workflows' cell names: person is the second person, secrets is skipped", () => {
+  const printed = [];
+  assert.deepEqual(
+    normalizeCells("person,household", (line) => printed.push(line)),
+    ["second", "household"],
+  );
+  assert.deepEqual(normalizeCells(undefined), ["owner", "second", "household"]);
+  assert.deepEqual(
+    normalizeCells("owner,person,household,secrets", (line) => printed.push(line)),
+    ["owner", "second", "household"],
+  );
+  assert.deepEqual(
+    normalizeCells("secrets", (line) => printed.push(line)),
+    [],
+  );
+  assert.deepEqual(printed, [SECRETS_SKIPPED, SECRETS_SKIPPED]);
+  assert.equal(SECRETS_SKIPPED, "cell secrets skipped: it arrives with the secrets cell");
 });
 
 test("a down cell, a missing cell, or another version fails", () => {
@@ -49,9 +82,9 @@ const report = (cell, alarm, earliest, problem) => ({
   ...(problem === undefined ? {} : { problem }),
 });
 
-test("check:alarms expands person and passes an alarm at or before the earliest timer", () => {
-  assert.equal(DEFAULT_ALARM_CELLS, "person,household");
-  assert.deepEqual(expandCells("person,household,owner"), ["owner", "second", "household"]);
+test("check:alarms names person as the second cell and passes an alarm at or before the earliest timer", () => {
+  assert.equal(DEFAULT_ALARM_CELLS, "owner,second,household");
+  assert.deepEqual(expandCells("person,household,owner"), ["second", "household", "owner"]);
   const result = reportAlarms({
     cells: {
       owner: report("owner", 1_000, 1_000),
@@ -76,7 +109,7 @@ test("check:alarms fails with the runbook phrases for a missing, a late, and an 
         household: { cell: "household", ok: false, reason: "status 503" },
       },
     },
-    { cells: "person,household,lab" },
+    { cells: "owner,person,household,lab" },
   );
   assert.equal(result.ok, false);
   assert.deepEqual(result.lines, [
@@ -156,4 +189,196 @@ test("the late-alarm verdict wants one run for the missed wakes and the next wak
     false,
   );
   assert.match(lines[1], /^durability late-alarm-moves-on fail: /);
+});
+
+// ---- heartbeats -------------------------------------------------------------------------------
+
+const DEPLOYED = Date.UTC(2026, 9, 7, 12);
+const page = (entries) => ({
+  data: entries.map(([name, status]) => ({
+    id: "1",
+    type: "heartbeat",
+    attributes: { name, status, url: "https://hb.example.test/x" },
+  })),
+});
+
+test("check:heartbeats passes fresh pings after the deploy and names the Better Stack heartbeat per cell", () => {
+  const statuses = heartbeatStatuses([
+    page([
+      ["secbot owner cell", "up"],
+      ["secbot household cell", "up"],
+    ]),
+  ]);
+  const result = reportHeartbeats(
+    {
+      env: "production",
+      cells: {
+        owner: { lastOkAt: DEPLOYED + 60_000, lastOutcome: "ok", deployedAt: DEPLOYED },
+        household: { lastOkAt: DEPLOYED + 1_000, lastOutcome: "ok", deployedAt: DEPLOYED },
+      },
+    },
+    statuses,
+    { sinceDeploy: true },
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.lines, [
+    `heartbeat owner fresh: last ok ping ${iso(DEPLOYED + 60_000)}`,
+    `heartbeat household fresh: last ok ping ${iso(DEPLOYED + 1_000)}`,
+  ]);
+  assert.equal(JSON.stringify([...statuses]).includes("example.test"), false);
+});
+
+test("check:heartbeats fails stale, missing, and down heartbeats with the runbook phrases", () => {
+  const statuses = heartbeatStatuses([
+    page([
+      ["secbot owner cell", "up"],
+      ["secbot second cell", "down"],
+      ["secbot test cell", "up"],
+    ]),
+  ]);
+  const result = reportHeartbeats(
+    {
+      env: "production",
+      cells: {
+        owner: { lastOkAt: DEPLOYED - 1_000, lastOutcome: "ok", deployedAt: DEPLOYED },
+        second: { lastOkAt: DEPLOYED + 1_000, lastOutcome: "ok", deployedAt: DEPLOYED },
+        household: { lastOkAt: DEPLOYED + 1_000, deployedAt: DEPLOYED },
+      },
+    },
+    statuses,
+    { sinceDeploy: true },
+  );
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.lines, [
+    `heartbeat owner stale: last ok ping ${iso(DEPLOYED - 1_000)} before the deploy at ${iso(DEPLOYED)}`,
+    "heartbeat second down in Better Stack (status down)",
+    'heartbeat household missing in Better Stack ("secbot household cell")',
+  ]);
+  for (const line of result.lines) assert.match(line, /heartbeat .* (stale|missing|down)/);
+  // Without --since-deploy a ping before the deploy is still fresh.
+  const loose = reportHeartbeats(
+    { env: "production", cells: { owner: { lastOkAt: DEPLOYED - 1_000, deployedAt: DEPLOYED } } },
+    statuses,
+  );
+  assert.equal(loose.ok, true);
+  // The test cell's cells share the test cell's heartbeat; no 2xx ping yet is missing.
+  const test = reportHeartbeats(
+    {
+      env: "test-cell",
+      cells: { owner: { lastOkAt: null, lastOutcome: "skipped" }, second: { error: "status 503" } },
+    },
+    statuses,
+  );
+  assert.deepEqual(test.lines, [
+    "heartbeat owner missing: no 2xx ping yet (last outcome skipped)",
+    "heartbeat second missing: status 503",
+  ]);
+});
+
+// ---- ledger, restore, measurements -----------------------------------------------------------
+
+const record = (kind, runId, runAttempt, extra = {}) => ({
+  kind,
+  runId,
+  runAttempt,
+  version: "v1.0.0",
+  at: "2026-10-07T12:00:00Z",
+  ...extra,
+});
+
+test("ledger:verify passes when this run's attempt is the newest, also after its own deploys", () => {
+  const records = [
+    record("release", "41", "1"),
+    record("release", "42", "2"),
+    record("deploy", "42", "2"),
+  ];
+  assert.deepEqual(
+    judgeLedger(records, { kind: "release", runId: "42", runAttempt: "2", version: "v1.0.0" }),
+    {
+      ok: true,
+      line: "ledger ok: release run 42 attempt 2 is the newest",
+    },
+  );
+});
+
+test("ledger:verify refuses after a newer rollback, an older attempt, a hand deploy, or an empty ledger", () => {
+  const newerRollback = judgeLedger([record("release", "42", "1"), record("rollback", "50", "1")], {
+    kind: "release",
+    runId: "42",
+    runAttempt: "1",
+  });
+  assert.equal(newerRollback.ok, false);
+  assert.match(newerRollback.line, /newest record is rollback from run 50 attempt 1/);
+  const retried = judgeLedger([record("release", "42", "1"), record("release", "42", "2")], {
+    kind: "release",
+    runId: "42",
+    runAttempt: "1",
+  });
+  assert.equal(retried.ok, false);
+  const handDeploy = judgeLedger(
+    [record("release", "42", "1"), { kind: "deploy", version: "v0.9.0", at: "t" }],
+    {
+      kind: "release",
+      runId: "42",
+      runAttempt: "1",
+    },
+  );
+  assert.equal(handDeploy.ok, false);
+  assert.match(handDeploy.line, /newer deploy of v0.9.0 from a hand run/);
+  assert.equal(judgeLedger([], { kind: "release", runId: "1", runAttempt: "1" }).ok, false);
+  const otherVersion = judgeLedger([record("rollback", "7", "1")], {
+    kind: "rollback",
+    runId: "7",
+    runAttempt: "1",
+    version: "v0.9.9",
+  });
+  assert.equal(otherVersion.ok, false);
+});
+
+test("restore reports the loaded digest, and fails without one", () => {
+  assert.deepEqual(judgeRestore({ cell: "owner", digest: "abcdef0123456789", rows: 12 }, "owner"), {
+    ok: true,
+    line: "restore owner ok digest abcdef012345 rows 12",
+  });
+  const failed = judgeRestore({ error: "snapshot s9 not found for cell owner" }, "owner");
+  assert.equal(failed.ok, false);
+  assert.equal(failed.line, "restore owner failed: snapshot s9 not found for cell owner");
+});
+
+test("write delay: median and nearest-rank 95th percentile", () => {
+  const values = Array.from({ length: 200 }, (_, index) => index + 1);
+  assert.deepEqual(summarizeDelays(values), {
+    count: 200,
+    median: 100.5,
+    p95: 190,
+    min: 1,
+    max: 200,
+  });
+  assert.deepEqual(summarizeDelays([90, 80, 100]), {
+    count: 3,
+    median: 90,
+    p95: 100,
+    min: 80,
+    max: 100,
+  });
+  assert.equal(summarizeDelays([]).median, null);
+});
+
+test("heap: the peak per isolate of the test fleet against the limit, and the VPS total", () => {
+  const MIB = 1024 * 1024;
+  const sample = (heap, live) => ({
+    fleets: {
+      test: {
+        rss_bytes: 300 * MIB,
+        deployment: { isolates: { cells: { secbot: { live, retiring: 0, heap_bytes: heap } } } },
+      },
+      "prod-owner": { rss_bytes: 100 * MIB, deployment: { isolates: { cells: {} } } },
+    },
+  });
+  const verdict = judgeHeap([sample(60 * MIB, 2), sample(90 * MIB, 1)]);
+  assert.equal(verdict.ok, true);
+  assert.equal(verdict.isolateHeap, 90 * MIB);
+  assert.equal(verdict.vpsRss, 400 * MIB);
+  assert.equal(judgeHeap([sample(HEAP_LIMIT_BYTES, 1)]).ok, false);
+  assert.equal(judgeHeap([]).ok, false);
 });

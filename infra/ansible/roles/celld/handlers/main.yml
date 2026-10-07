@@ -6,7 +6,6 @@
   ansible.builtin.systemd_service:
     name: "celld@{{ item.name }}"
     state: restarted
-  loop: "{{ celld_instances }}"
+  loop: "{{ celld_started_instances }}"
   loop_control:
     label: "celld@{{ item.name }}"
-  when: celld_replication_confirmed | bool

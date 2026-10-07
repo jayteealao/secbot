@@ -41,7 +41,10 @@ const bundle = (entry, outdir) =>
     conditions: ["workerd", "worker", "import"],
     mainFields: ["module", "main"],
     external: ["node:*", "cloudflare:*"],
-    define: { __SECBOT_VERSION__: JSON.stringify(version) },
+    define: {
+      __SECBOT_VERSION__: JSON.stringify(version),
+      __SECBOT_CONTRACT_STEP__: String(CONTRACT_STEP),
+    },
     legalComments: "inline",
     logLevel: "warning",
   });

@@ -19,6 +19,7 @@
     { "tag": "v2", "new_sqlite_classes": ["PersonCell"] },
     { "tag": "v3", "new_sqlite_classes": ["HouseholdCell", "DurabilityLabCell"] }
   ],
+  "r2_buckets": [{ "binding": "SNAPSHOTS", "bucket_name": "secbot-snapshots" }],
   "vars": {
     "OPENROUTER_API_KEY": "",
     "BETTERSTACK_INCIDENTS_TOKEN": "",
@@ -26,6 +27,9 @@
     "SECBOT_DEVICE_KEYS": "",
     "SECBOT_PRIVATE_HOSTS": "",
     "SECBOT_HEARTBEAT_URLS": "",
-    "SECBOT_TIME_ZONE": ""
+    "SECBOT_TIME_ZONE": "",
+    "SECBOT_OPERATOR_KEY": "",
+    "SECBOT_FLEET_CELLS": "",
+    "SECBOT_HOUSEHOLD_URL": ""
   }
 }

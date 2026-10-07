@@ -1,6 +1,8 @@
 // The household cell over RPC-shaped calls: the owner cell's change is read by the second cell
 // (the local half), a response lost after apply() ran is retried with the same operation id and
-// applies once (fault injection), and the cell keeps its alarm at its heartbeat routine.
+// applies once (fault injection), and the cell keeps its alarm at its heartbeat routine. A snapshot
+// restored over later changes brings the list back and keeps the operation ids, so a replayed
+// change applies once.
 import type { HouseholdApplyResult, HouseholdChange, HouseholdClient } from "@secbot/cell-harness";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
@@ -156,5 +158,49 @@ describe("HouseholdCell", () => {
       late_ms: 90_000,
       retry_count: 0,
     });
+  });
+
+  it("restores a snapshot over later changes, keeps the op ids, and re-arms its alarm", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { household, storage } = setup();
+    const add = (opId: string, text: string): HouseholdChange => ({
+      opId,
+      document: "list",
+      fromCell: "owner",
+      kind: "add",
+      text,
+    });
+    await household.apply(add("owner:1:a", "milk"));
+    const dump = await household.snapshot(3);
+    expect(dump.contractStep).toBe(3);
+    await household.apply(add("owner:2:b", "bread"));
+    expect((await household.digest()).digest).not.toBe(dump.digest);
+
+    await storage.deleteAlarm();
+    const restored = await household.restore(JSON.parse(JSON.stringify(dump)));
+    expect(restored.digest).toBe(dump.digest);
+    expect((await household.read("list")).items.map((item) => item.text)).toEqual(["milk"]);
+    expect(await storage.getAlarm()).not.toBeNull();
+    // The replayed change was in the snapshot: it applies once.
+    expect(await household.apply(add("owner:1:a", "milk"))).toMatchObject({ duplicate: true });
+    expect((await household.read("list")).items).toHaveLength(1);
+    expect(await household.heartbeat()).toMatchObject({ lastOkAt: null });
+
+    const lines = log.mock.calls.map(
+      ([line]) => JSON.parse(String(line)) as Record<string, unknown>,
+    );
+    expect(lines.find((line) => line.event === "cell.restored")).toEqual({
+      event: "cell.restored",
+      cell: "household",
+      digest: dump.digest,
+      rows: dump.rows,
+    });
+    expect(
+      JSON.stringify(lines.filter((line) => String(line.event).startsWith("cell."))),
+    ).not.toContain("milk");
+
+    await household.wipe();
+    expect(await storage.getAlarm()).toBeNull();
+    expect((await household.digest()).rows).toBe(0);
   });
 });

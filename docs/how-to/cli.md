@@ -15,6 +15,9 @@ Run it with `mise run cli -- <command>` from the repo, or `node packages/cli/src
    run host setup and deploy. The cell stores only the hash.
 3. Point the CLI at your cell: set `SECBOT_CELL_URL`, or put `{"cellUrl": "..."}` in
    `~/.config/secbot/config.json`. The address is a private host name; it never goes in the repo.
+   In production your cell is served by the owner fleet (`celld@prod-owner`, worker port 8788);
+   the test cell's fleet (`celld@test`) listens on port 8787. For example
+   `SECBOT_CELL_URL=http://<private host name>:8788`.
 
 A key registered for one person is refused by every other person's cell, and the cell refuses any
 request that does not arrive on one of the private host names it was deployed with.

@@ -1,5 +1,8 @@
-# Shared by the celld role (listen address and ports) and the firewall role (rules).
-celld_worker_port: 8787
-celld_internal_port: 8081
-# The private-network interface; the worker listens on its address only.
+# Shared by the celld role (listen addresses and ports) and the firewall role (rules).
+# One worker port and one internal port per celld instance (fleet).
+celld_ports:
+  test: { worker: 8787, internal: 8081 }
+  prod-owner: { worker: 8788, internal: 8082 }
+  prod-shared: { worker: 8789, internal: 8083 }
+# The private-network interface; the workers listen on its address only.
 celld_private_interface: tailscale0

@@ -20,6 +20,24 @@ export type {
   CelldSqlStorage,
   CelldStorage,
 } from "./celld-types.ts";
+export {
+  type CellDump,
+  type DumpSchemaEntry,
+  type DumpTable,
+  type DumpValue,
+  databaseRunner,
+  digestCell,
+  digestTables,
+  dumpCell,
+  loadCell,
+  SNAPSHOT_FORMAT,
+  SnapshotDigestMismatch,
+  type SnapshotRunner,
+  type SnapshotSql,
+  storageRunner,
+  type TransactionalDatabase,
+  wipeCell,
+} from "./snapshot.ts";
 
 /** Opens pi-durable storage on a celld object's `ctx.storage`. */
 export function openCelldStorage(

@@ -2,11 +2,13 @@
 // mise run probe:ports — TCP probes of the celld ports from this machine. Every port must refuse
 // or time out. Addresses come from the environment only:
 //   SECBOT_PROBE_HOST   the address to probe (for example the VPS public address, from your shell)
-//   SECBOT_PROBE_PORTS  comma-separated ports; default: the worker port and the internal port
+//   SECBOT_PROBE_PORTS  comma-separated ports; default: every fleet's worker and internal port
 import { connect } from "node:net";
 
 const host = process.env.SECBOT_PROBE_HOST;
-const ports = (process.env.SECBOT_PROBE_PORTS ?? "8787,8081").split(",").map(Number);
+const ports = (process.env.SECBOT_PROBE_PORTS ?? "8787,8081,8788,8082,8789,8083")
+  .split(",")
+  .map(Number);
 if (!host) {
   console.error("probe:ports: set SECBOT_PROBE_HOST in your shell first");
   process.exit(1);

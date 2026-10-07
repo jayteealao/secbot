@@ -3,7 +3,8 @@
 // and a missing one without re-arming. Locally: on an idle cell whose harness is not
 // open, the alarm wakes it, the due reminder reaches the lead, and the lead's relay reaches an
 // open session socket. Locally: the owner cell's household change is read by the
-// second cell through the household cell. /alarms answers per cell, with the person alias.
+// second cell through the household cell. /alarms answers per cell; `person` is the second
+// person's cell (the release workflows' name), and no cells means every cell of the fleet.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   CellAlarm,
@@ -254,13 +255,17 @@ describe("person cell alarm", () => {
     expect(read.items.map((item) => [item.itemId, item.text])).toEqual([["owner:lab:1", "flour"]]);
   });
 
-  it("answers /alarms for each named cell, with person standing for both person cells", async () => {
+  it("answers /alarms for each named cell, with person naming the second person's cell", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = setup();
     const body = (await (
       await alarms(new URL("http://cell/alarms?cells=person,household,ghost"), s.env)
     ).json()) as { cells: Record<string, { ok: boolean; cell: string; reason?: string }> };
-    expect(Object.keys(body.cells)).toEqual(["owner", "second", "household", "ghost"]);
+    expect(Object.keys(body.cells)).toEqual(["second", "household", "ghost"]);
+    const every = (await (await alarms(new URL("http://cell/alarms"), s.env)).json()) as {
+      cells: Record<string, unknown>;
+    };
+    expect(Object.keys(every.cells)).toEqual(["owner", "second", "household"]);
     expect(body.cells.ghost).toMatchObject({ ok: false, reason: "unknown cell" });
     expect(body.cells.household).toMatchObject({ cell: "household" });
     const health = (await (await status(s, "household")).json()) as {

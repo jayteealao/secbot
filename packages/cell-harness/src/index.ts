@@ -15,7 +15,10 @@ export {
   createHeartbeatRoutine,
   HEARTBEAT_EVERY_MS,
   HEARTBEAT_ROUTINE,
+  HeartbeatDoc,
   type HeartbeatEnv,
+  type HeartbeatState,
+  heartbeatState,
   heartbeatUrl,
   pingRoutineHeartbeat,
 } from "./heartbeat.ts";

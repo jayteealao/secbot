@@ -11,18 +11,50 @@ celld_esbuild_sha512:
   x86_64: "e314d9af5154992a105b85c85a68addedcd0ad44d933e3773f45d5f3144e298179d177c8ef178ef74fb56d9bcdc3122e7d0f610d0551247e588603d517c03f1d"
   aarch64: "a56e000b43f78adf1cedda3d315338a79d45cc7cdd33f4d9adeaeeae045c1c9d964dad55435088ab5f319dc7e9049c38a23922659aca5b6c8805604ff768fa52"
 
-# celld_worker_port, celld_internal_port, and celld_private_interface live in
-# group_vars/all.yml, because the firewall role reads them too.
+# celld_ports and celld_private_interface live in group_vars/all.yml, because the firewall role
+# reads them too.
 
-# Instances: test now; the production rollout adds prod (its own bucket and group secbot-prod).
+# Instances (fleets). celld runs one application per fleet (celld v0.6.1 README, "A fleet runs
+# one application"), so each production rollout stage is its own fleet: prod-owner serves the
+# owner cell, prod-shared the second person's cell and the household cell. Both share the
+# production bucket by key prefix (celld v0.6.1 docs/README.md:267-270). The test cell is one
+# fleet that serves every cell. Ports come from celld_ports in group_vars/all.yml.
 celld_instances:
   - name: test
     env: test-cell
+    group: secbot-test
     bucket_env: SECBOT_TEST_BUCKET
+    prefix: ""
     access_key_env: SECBOT_TEST_R2_ACCESS_KEY_ID
     secret_key_env: SECBOT_TEST_R2_SECRET_ACCESS_KEY
     heartbeat_env: SECBOT_TEST_HEARTBEAT_URL
+  - name: prod-owner
+    env: production
+    group: secbot-prod
+    bucket_env: SECBOT_PROD_BUCKET
+    prefix: owner
+    access_key_env: SECBOT_PROD_R2_ACCESS_KEY_ID
+    secret_key_env: SECBOT_PROD_R2_SECRET_ACCESS_KEY
+  - name: prod-shared
+    env: production
+    group: secbot-prod
+    bucket_env: SECBOT_PROD_BUCKET
+    prefix: shared
+    access_key_env: SECBOT_PROD_R2_ACCESS_KEY_ID
+    secret_key_env: SECBOT_PROD_R2_SECRET_ACCESS_KEY
+
+# The V8 heap limit of every cell isolate (CELLD_V8_HEAP_LIMIT_MB, celld v0.6.1
+# crates/celld/env_vars.rs:300; default 128 MiB, crates/celld/js.rs:2345). Raised only when the
+# heap measurement goes over it (mise run measure:heap).
+celld_v8_heap_limit_mb: 128
 
 # Replication starts only after the bucket smoke test passed (mise run smoke:r2 and the
-# celld diagnose task). Pass -e celld_replication_confirmed=true on that run.
+# celld diagnose task). Pass -e celld_replication_confirmed=true on that run; it starts the
+# test fleet.
 celld_replication_confirmed: false
+
+# The production fleets are set up only with -e celld_production=true (the production bucket
+# values in the shell), and start only with -e celld_production_confirmed=true after smoke:r2
+# passed against the production bucket.
+celld_production: false
+celld_production_confirmed: false

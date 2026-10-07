@@ -6,6 +6,9 @@
  * every cell uses one mechanism (pi-durable tasks with the wake time in the checkpoint) and one
  * alarm check.
  *
+ * Snapshots (`snapshot`, `restore`, `wipe`, `digest`) dump and load the whole database, the change
+ * log with its operation ids included, so a change replayed after a restore still applies once.
+ *
  * RPC on a class that does not extend `DurableObject` needs the `js_rpc` compatibility flag, which
  * the worker configs set (source: .scratch/sources/git/celld tag v0.6.1,
  * crates/celld/js/harness.js:2875-2879 and 5387-5398; docs/cloudflare-compat.md "Compatibility
@@ -22,9 +25,11 @@ import {
   createHeartbeatRoutine,
   ensureRoutines,
   type HeartbeatEnv,
+  type HeartbeatState,
   type HouseholdApplyResult,
   type HouseholdChange,
   type HouseholdDocument,
+  heartbeatState,
   logEvent,
   type NextWake,
   nextWake,
@@ -32,9 +37,18 @@ import {
   wakesOf,
 } from "@secbot/cell-harness";
 import {
+  type CellDump,
   type CelldAlarmInfo,
   type CelldCellStorage,
+  type CelldSqliteDatabase,
+  databaseRunner,
+  digestCell,
+  dumpCell,
+  loadCell,
   openCelldStorageWithDatabase,
+  type SnapshotRunner,
+  storageRunner,
+  wipeCell,
 } from "@secbot/cell-storage";
 import { ChangeLog, type HistoryEntry } from "./change-log.ts";
 
@@ -61,6 +75,7 @@ export interface HouseholdCellOptions {
 interface Opened {
   readonly log: ChangeLog;
   readonly harness: Harness;
+  readonly database: CelldSqliteDatabase;
   readonly wakes: () => Promise<{
     readonly summary: WakeSummary;
     readonly next: NextWake | undefined;
@@ -121,6 +136,7 @@ export class HouseholdCell {
     const opened: Opened = {
       log,
       harness,
+      database,
       wakes: async () => {
         const summary = wakesOf(await harness.inspect(context));
         return { summary, next: nextWake(summary, this.now()) };
@@ -176,6 +192,56 @@ export class HouseholdCell {
     const opened = await this.open();
     const { summary } = await opened.wakes();
     return alarmVerdict(HOUSEHOLD_CELL_NAME, alarm, summary);
+  }
+
+  /** The open storage driver's queue when the cell is open, else the storage itself. */
+  private async runner(): Promise<SnapshotRunner> {
+    const opening = this.opening;
+    return opening === undefined
+      ? storageRunner(this.state.storage)
+      : databaseRunner((await opening).database);
+  }
+
+  /** RPC: the whole database as one dump, taken in one transaction. */
+  async snapshot(contractStep: number): Promise<CellDump> {
+    const dump = await dumpCell(await this.runner(), { contractStep, now: this.now });
+    logEvent("cell.snapshot", { cell: HOUSEHOLD_CELL_NAME, digest: dump.digest, rows: dump.rows });
+    return dump;
+  }
+
+  /**
+   * RPC: replaces the database with `dump`. The routine harness closes first, the load is one
+   * transaction checked against the dump's digest, and the reopen re-arms the alarm from the
+   * restored checkpoints.
+   */
+  async restore(dump: CellDump): Promise<{ digest: string; rows: number }> {
+    await this.close();
+    const result = await loadCell(storageRunner(this.state.storage), dump);
+    await this.open();
+    logEvent("cell.restored", {
+      cell: HOUSEHOLD_CELL_NAME,
+      digest: result.digest,
+      rows: result.rows,
+    });
+    return result;
+  }
+
+  /** RPC: drops every table and the alarm (the test cell after a restore drill). */
+  async wipe(): Promise<void> {
+    await this.close();
+    await wipeCell(storageRunner(this.state.storage));
+    await this.state.storage.deleteAlarm();
+    logEvent("cell.wiped", { cell: HOUSEHOLD_CELL_NAME });
+  }
+
+  /** RPC: the database digest and row count as they are now. */
+  async digest(): Promise<{ digest: string; rows: number }> {
+    return digestCell(await this.runner());
+  }
+
+  /** RPC: the heartbeat routine's last run (check:heartbeats). */
+  async heartbeat(): Promise<HeartbeatState> {
+    return heartbeatState((await this.open()).harness);
   }
 
   /** celld's alarm: resume the routines, wait while due work runs, re-arm. */

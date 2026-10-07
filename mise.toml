@@ -89,8 +89,9 @@ run = "node scripts/audit-deps.mjs"
 description = "License gate: fail on any dependency license outside the plan's allowlist"
 run = "node scripts/check-licenses.mjs"
 
-# Cell tasks. test:conformance, deploy:dry-run, stage, and deploy are real; the tasks after them
-# are stubs that fail with a clear message until the production pipeline replaces them.
+# Cell tasks. Every cell task below is real; docs/reference/mise-tasks.md lists each one's flags,
+# exit codes, and printed phrases. Cell names follow the release workflows: owner, person (the
+# second person's cell), household, and secrets (skipped with a printed line until it exists).
 #
 # VPS-side contract for the real tasks (ship plan v2, Blocks A, C, and E):
 # - Two VPS users. deploy-test has a forced command that only stages bundles and deploys
@@ -116,24 +117,24 @@ description = "Stage a server bundle in the VPS release store by tag and SHA-256
 run = "node scripts/vps.mjs stage"
 
 [tasks.deploy]
-description = "Deploy a staged tag to an environment (--env test-cell|production --version [--sha256]); holds the VPS lock and refuses a downgrade past a contract step"
+description = "Deploy a staged tag to an environment's fleets (--env test-cell|production --version [--sha256] [--cells]); holds the VPS lock and refuses a downgrade past a contract step"
 run = "node scripts/vps.mjs deploy"
 
 [tasks.snapshot]
 description = "Snapshot every cell of an environment to the off-provider bucket under a run-pinned id (pre-<tag>-<run-id>)"
-run = "node -e \"console.error('snapshot arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs snapshot"
 
 [tasks."ledger:record"]
 description = "Record an approved release, rollback, or restore attempt in the VPS deploy ledger"
-run = "node -e \"console.error('ledger:record arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs ledger-record"
 
 [tasks."ledger:verify"]
 description = "Fail unless the deploy ledger holds this run's approved attempt and no newer deploy, rollback, or restore"
-run = "node -e \"console.error('ledger:verify arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs ledger-verify"
 
 [tasks.restore]
 description = "Disaster step: restore one cell from a snapshot under the VPS lock, then confirm it read the outbound-effects log; never the secrets cell"
-run = "node -e \"console.error('restore arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs restore"
 
 [tasks."check:cells"]
 description = "Check that every cell in an environment is up on a version"
@@ -152,8 +153,36 @@ description = "On the test cell: SIGKILL with work in flight, a late alarm after
 run = "node scripts/vps.mjs durability"
 
 [tasks."check:heartbeats"]
-description = "Check heartbeat freshness for every cell and routine since the deploy"
-run = "node -e \"console.error('check:heartbeats arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+description = "Check heartbeat freshness for every cell and routine (--since-deploy [--cells] [--env]); needs HEARTBEAT_API_TOKEN"
+run = "node scripts/vps.mjs check-heartbeats"
+
+[tasks."restore:drill"]
+description = "Restore drill: copy a production snapshot (default: the newest release snapshot) into the test cell and restore it ([--snapshot] [--cells owner]); the next test-cell deploy wipes it"
+run = "node scripts/vps.mjs drill"
+
+[tasks."test:integration"]
+description = "The release integration suite on the test cell under one lease: the durability lab, a snapshot round trip, and the alarm check (--env test-cell)"
+run = "node scripts/vps.mjs integration"
+
+[tasks."measure:heap"]
+description = "Heap of one cell with a lead and four specialists at once and a long job, from celld /state (--env test-cell [--seconds 180])"
+run = "node scripts/vps.mjs measure-heap"
+
+[tasks."measure:write-delay"]
+description = "Median and 95th percentile of committed single-row writes on the test cell (--env test-cell [--writes 200])"
+run = "node scripts/vps.mjs measure-write-delay"
+
+[tasks."measure:cost"]
+description = "Monthly model and fixed cost per person with the arithmetic (--assumptions <json> [--log <cell log> --log-days N] [--out <md>])"
+run = "node scripts/measure-cost.mjs"
+
+[tasks."drill:heartbeat-alert"]
+description = "Induced heartbeat alert: stop the test cell for 420 s (past the 300 s period and 60 s grace), then start it"
+run = "node scripts/vps.mjs alert-drill --env test-cell --down-seconds 420"
+
+[tasks."vps:lease"]
+description = "Hold or free the VPS lock across several commands (acquire|release --holder H [--seconds N])"
+run = "node scripts/vps.mjs lease"
 
 [tasks."check:app-builds"]
 description = "Check the processing state in Play internal testing and TestFlight"

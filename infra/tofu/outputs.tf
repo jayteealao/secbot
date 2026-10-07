@@ -22,6 +22,12 @@ output "r2_secret_access_keys" {
 
 output "test_cell_heartbeat_url" {
   description = "Ping URL for the test cell's heartbeat routine."
-  value       = betteruptime_heartbeat.test_cell.url
+  value       = betteruptime_heartbeat.cell["test"].url
+  sensitive   = true
+}
+
+output "heartbeat_urls" {
+  description = "Ping URL per cell (test, owner, second, household) for SECBOT_HEARTBEAT_URLS and SECBOT_PROD_HEARTBEAT_URLS."
+  value       = { for cell, heartbeat in betteruptime_heartbeat.cell : cell => heartbeat.url }
   sensitive   = true
 }

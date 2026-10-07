@@ -1,7 +1,8 @@
 # Created by wf ship-plan build — plan v1, 2026-10-05
 # Patched by wf ship-plan build — plan v2, 2026-10-05
-# Server release (ship plan Blocks A–E): build → conformance → SBOM → test cell →
-# one production approval → staged in-place rollout → GitHub release.
+# Server release (ship plan Blocks A–E): build → conformance → SBOM → test cell → integration
+# suite on the test cell → one production approval → staged in-place rollout (owner, then the
+# second person and the household; secrets once that cell exists) → GitHub release.
 #
 # Environments:
 #   test-cell          — no reviewer. Its SSH key (user deploy-test) and network tag
@@ -145,8 +146,33 @@ jobs:
           SHA256: ${{ needs.build.outputs.sha256 }}
         run: mise run deploy -- --env test-cell --version "$GITHUB_REF_NAME" --sha256 "$SHA256"
 
-  verify-test-cell:
+  # The integration suite on the test cell, before any production stage: the durability lab
+  # (SIGKILL with work in flight, a late alarm, the household round trip, induced alarm checks),
+  # a snapshot round trip, and the alarm check. It runs on a scripted model, so it needs no
+  # outside account, and it holds one VPS lease for its whole run.
+  integration-test-cell:
     needs: deploy-test-cell
+    runs-on: ubuntu-latest
+    environment: test-cell
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          install: "false"
+      - uses: ./.github/actions/vps-access
+        with:
+          oauth-client-id: ${{ secrets.PRIVATE_NET_TEST_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_TEST_OAUTH_SECRET }}
+          network-tag: tag:ci-test
+          host: ${{ secrets.VPS_DEPLOY_HOST }}
+          ssh-key: ${{ secrets.TEST_CELL_DEPLOY_SSH_KEY }}
+          known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy-test
+      - name: Run the integration suite on the test cell
+        run: mise run test:integration -- --env test-cell
+
+  verify-test-cell:
+    needs: integration-test-cell
     runs-on: ubuntu-latest
     environment: test-cell
     env:
@@ -331,8 +357,11 @@ jobs:
           cmd: mise run check:heartbeats -- --since-deploy --cells person,household
           min-minutes: "0"
 
+  # Skipped until the secrets cell exists: set the repository variable SECBOT_SECRETS_CELL to
+  # "true" when it does.
   deploy-secrets-cell:
     needs: [build, verify-person-and-household-cells]
+    if: ${{ vars.SECBOT_SECRETS_CELL == 'true' }}
     runs-on: ubuntu-latest
     environment: production-rollout
     steps:
@@ -356,8 +385,10 @@ jobs:
           SHA256: ${{ needs.build.outputs.sha256 }}
         run: mise run deploy -- --env production --version "$GITHUB_REF_NAME" --sha256 "$SHA256" --cells secrets
 
+  # Runs after the secrets stage, or after its skip while the secrets cell does not exist yet.
   verify-all-cells:
-    needs: deploy-secrets-cell
+    needs: [verify-person-and-household-cells, deploy-secrets-cell]
+    if: ${{ !cancelled() && needs.verify-person-and-household-cells.result == 'success' && contains(fromJSON('["success","skipped"]'), needs.deploy-secrets-cell.result) }}
     runs-on: ubuntu-latest
     environment: production-rollout
     env:

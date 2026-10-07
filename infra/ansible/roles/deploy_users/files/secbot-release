@@ -3,27 +3,47 @@
 # authorized_keys forces it: command="/usr/local/bin/secbot-release <user>",restrict
 # The client's request arrives in SSH_ORIGINAL_COMMAND and is parsed here, never run by a shell.
 #
-#   stage       --version V --sha256 S          bundle on stdin; kept only if its SHA-256 is S
-#   deploy      --env E --version V [--sha256 S] deploy a staged bundle to an environment
-#   conformance --version V [--long-transaction] deploy V to the test cell, run the in-cell suite
-#   manifest    --env E                          print the deployed manifest
-#   health      --env E [--cells C]              print the cell health (version, and each named cell)
-#   alarms      --env E [--cells C]              print each cell's stored alarm against its earliest timer
-#   lab         --env test-cell --route R [--at T]  call the test cell's durability lab
-#   crash       --env test-cell                  SIGKILL celld@test, wait until it answers again
-#   down        --env test-cell --seconds N      stop celld@test for N seconds, start it, wait for it
+#   stage         --version V --sha256 S          bundle on stdin; kept only if its SHA-256 is S
+#   deploy        --env E --version V [--sha256 S] [--cells C] [--run-id R --run-attempt A]
+#                                                  deploy a staged bundle to the fleets of the cells
+#   conformance   --version V [--long-transaction] deploy V to the test cell, run the in-cell suite
+#   manifest      --env E                          print the deployed manifest (each fleet)
+#   health        --env E [--cells C]              print the cell health (version, and each named cell)
+#   alarms        --env E [--cells C]              print each cell's stored alarm against its earliest timer
+#   heartbeats    [--env E] [--cells C]            each cell's last heartbeat and its fleet's deploy time
+#   snapshot      --env E --snapshot-id ID         every cell of the environment to its fleet bucket
+#   restore       --env E --cells CELL --snapshot ID  load one cell from its snapshot (never secrets)
+#   digest        --env E [--cells C]              each cell's database digest
+#   drill         [--snapshot ID] [--cells C]      copy a production snapshot into the test cell, restore it
+#   ledger-record --kind K [--version V] [--cells C] [--snapshot-id ID] [--run-id R --run-attempt A]
+#   ledger-read                                    print the deploy ledger (JSON lines)
+#   lease         acquire|release --holder H [--seconds N]  hold the VPS lock across several commands
+#   state         --env E|all                      celld's /state of each fleet (memory, isolates)
+#   write-delay   --env test-cell --writes N       time N single-row committed writes (ms each)
+#   lab           --env test-cell --route R [--at T]  call the test cell's durability lab
+#   crash         --env test-cell                  SIGKILL celld@test, wait until it answers again
+#   down          --env test-cell --seconds N      stop celld@test for N seconds, start it, wait for it
+#
+# Fleets: celld runs one application per fleet (celld v0.6.1 README, "A fleet runs one
+# application"), so each rollout stage is its own fleet. The test cell is one fleet (celld@test)
+# that serves every cell. Production is celld@prod-owner (the owner cell) and celld@prod-shared
+# (the second person's cell and the household cell); both share the production bucket by key
+# prefix. Cell names follow the release workflows: `person` is the second person's cell; the
+# secrets cell is skipped with a printed line until it exists.
 #
 # crash and down use exactly three sudo commands for celld@test (sudoers drop-in from host setup);
-# nothing here can stop, kill, or start the production unit.
+# nothing here can stop, kill, or start a production unit.
 #
 # A deploy fills the worker config's runtime vars (the OpenRouter key, the Better Stack incidents
-# token and e-mail, the device keys, the private host names, and the optional heartbeat ping URLs
-# and time zone) from /etc/secbot/<env>-runtime.env into
-# a temporary copy, because celld deploy has no secret mechanism; the values never enter the repo,
-# the bundle, CI, or this tool's output.
+# token and e-mail, the device keys, the private host names, the heartbeat ping URLs and time
+# zone, and the operator key) from /etc/secbot on this host into a temporary copy, because celld
+# deploy has no secret mechanism; the values never enter the repo, the bundle, CI, or this tool's
+# output. The operator key also gates the cells' operator routes; this tool sends it from a
+# private header file, never on a command line.
 #
 # Every command that changes the release store or a cell holds one lock for its whole run, so a
-# release, a rollback, a restore, and a development test run never overlap.
+# release, a rollback, a restore, and a development test run never overlap. A multi-step run takes
+# a lease first; while another holder's lease is live, every locking command waits for it.
 set -euo pipefail
 umask 027
 
@@ -32,7 +52,12 @@ STATE=/var/lib/secbot
 RELEASES="$STATE/releases"
 DEPLOYS="$STATE/deploy"
 LOCK="$STATE/deploy.lock"
+LEASE="$STATE/lease"
+LEDGER="$STATE/ledger.jsonl"
+DRILL_DIRTY="$STATE/drill-dirty"
+SNAPSHOT_BUCKET=secbot-snapshots
 KEEP=5
+WAIT_SECONDS=1800
 
 die() { echo "secbot-release: $*" >&2; exit 1; }
 
@@ -43,10 +68,13 @@ case "$caller" in
 esac
 
 read -r -a argv <<<"${SSH_ORIGINAL_COMMAND:-}"
-[ "${#argv[@]}" -gt 0 ] || die "no command; expected stage, deploy, conformance, manifest, health, alarms, lab, crash, or down"
+[ "${#argv[@]}" -gt 0 ] || die "no command; expected stage, deploy, conformance, manifest, health, alarms, heartbeats, snapshot, restore, digest, drill, ledger-record, ledger-read, lease, state, write-delay, lab, crash, or down"
 command="${argv[0]}"
-version="" sha256="" env="" long_transaction=0 cells="" lab_route="" at="" seconds=""
+action=""
 i=1
+if [ "$command" = "lease" ]; then action="${argv[1]:-}"; i=2; fi
+version="" sha256="" env="" long_transaction=0 cells="" lab_route="" at="" seconds=""
+snapshot_id="" kind="" run_id="" run_attempt="" holder="" writes=""
 while [ "$i" -lt "${#argv[@]}" ]; do
   flag="${argv[$i]}"
   value="${argv[$((i + 1))]:-}"
@@ -59,31 +87,188 @@ while [ "$i" -lt "${#argv[@]}" ]; do
     --route) lab_route="$value"; i=$((i + 2)) ;;
     --at) at="$value"; i=$((i + 2)) ;;
     --seconds) seconds="$value"; i=$((i + 2)) ;;
+    --snapshot-id | --snapshot) snapshot_id="$value"; i=$((i + 2)) ;;
+    --kind) kind="$value"; i=$((i + 2)) ;;
+    --run-id) run_id="$value"; i=$((i + 2)) ;;
+    --run-attempt) run_attempt="$value"; i=$((i + 2)) ;;
+    --holder) holder="$value"; i=$((i + 2)) ;;
+    --writes) writes="$value"; i=$((i + 2)) ;;
     *) die "unknown argument '$flag'" ;;
   esac
 done
 
 [ -z "$version" ] || [[ "$version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || die "bad version '$version'"
 [ -z "$sha256" ] || [[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || die "bad sha256"
-[ -z "$env" ] || [[ " $allowed_envs " == *" $env "* ]] || die "$caller may not use environment '$env'"
+[ -z "$env" ] || [ "$env" = "all" ] || [[ " $allowed_envs " == *" $env "* ]] || die "$caller may not use environment '$env'"
 [ -z "$cells" ] || [[ "$cells" =~ ^[a-z][a-z0-9,-]*$ ]] || die "bad cells '$cells'"
-[ -z "$cells" ] || [ "$command" = "health" ] || [ "$command" = "alarms" ] ||
-  die "deploy --cells arrives with the production rollout; this release deploys the whole environment"
-[ -z "$lab_route" ] || [[ "$lab_route" =~ ^(arm|state|alarm-report|household-roundtrip|rearm|alarm)$ ]] || die "bad lab route '$lab_route'"
+[ -z "$lab_route" ] || [[ "$lab_route" =~ ^(arm|state|alarm-report|household-roundtrip|rearm|alarm|load|load-state)$ ]] || die "bad lab route '$lab_route'"
 [ -z "$at" ] || [[ "$at" =~ ^([0-9]{13}|none)$ ]] || die "bad --at '$at'"
-[ -z "$seconds" ] || [[ "$seconds" =~ ^[0-9]{1,3}$ ]] || die "bad --seconds '$seconds'"
+[ -z "$seconds" ] || [[ "$seconds" =~ ^[0-9]{1,5}$ ]] || die "bad --seconds '$seconds'"
+[ -z "$snapshot_id" ] || [[ "$snapshot_id" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || die "bad snapshot id '$snapshot_id'"
+[ -z "$kind" ] || [[ "$kind" =~ ^(release|rollback|restore)$ ]] || die "bad kind '$kind'"
+[ -z "$run_id" ] || [[ "$run_id" =~ ^[0-9]{1,20}$ ]] || die "bad run id"
+[ -z "$run_attempt" ] || [[ "$run_attempt" =~ ^[0-9]{1,4}$ ]] || die "bad run attempt"
+[ -z "$holder" ] || [[ "$holder" =~ ^[A-Za-z0-9._:-]{1,80}$ ]] || die "bad holder '$holder'"
+[ -z "$writes" ] || [[ "$writes" =~ ^[0-9]{1,4}$ ]] || die "bad --writes '$writes'"
+
+# ---- fleets and cells --------------------------------------------------------------------------
+
+fleets_of_env() {
+  case "$1" in
+    test-cell) echo "test" ;;
+    production) echo "prod-owner prod-shared" ;;
+    all) echo "test prod-owner prod-shared" ;;
+  esac
+}
+env_of_fleet() { [ "$1" = test ] && echo test-cell || echo production; }
+fleet_cells() {
+  case "$1" in
+    test) echo "owner second household" ;;
+    prod-owner) echo "owner" ;;
+    prod-shared) echo "second household" ;;
+  esac
+}
+# The deploy directory keeps the test cell's earlier name, so its deploy history stays readable.
+fleet_dir() { [ "$1" = test ] && echo "$DEPLOYS/test-cell" || echo "$DEPLOYS/$1"; }
+fleet_of_cell() {
+  local target_env="$1" cell="$2" fleet
+  for fleet in $(fleets_of_env "$target_env"); do
+    [[ " $(fleet_cells "$fleet") " == *" $cell "* ]] && { echo "$fleet"; return 0; }
+  done
+  return 1
+}
+
+# The workflow names to the cells' own: person is the second person; secrets is skipped.
+normalized_cells() {
+  local name out=""
+  for name in ${1//,/ }; do
+    case "$name" in
+      secrets) echo "cell secrets skipped: it arrives with the secrets cell" >&2; continue ;;
+      person) name=second ;;
+    esac
+    [[ " $out " == *" $name "* ]] || out="$out $name"
+  done
+  echo "${out# }"
+}
+
+# The fleets that serve the named cells (every fleet of the environment without names).
+fleets_for() {
+  local target_env="$1" list="$2" fleets="" cell fleet
+  if [ -z "$list" ]; then fleets_of_env "$target_env"; return; fi
+  for cell in $(normalized_cells "$list"); do
+    [ "$cell" = lab ] && [ "$target_env" = test-cell ] && cell=owner
+    fleet="$(fleet_of_cell "$target_env" "$cell")" || die "no fleet of $target_env serves cell '$cell'"
+    [[ " $fleets " == *" $fleet "* ]] || fleets="$fleets $fleet"
+  done
+  echo "${fleets# }"
+}
+
+# The named cells this fleet serves, comma separated (every served cell without names).
+cells_in_fleet() {
+  local fleet="$1" list="$2" out="" cell
+  if [ -z "$list" ]; then
+    out="$(fleet_cells "$fleet")"
+  else
+    for cell in $(normalized_cells "$list" 2>/dev/null); do
+      if [[ " $(fleet_cells "$fleet") " == *" $cell "* ]] || { [ "$cell" = lab ] && [ "$fleet" = test ]; }; then
+        out="$out $cell"
+      fi
+    done
+  fi
+  out="${out# }"
+  echo "${out// /,}"
+}
+
+# ---- the VPS lock and the lease ----------------------------------------------------------------
+
+lease_read() { [ -f "$LEASE" ] && cat "$LEASE" || true; }
+
+# True when no other holder's lease is live.
+lease_free() {
+  local record lease_holder until
+  record="$(lease_read)"
+  [ -n "$record" ] || return 0
+  read -r lease_holder until <<<"$record"
+  [ "$(date +%s)" -ge "${until:-0}" ] && return 0
+  [ -n "$holder" ] && [ "$holder" = "$lease_holder" ]
+}
 
 with_lock() {
   exec 9<"$LOCK"
-  flock -w 1800 9 || die "the VPS deploy lock is busy"
+  local deadline=$(( $(date +%s) + WAIT_SECONDS ))
+  while :; do
+    flock -w "$WAIT_SECONDS" 9 || die "the VPS deploy lock is busy"
+    lease_free && return 0
+    flock -u 9
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      local lease_holder until
+      read -r lease_holder until <<<"$(lease_read)"
+      die "the VPS lock is held by $lease_holder until $(date -u -d "@$until" +%Y-%m-%dT%H:%M:%SZ)"
+    fi
+    sleep 10
+  done
 }
 
-env_file() {
-  local file="/etc/secbot/$1.env"
-  [ -r "$file" ] || die "environment '$1' is not set up on this host ($file is missing)"
+do_lease() {
+  [ -n "$holder" ] || die "lease needs --holder"
+  case "$action" in
+    acquire)
+      local ttl="${seconds:-3600}"
+      [ "$ttl" -ge 60 ] && [ "$ttl" -le 14400 ] || die "lease --seconds must be 60-14400"
+      with_lock
+      echo "$holder $(( $(date +%s) + ttl ))" >"$LEASE"
+      echo "lease acquired by $holder for $ttl s"
+      ;;
+    release)
+      exec 9<"$LOCK"
+      flock -w "$WAIT_SECONDS" 9 || die "the VPS deploy lock is busy"
+      local lease_holder until
+      read -r lease_holder until <<<"$(lease_read)"
+      if [ "${lease_holder:-}" = "$holder" ]; then rm -f "$LEASE"; echo "lease released by $holder"; else echo "lease: $holder holds no lease"; fi
+      ;;
+    *) die "lease needs acquire or release" ;;
+  esac
+}
+
+# ---- environment files and the operator key ---------------------------------------------------
+
+# Sources one fleet's celld settings (bucket, endpoint, listeners, bucket credentials).
+fleet_file() {
+  local file="/etc/secbot/fleet-$1.env"
+  [ -r "$file" ] || die "fleet '$1' is not set up on this host ($file is missing)"
   # shellcheck disable=SC1090 # written by Ansible from the owner's environment
   set -a; . "$file"; set +a
-  : "${CELLD_BUCKET:?}" "${CELLD_ENDPOINT:?}" "${CELLD_LISTEN:?}"
+  : "${CELLD_BUCKET:?}" "${CELLD_ENDPOINT:?}" "${CELLD_LISTEN:?}" "${CELLD_INTERNAL_PORT:?}"
+}
+
+# Prints a fleet's worker listener (host:port) without changing this shell.
+listen_of() { ( fleet_file "$1"; echo "$CELLD_LISTEN" ); }
+
+operator_key_file() { echo "/etc/secbot/$1-operator.key"; }
+
+# Writes a private curl header file with the operator key; prints its path.
+operator_header() {
+  local file key header
+  file="$(operator_key_file "$1")"
+  [ -r "$file" ] || die "the operator key for $1 is missing ($file); run host setup"
+  key="$(cat "$file")"
+  header="$(mktemp)"
+  printf 'x-secbot-operator: %s\n' "$key" >"$header"
+  echo "$header"
+}
+
+# curl to a fleet's operator route with the operator key; prints the body.
+ops_call() {
+  local fleet="$1" method="$2" path="$3" header status
+  header="$(operator_header "$(env_of_fleet "$fleet")")"
+  local body
+  body="$(mktemp)"
+  status="$(curl -sS --max-time 600 -o "$body" -w '%{http_code}' -X "$method" -H "@$header" "http://$(listen_of "$fleet")$path")" || status=000
+  rm -f "$header"
+  cat "$body"
+  rm -f "$body"
+  echo
+  [ "$status" -ge 200 ] && [ "$status" -lt 300 ] || { echo "secbot-release: $method $path on $fleet answered $status" >&2; return 1; }
 }
 
 # Runtime vars the worker config declares with empty values; each must be set for a deploy.
@@ -94,9 +279,16 @@ OPTIONAL_RUNTIME_VARS="SECBOT_HEARTBEAT_URLS SECBOT_TIME_ZONE"
 # Copies the app to a private temporary directory and fills its runtime vars; prints the copy's path.
 # Names a missing or unsafe setting, never its value.
 render_app() {
-  local target_env="$1" app="$2"
+  local target_env="$1" fleet="$2" app="$3"
   local file="/etc/secbot/$target_env-runtime.env"
   [ -r "$file" ] || die "runtime settings for $target_env are missing ($file); run host setup with the runtime values in your shell"
+  local key_file
+  key_file="$(operator_key_file "$target_env")"
+  [ -r "$key_file" ] || die "the operator key for $target_env is missing ($key_file); run host setup"
+  local fleet_cells_value="" household_url=""
+  # The test cell's single fleet serves every cell: SECBOT_FLEET_CELLS stays empty there.
+  [ "$fleet" = test ] || fleet_cells_value="$(cells_in_fleet "$fleet" "")"
+  household_url="http://$(listen_of "$(fleet_of_cell "$target_env" household)")"
   local copy
   copy="$(mktemp -d)"
   cp -a "$app/." "$copy/"
@@ -105,26 +297,29 @@ render_app() {
     # shellcheck disable=SC1090 # written by Ansible from the owner's environment
     . "$file"
     set +a
-    for name in $RUNTIME_VARS; do
-      value="${!name:-}"
-      if [ -z "$value" ]; then echo "secbot-release: runtime setting $name is empty in $file" >&2; exit 1; fi
+    SECBOT_OPERATOR_KEY="$(cat "$key_file")"
+    SECBOT_FLEET_CELLS="$fleet_cells_value"
+    SECBOT_HOUSEHOLD_URL="$household_url"
+    fill() {
+      local name="$1" required="$2" value="${!1:-}"
+      if [ -z "$value" ]; then
+        [ "$required" = required ] && { echo "secbot-release: runtime setting $name is empty in $file" >&2; return 1; }
+        return 0
+      fi
       if ! [[ "$value" =~ ^[A-Za-z0-9._@:,+/=-]+$ ]]; then
         echo "secbot-release: runtime setting $name has characters the config cannot carry" >&2
-        exit 1
+        return 1
       fi
-      grep -q "\"$name\": \"\"" "$copy/wrangler.jsonc" || { echo "secbot-release: the bundle's config does not declare $name" >&2; exit 1; }
-      sed -i "s|\"$name\": \"\"|\"$name\": \"$value\"|" "$copy/wrangler.jsonc"
-    done
-    for name in $OPTIONAL_RUNTIME_VARS; do
-      value="${!name:-}"
-      [ -n "$value" ] || continue
-      if ! [[ "$value" =~ ^[A-Za-z0-9._@:,+/=-]+$ ]]; then
-        echo "secbot-release: runtime setting $name has characters the config cannot carry" >&2
-        exit 1
+      if ! grep -q "\"$name\": \"\"" "$copy/wrangler.jsonc"; then
+        # An older bundle that does not declare an optional var keeps its config unchanged.
+        [ "$required" = required ] && { echo "secbot-release: the bundle's config does not declare $name" >&2; return 1; }
+        return 0
       fi
-      # An older bundle that does not declare the var keeps its config unchanged.
-      grep -q "\"$name\": \"\"" "$copy/wrangler.jsonc" || continue
       sed -i "s|\"$name\": \"\"|\"$name\": \"$value\"|" "$copy/wrangler.jsonc"
+    }
+    for name in $RUNTIME_VARS; do fill "$name" required || exit 1; done
+    for name in $OPTIONAL_RUNTIME_VARS SECBOT_OPERATOR_KEY SECBOT_FLEET_CELLS SECBOT_HOUSEHOLD_URL; do
+      fill "$name" optional || exit 1
     done
   ); then
     rm -rf "$copy"
@@ -133,7 +328,7 @@ render_app() {
   echo "$copy"
 }
 
-unit_for() { case "$1" in test-cell) echo "celld@test" ;; production) echo "celld@prod" ;; esac; }
+# ---- the release store and deploys --------------------------------------------------------------
 
 staged_bundle() {
   local file="$RELEASES/$1.tar.gz"
@@ -174,51 +369,98 @@ do_stage() {
   echo "staged $version ($sha256)"
 }
 
-deploy_to() {
-  local target_env="$1" bundle="$2"
-  env_file "$target_env"
-  systemctl is-active --quiet "$(unit_for "$target_env")" ||
-    die "$(unit_for "$target_env") is not running; host setup enables it after the bucket smoke test passes"
-  local dir="$DEPLOYS/$target_env/$version"
+# Wipes the test cell's cells that a restore drill filled with real data, before a test deploy.
+wipe_drill_data() {
+  [ -s "$DRILL_DIRTY" ] || return 0
+  local dirty
+  dirty="$(sort -u "$DRILL_DIRTY" | paste -sd, -)"
+  ops_call test POST "/ops/wipe?cells=$dirty" >/dev/null || die "could not wipe the drill data ($dirty) from the test cell"
+  rm -f "$DRILL_DIRTY"
+  echo "drill data wiped: $dirty"
+}
+
+deploy_fleet() {
+  local fleet="$1" bundle="$2" target_env
+  target_env="$(env_of_fleet "$fleet")"
+  local unit="celld@$fleet"
+  systemctl is-active --quiet "$unit" ||
+    die "$unit is not running; host setup enables it after the bucket smoke test passes"
+  local base dir
+  base="$(fleet_dir "$fleet")"
+  dir="$base/$version"
   rm -rf "$dir"
   mkdir -p "$dir"
   tar -xzf "$bundle" -C "$dir"
-  local current="$DEPLOYS/$target_env/current"
+  local current="$base/current"
   if [ -e "$current/manifest.json" ]; then
     local from to
     from="$(contract_step "$current/manifest.json")"
     to="$(contract_step "$dir/manifest.json")"
     [ "$to" -ge "$from" ] || die "refusing a downgrade past contract step $from (bundle $version has step $to)"
-    echo "manifest diff against the deployed bundle:"
+    echo "manifest diff against the deployed bundle of $fleet:"
     diff <(grep -o '"path": *"[^"]*"\|"sha256": *"[^"]*"' "$current/manifest.json") \
       <(grep -o '"path": *"[^"]*"\|"sha256": *"[^"]*"' "$dir/manifest.json") || true
   else
-    echo "first deploy to $target_env"
+    echo "first deploy to $fleet"
   fi
+  [ "$fleet" = test ] && wipe_drill_data
   local app="$dir/worker"
-  [ "$target_env" = "test-cell" ] && app="$dir/conformance"
+  [ "$fleet" = test ] && app="$dir/conformance"
   local rendered
-  rendered="$(render_app "$target_env" "$app")"
+  rendered="$(render_app "$target_env" "$fleet" "$app")"
   trap 'rm -rf "$rendered"' EXIT
-  celld deploy "$rendered" --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto
+  (
+    fleet_file "$fleet"
+    celld deploy "$rendered" --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto
+  )
   rm -rf "$rendered"
   trap - EXIT
   ln -sfn "$dir" "$current"
-  echo "deployed $version to $target_env"
+  echo "deployed $version to $fleet ($(fleet_cells "$fleet"))"
 }
+
+ledger_append() {
+  # $1: a JSON object. Only the production caller writes the ledger.
+  [ "$caller" = deploy ] || return 0
+  [ -w "$LEDGER" ] || die "the deploy ledger $LEDGER is not writable"
+  echo "$1" >>"$LEDGER"
+  mirror_ledger
+}
+
+# Copies the ledger to the production bucket, so a lost VPS disk does not lose it.
+mirror_ledger() {
+  ( fleet_file prod-owner
+    celld r2 put "$SNAPSHOT_BUCKET" ledger/ledger.jsonl --path "$LEDGER" \
+      --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto >/dev/null 2>&1 ) ||
+    echo "secbot-release: ledger mirror to the bucket failed; the VPS copy is intact" >&2
+}
+
+now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
 do_deploy() {
   [ -n "$env" ] && [ -n "$version" ] || die "deploy needs --env and --version"
+  local named=""
+  if [ -n "$cells" ]; then
+    named="$(normalized_cells "$cells")"
+    [ -n "$named" ] || { echo "deploy: no cell to deploy"; return 0; }
+  fi
   with_lock
-  deploy_to "$env" "$(staged_bundle "$version")"
+  local bundle fleets fleet
+  bundle="$(staged_bundle "$version")"
+  fleets="$(fleets_for "$env" "${named// /,}")"
+  for fleet in $fleets; do deploy_fleet "$fleet" "$bundle"; done
+  if [ "$env" = production ]; then
+    ledger_append "{\"kind\":\"deploy\",\"version\":\"$version\",\"cells\":\"${named// /,}\",\"fleets\":\"${fleets// /,}\",\"runId\":\"$run_id\",\"runAttempt\":\"$run_attempt\",\"at\":\"$(now_iso)\"}"
+  fi
 }
 
 do_conformance() {
   [ -n "$version" ] || die "conformance needs --version"
   with_lock
   env="test-cell"
-  deploy_to test-cell "$(staged_bundle "$version")" >&2
-  local base="http://$CELLD_LISTEN"
+  deploy_fleet test "$(staged_bundle "$version")" >&2
+  local base
+  base="http://$(listen_of test)"
   if [ "$long_transaction" = 1 ]; then
     local first
     first="$(curl -sS --max-time 120 -X POST "$base/conformance/long-transaction?ms=31000" || echo '{"error":"the request ended with the cell reset"}')"
@@ -233,23 +475,193 @@ do_conformance() {
 
 do_manifest() {
   [ -n "$env" ] || die "manifest needs --env"
-  local file="$DEPLOYS/$env/current/manifest.json"
-  [ -f "$file" ] || die "nothing deployed to $env"
-  cat "$file"
+  local fleet file
+  for fleet in $(fleets_of_env "$env"); do
+    file="$(fleet_dir "$fleet")/current/manifest.json"
+    [ -f "$file" ] || die "nothing deployed to $fleet"
+    cat "$file"
+  done
+}
+
+# Merges the per-fleet JSON answers {"version":..,"cells":{..}} into one {"version","cells"}.
+merge_cells() {
+  local first=1 version_field=""
+  printf '{"cells":{'
+  while IFS= read -r answer; do
+    [ -n "$answer" ] || continue
+    [ -n "$version_field" ] || version_field="$(grep -o '"version":"[^"]*"' <<<"$answer" | head -n1 || true)"
+    local inner
+    inner="$(sed -n 's/.*"cells":{\(.*\)}}[[:space:]]*$/\1/p' <<<"$answer")"
+    [ -n "$inner" ] || continue
+    [ "$first" = 1 ] || printf ','
+    printf '%s' "$inner"
+    first=0
+  done
+  printf '}%s}\n' "${version_field:+,$version_field}"
+}
+
+per_fleet_get() {
+  local path="$1" query fleet list
+  for fleet in $(fleets_for "$env" "$cells"); do
+    list="$(cells_in_fleet "$fleet" "$cells")"
+    [ -n "$list" ] || continue
+    query="$path?cells=$list"
+    curl -sS --fail --max-time 120 "http://$(listen_of "$fleet")$query"
+    echo
+  done
 }
 
 do_health() {
   [ -n "$env" ] || die "health needs --env"
-  env_file "$env"
-  curl -sS --fail --max-time 120 "http://$CELLD_LISTEN/health${cells:+?cells=$cells}"
-  echo
+  if [ -z "$cells" ]; then
+    curl -sS --fail --max-time 120 "http://$(listen_of "$(fleets_of_env "$env" | cut -d' ' -f1)")/health"
+    echo
+    return
+  fi
+  per_fleet_get /health | merge_cells
 }
 
 do_alarms() {
   [ -n "$env" ] || die "alarms needs --env"
-  env_file "$env"
-  curl -sS --fail --max-time 120 "http://$CELLD_LISTEN/alarms?cells=${cells:-person,household}"
-  echo
+  per_fleet_get /alarms | merge_cells
+}
+
+do_heartbeats() {
+  if [ -z "$env" ]; then
+    # The SSH user picks the environment: the test cell for deploy-test, production for deploy.
+    [ "$caller" = deploy-test ] && env=test-cell || env=production
+  fi
+  local fleet list deployed
+  {
+    for fleet in $(fleets_for "$env" "$cells"); do
+      list="$(cells_in_fleet "$fleet" "$cells")"
+      [ -n "$list" ] || continue
+      deployed="$(stat -c %Y "$(fleet_dir "$fleet")/current" 2>/dev/null || echo 0)"
+      ops_call "$fleet" GET "/ops/heartbeats?cells=$list" |
+        sed "s/\"lastHttpStatus\"/\"deployedAt\":${deployed}000,\"lastHttpStatus\"/g"
+    done
+  } | merge_cells | sed "s/^{/{\"env\":\"$env\",/"
+}
+
+do_snapshot() {
+  [ -n "$env" ] && [ -n "$snapshot_id" ] || die "snapshot needs --env and --snapshot-id"
+  with_lock
+  local fleet first=1 answer contract=""
+  printf '{"id":"%s","snapshots":[' "$snapshot_id"
+  for fleet in $(fleets_of_env "$env"); do
+    answer="$(ops_call "$fleet" POST "/ops/snapshot?id=$snapshot_id")" || die "snapshot of $fleet failed"
+    [ -n "$contract" ] || contract="$(grep -o '"contractStep":[0-9]*' <<<"$answer" | head -n1 | cut -d: -f2)"
+    [ "$first" = 1 ] || printf ','
+    sed -n 's/.*"snapshots":\[\(.*\)\].*/\1/p' <<<"$answer" | tr -d '\n'
+    first=0
+  done
+  printf '],"contractStep":%s}\n' "${contract:-0}"
+}
+
+do_restore() {
+  [ -n "$env" ] && [ -n "$cells" ] && [ -n "$snapshot_id" ] || die "restore needs --env, --cells, and --snapshot"
+  [[ ",$cells," == *",secrets,"* ]] && die "the secrets cell is never restored: rebuild it and rotate its credentials"
+  local cell fleet
+  cell="$(normalized_cells "$cells")"
+  [[ "$cell" =~ ^[a-z]+$ ]] || die "restore takes exactly one cell"
+  fleet="$(fleet_of_cell "$env" "$cell")" || die "no fleet of $env serves cell '$cell'"
+  with_lock
+  ops_call "$fleet" POST "/ops/restore?id=$snapshot_id&cell=$cell"
+}
+
+do_digest() {
+  [ -n "$env" ] || die "digest needs --env"
+  local fleet list
+  for fleet in $(fleets_for "$env" "$cells"); do
+    list="$(cells_in_fleet "$fleet" "$cells")"
+    [ -n "$list" ] || continue
+    ops_call "$fleet" GET "/ops/digest?cells=$list"
+  done | merge_cells
+}
+
+# The newest release snapshot id in the ledger.
+newest_snapshot() {
+  grep '"kind":"release"' "$LEDGER" 2>/dev/null | grep -o '"snapshotId":"[^"]*"' | tail -n1 | cut -d'"' -f4
+}
+
+do_drill() {
+  [ "$caller" = deploy ] || die "drill needs the production caller: it reads a production snapshot"
+  env=test-cell
+  [ -n "$snapshot_id" ] || snapshot_id="$(newest_snapshot)"
+  [ -n "$snapshot_id" ] || die "no release snapshot in the deploy ledger; pass --snapshot"
+  with_lock
+  local cell source copy first=1 restored
+  printf '{"snapshot":"%s","restored":[' "$snapshot_id"
+  for cell in $(normalized_cells "${cells:-owner}"); do
+    source="$(fleet_of_cell production "$cell")" || die "no production fleet serves cell '$cell'"
+    copy="$(mktemp)"
+    ( fleet_file "$source"
+      celld r2 get "$SNAPSHOT_BUCKET" "snapshots/$snapshot_id/$cell.json" \
+        --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto >"$copy" ) ||
+      { rm -f "$copy"; die "snapshot $snapshot_id not found for cell $cell"; }
+    ( fleet_file test
+      celld r2 put "$SNAPSHOT_BUCKET" "snapshots/$snapshot_id/$cell.json" --path "$copy" \
+        --content-type application/json \
+        --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto >/dev/null )
+    rm -f "$copy"
+    # Marked before the restore, so a failed restore is still wiped by the next test deploy.
+    echo "$cell" >>"$DRILL_DIRTY"
+    restored="$(ops_call test POST "/ops/restore?id=$snapshot_id&cell=$cell")" || die "the drill restore of $cell failed"
+    [ "$first" = 1 ] || printf ','
+    printf '%s' "$(tr -d '\n' <<<"$restored")"
+    first=0
+  done
+  printf ']}\n'
+}
+
+do_ledger_record() {
+  [ "$caller" = deploy ] || die "only the production caller records in the deploy ledger"
+  [ -n "$kind" ] || die "ledger-record needs --kind"
+  with_lock
+  ledger_append "{\"kind\":\"$kind\",\"version\":\"$version\",\"cells\":\"$cells\",\"snapshotId\":\"$snapshot_id\",\"runId\":\"$run_id\",\"runAttempt\":\"$run_attempt\",\"at\":\"$(now_iso)\"}"
+  echo "ledger: recorded $kind${version:+ $version}${run_id:+ run $run_id attempt $run_attempt}"
+}
+
+do_ledger_read() {
+  [ -r "$LEDGER" ] || die "the deploy ledger is not readable here"
+  tail -n 500 "$LEDGER"
+}
+
+do_state() {
+  [ -n "$env" ] || die "state needs --env"
+  local fleet first=1 port
+  printf '{"fleets":{'
+  for fleet in $(fleets_of_env "$env"); do
+    [ -r "/etc/secbot/fleet-$fleet.env" ] || continue
+    systemctl is-active --quiet "celld@$fleet" || continue
+    port="$( (fleet_file "$fleet"; echo "$CELLD_INTERNAL_PORT") )"
+    [ "$first" = 1 ] || printf ','
+    printf '"%s":%s' "$fleet" "$(curl -sS --fail --max-time 10 "http://127.0.0.1:$port/state")"
+    first=0
+  done
+  printf '}}\n'
+}
+
+do_write_delay() {
+  test_cell_only
+  local count="${writes:-200}" warmup=10 n first=1 ms
+  [ "$count" -ge 1 ] && [ "$count" -le 2000 ] || die "write-delay needs --writes 1-2000"
+  with_lock
+  local header base
+  header="$(operator_header test-cell)"
+  base="http://$(listen_of test)"
+  printf '{"warmup":%s,"ms":[' "$warmup"
+  for n in $(seq 1 $((count + warmup))); do
+    # Each request commits one row; celld answers after the write is durable in the bucket.
+    ms="$(curl -sS --fail --max-time 60 -o /dev/null -w '%{time_total}' -X POST -H "@$header" "$base/ops/write")" ||
+      { rm -f "$header"; die "write $n failed"; }
+    [ "$n" -le "$warmup" ] && continue
+    [ "$first" = 1 ] || printf ','
+    awk -v t="$ms" 'BEGIN { printf "%.1f", t * 1000 }'
+    first=0
+  done
+  rm -f "$header"
+  printf ']}\n'
 }
 
 test_cell_only() {
@@ -258,10 +670,11 @@ test_cell_only() {
 
 # Waits until the test cell answers /health again; prints the seconds it took.
 wait_for_test_cell() {
-  local started now
+  local started now listen
+  listen="$(listen_of test)"
   started="$(date +%s)"
   for _ in $(seq 1 120); do
-    if curl -sS --fail --max-time 5 "http://$CELLD_LISTEN/health" >/dev/null 2>&1; then
+    if curl -sS --fail --max-time 5 "http://$listen/health" >/dev/null 2>&1; then
       now="$(date +%s)"
       echo $((now - started))
       return 0
@@ -274,23 +687,22 @@ wait_for_test_cell() {
 do_lab() {
   test_cell_only
   [ -n "$lab_route" ] || die "lab needs --route"
-  env_file "$env"
   with_lock
   local method=POST path="/lab/$lab_route"
   case "$lab_route" in
     state | alarm-report) method=GET ;;
+    load-state) method=GET path=/lab/load ;;
     alarm)
       [ -n "$at" ] || die "lab --route alarm needs --at <epoch ms>|none"
       path="/lab/alarm?set=$at"
       ;;
   esac
-  curl -sS --fail --max-time 120 -X "$method" "http://$CELLD_LISTEN$path"
+  curl -sS --fail --max-time 120 -X "$method" "http://$(listen_of test)$path"
   echo
 }
 
 do_crash() {
   test_cell_only
-  env_file "$env"
   with_lock
   sudo -n /usr/bin/systemctl kill -s KILL celld@test
   sleep 2
@@ -300,7 +712,6 @@ do_crash() {
 do_down() {
   test_cell_only
   [ -n "$seconds" ] && [ "$seconds" -ge 1 ] && [ "$seconds" -le 600 ] || die "down needs --seconds 1-600"
-  env_file "$env"
   with_lock
   local from up
   from="$(date +%s%3N)"
@@ -319,8 +730,18 @@ case "$command" in
   manifest) do_manifest ;;
   health) do_health ;;
   alarms) do_alarms ;;
+  heartbeats) do_heartbeats ;;
+  snapshot) do_snapshot ;;
+  restore) do_restore ;;
+  digest) do_digest ;;
+  drill) do_drill ;;
+  ledger-record) do_ledger_record ;;
+  ledger-read) do_ledger_read ;;
+  lease) do_lease ;;
+  state) do_state ;;
+  write-delay) do_write_delay ;;
   lab) do_lab ;;
   crash) do_crash ;;
   down) do_down ;;
-  *) die "unknown command '$command'; expected stage, deploy, conformance, manifest, health, alarms, lab, crash, or down" ;;
+  *) die "unknown command '$command'; expected stage, deploy, conformance, manifest, health, alarms, heartbeats, snapshot, restore, digest, drill, ledger-record, ledger-read, lease, state, write-delay, lab, crash, or down" ;;
 esac

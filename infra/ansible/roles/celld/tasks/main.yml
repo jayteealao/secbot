@@ -1,14 +1,29 @@
-- name: Check that every value the instances need is in the environment
+# The fleets this run sets up: the test fleet always; the production fleets with
+# -e celld_production=true. Each fleet starts once its bucket's smoke test is confirmed.
+- name: Choose the fleets this run sets up
+  ansible.builtin.set_fact:
+    celld_active_instances: >-
+      {{ celld_instances | selectattr('env', 'equalto', 'test-cell') | list
+         + (celld_instances | selectattr('env', 'equalto', 'production') | list
+            if (celld_production | bool) else []) }}
+    celld_started_instances: >-
+      {{ (celld_instances | selectattr('env', 'equalto', 'test-cell') | list
+          if (celld_replication_confirmed | bool) else [])
+         + (celld_instances | selectattr('env', 'equalto', 'production') | list
+            if (celld_production | bool) and (celld_production_confirmed | bool) else []) }}
+
+- name: Check that every value the fleets need is in the environment
   ansible.builtin.assert:
     that: lookup('ansible.builtin.env', item) | length > 0
     fail_msg: "Set {{ item }} in your shell (see the infra/tofu outputs)."
     quiet: true
   loop: >-
-    {{ ['SECBOT_R2_ENDPOINT']
-       + (celld_instances | map(attribute='bucket_env') | list)
-       + (celld_instances | map(attribute='access_key_env') | list)
-       + (celld_instances | map(attribute='secret_key_env') | list)
-       + (celld_instances | map(attribute='heartbeat_env') | list) }}
+    {{ (['SECBOT_R2_ENDPOINT']
+       + (celld_active_instances | map(attribute='bucket_env') | list)
+       + (celld_active_instances | map(attribute='access_key_env') | list)
+       + (celld_active_instances | map(attribute='secret_key_env') | list)
+       + (celld_active_instances | selectattr('heartbeat_env', 'defined')
+          | map(attribute='heartbeat_env') | list)) | unique }}
   delegate_to: localhost
   become: false
   run_once: true
@@ -94,30 +109,35 @@
     group: root
     mode: "0755"
 
-- name: Write each instance's environment file (root and celld only)
+- name: Write each fleet's environment file (root and celld only)
   ansible.builtin.template:
     src: celld.env.j2
     dest: "/etc/secbot/celld-{{ item.name }}.env"
     owner: root
     group: celld
     mode: "0640"
-  loop: "{{ celld_instances }}"
+  loop: "{{ celld_active_instances }}"
   loop_control:
     label: "celld-{{ item.name }}.env"
   no_log: true
   notify: Restart celld instances
 
-- name: Write each environment's release-tool file (readable by its deploy users only)
+- name: Write each fleet's release-tool file (readable by its deploy users only)
   ansible.builtin.template:
     src: celld.env.j2
-    dest: "/etc/secbot/{{ item.env }}.env"
+    dest: "/etc/secbot/fleet-{{ item.name }}.env"
     owner: root
-    group: "secbot-{{ item.name }}"
+    group: "{{ item.group }}"
     mode: "0640"
-  loop: "{{ celld_instances }}"
+  loop: "{{ celld_active_instances }}"
   loop_control:
-    label: "{{ item.env }}.env"
+    label: "fleet-{{ item.name }}.env"
   no_log: true
+
+- name: Remove the release-tool file of the single-fleet layout
+  ansible.builtin.file:
+    path: /etc/secbot/test-cell.env
+    state: absent
 
 - name: Install the celld unit template
   ansible.builtin.template:
@@ -137,7 +157,7 @@
     /usr/local/bin/celld diagnose --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto
   args:
     executable: /bin/bash
-  loop: "{{ celld_instances }}"
+  loop: "{{ celld_active_instances }}"
   loop_control:
     label: "celld diagnose ({{ item.name }})"
   register: celld_diagnose
@@ -146,9 +166,13 @@
 - name: Stop here until the bucket smoke test has passed
   ansible.builtin.debug:
     msg: >-
-      celld is installed but not started. Run mise run smoke:r2 against each bucket; when it
-      passes, run host:setup again with -e celld_replication_confirmed=true to start celld.
-  when: not (celld_replication_confirmed | bool)
+      celld@{{ item.name }} is installed but not started. Run mise run smoke:r2 against its
+      bucket; when it passes, run host:setup again with
+      {{ '-e celld_replication_confirmed=true' if item.env == 'test-cell'
+         else '-e celld_production=true -e celld_production_confirmed=true' }} to start it.
+  loop: "{{ celld_active_instances | difference(celld_started_instances) }}"
+  loop_control:
+    label: "celld@{{ item.name }}"
 
 - name: Record the smoke test pass that the release tool checks
   ansible.builtin.copy:
@@ -157,17 +181,15 @@
     owner: root
     group: secbot
     mode: "0644"
-  loop: "{{ celld_instances }}"
+  loop: "{{ celld_started_instances }}"
   loop_control:
     label: "smoke-{{ item.name }}.ok"
-  when: celld_replication_confirmed | bool
 
-- name: Enable and start each instance (replication on)
+- name: Enable and start each confirmed fleet (replication on)
   ansible.builtin.systemd_service:
     name: "celld@{{ item.name }}"
     enabled: true
     state: started
-  loop: "{{ celld_instances }}"
+  loop: "{{ celld_started_instances }}"
   loop_control:
     label: "celld@{{ item.name }}"
-  when: celld_replication_confirmed | bool

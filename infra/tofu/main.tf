@@ -39,12 +39,25 @@ resource "cloudflare_api_token" "bucket" {
 # The tailscale_acl resource owns the whole tailnet policy and would replace the owner's
 # existing rules. The owner adds the Secbot rules by hand: docs/runbooks/tailnet-access.md.
 
-# --- Better Stack: the test cell's heartbeat (one per cell; the others come with production) ---
+# --- Better Stack: one heartbeat per cell ---
+# The test cell (one fleet that serves every cell) pings one heartbeat; each production cell pings
+# its own. 4 heartbeats of the free tier's 10. Each cell's heartbeat routine pings every 4 minutes.
 
-resource "betteruptime_heartbeat" "test_cell" {
-  name   = "secbot test cell"
-  period = 300
-  grace  = 60
-  email  = true
-  push   = true
+locals {
+  heartbeat_cells = toset(["test", "owner", "second", "household"])
+}
+
+resource "betteruptime_heartbeat" "cell" {
+  for_each = local.heartbeat_cells
+  name     = "secbot ${each.key} cell"
+  period   = 300
+  grace    = 60
+  email    = true
+  push     = true
+}
+
+# The test cell's heartbeat already exists; it moves into the map instead of being recreated.
+moved {
+  from = betteruptime_heartbeat.test_cell
+  to   = betteruptime_heartbeat.cell["test"]
 }

@@ -2,12 +2,14 @@
 // open marker transaction in flight; a new activation on the same storage (a restart) continues
 // the job; the alarm can be set wrong or removed and is reported so; the household round trip
 // goes from the owner cell to the second cell. The SIGKILL itself runs on the test cell
-// (test:durability) and locally in cell-harness crash.test.ts.
+// (test:durability) and locally in cell-harness crash.test.ts. The heap load briefs all four
+// specialists at once with one long job, and the write probe commits one row per call.
 import { FakeCelldStorage, until } from "@secbot/cell-harness/testing";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import conformanceWorker, { type ConformanceEnv } from "../src/conformance-entry.ts";
 import { DurabilityLabCell, type LabEnv } from "../src/durability-lab.ts";
+import { OPERATOR_HEADER } from "../src/household-client.ts";
 import { PersonCell } from "../src/person-cell.ts";
 
 const labs: DurabilityLabCell[] = [];
@@ -139,5 +141,51 @@ describe("DurabilityLabCell", () => {
       CONFORMANCE: workerEnv.CONFORMANCE,
     });
     expect(missing.status).toBe(503);
+  });
+
+  it("loads the lead and all four specialists at once, with one long job", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const storage = new FakeCelldStorage();
+    const cell = new DurabilityLabCell(
+      { storage },
+      {},
+      { loadMs: 400, longJobMs: 1_500, pollMs: 5 },
+    );
+    labs.push(cell);
+    expect(await call(cell, "POST", "/lab/load")).toMatchObject({ started: true });
+    await until(async () => (await call(cell, "GET", "/lab/load")).specialistCalls === 4);
+    const during = await call(cell, "GET", "/lab/load");
+    expect(during.loading).toBe(true);
+    expect(Number(during.live)).toBeGreaterThanOrEqual(4);
+    await until(async () => (await call(cell, "GET", "/lab/load")).loading === false, 5_000);
+  });
+
+  it("commits one row per write probe through the test-cell worker's /ops/write", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const storage = new FakeCelldStorage();
+    const cell = lab(storage);
+    const workerEnv = {
+      CONFORMANCE: {
+        idFromName: (name: string) => name,
+        get: () => ({ fetch: async () => new Response("x") }),
+      },
+      LAB: { idFromName: (name: string) => name, get: () => cell },
+      SECBOT_OPERATOR_KEY: "k".repeat(32),
+    } as ConformanceEnv;
+    for (let index = 0; index < 3; index++) {
+      const response = await conformanceWorker.fetch(
+        new Request("http://cell/ops/write", {
+          method: "POST",
+          headers: { [OPERATOR_HEADER]: "k".repeat(32) },
+        }),
+        workerEnv,
+      );
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ ms: expect.any(Number) });
+    }
+    const rows = storage.database.prepare("SELECT count(*) AS n FROM ops_write_probe").get() as {
+      n: number;
+    };
+    expect(Number(rows.n)).toBe(3);
   });
 });

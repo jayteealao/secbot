@@ -11,6 +11,10 @@
  * The cell's one alarm is kept at the earliest durable wake time (routine timers, model retries)
  * and re-armed after every event that can change the tasks. `alarm()` only wakes the cell: opening
  * the harness resumes every due task from its checkpoint.
+ *
+ * Snapshots (`snapshot`, `restore`, `wipe`, `digest`) are RPC for the worker's operator routes. A
+ * restore closes the harness, loads the dump in one transaction checked against its digest, and
+ * reopens it, which resumes the restored tasks and re-arms the alarm from the restored timers.
  */
 import { BACKGROUND_CONTEXT as cellContext } from "@earendil-works/chord/context";
 import {
@@ -19,17 +23,32 @@ import {
   type CellEnv,
   type CellHarness,
   type Frame,
+  type HeartbeatState,
   type HouseholdApplyResult,
   type HouseholdChange,
   type HouseholdClient,
   type HouseholdDocument,
+  heartbeatState,
+  logEvent,
   openCellHarness,
   RefusedChange,
   type SessionStream,
 } from "@secbot/cell-harness";
-import type { CelldAlarmInfo, CelldCellStorage } from "@secbot/cell-storage";
+import {
+  type CellDump,
+  type CelldAlarmInfo,
+  type CelldCellStorage,
+  databaseRunner,
+  digestCell,
+  dumpCell,
+  loadCell,
+  type SnapshotRunner,
+  storageRunner,
+  wipeCell,
+} from "@secbot/cell-storage";
 import { HOUSEHOLD_CELL_NAME } from "@secbot/household-cell";
 import { releaseVersion } from "./health.ts";
+import { type HouseholdClientEnv, householdClientOf } from "./household-client.ts";
 
 export interface SocketLike {
   send(data: string): void;
@@ -56,7 +75,7 @@ export interface HouseholdNamespaceLike {
   get(id: unknown): HouseholdStubLike;
 }
 
-export interface PersonCellEnv extends CellEnv {
+export interface PersonCellEnv extends CellEnv, HouseholdClientEnv {
   readonly HOUSEHOLD_CELL?: HouseholdNamespaceLike;
 }
 
@@ -175,9 +194,9 @@ export class PersonCell {
   private cell(person: string): Promise<CellHarness> {
     if (this.opening === undefined) {
       this.rememberName(person);
-      const household = householdOf(this.env);
+      const household = householdClientOf(this.env);
       this.opening = this.open(this.state.storage, person, {
-        ...(household === undefined ? {} : { household: clientOf(household) }),
+        ...(household === undefined ? {} : { household }),
         onWakeChange: () => this.rearmSoon(person),
       }).then(async (cell) => {
         await this.alarmFor(person).rearm(cell);
@@ -405,23 +424,77 @@ export class PersonCell {
 
   /** RPC (test-cell lab): this person cell reads a household document through its own client. */
   async householdRead(document: string): Promise<HouseholdDocument> {
-    const household = householdOf(this.env);
-    if (household === undefined) throw new Error("no HOUSEHOLD_CELL binding");
+    const household = householdClientOf(this.env);
+    if (household === undefined) throw new Error("no household cell: no binding and no URL");
     return household.read(document);
   }
 
   /** RPC (test-cell lab): this person cell changes a household document as `person`. */
   async householdChange(person: string, change: HouseholdChange): Promise<HouseholdApplyResult> {
-    const household = householdOf(this.env);
-    if (household === undefined) throw new Error("no HOUSEHOLD_CELL binding");
+    const household = householdClientOf(this.env);
+    if (household === undefined) throw new Error("no household cell: no binding and no URL");
     return household.apply({ ...change, fromCell: person });
   }
-}
 
-/** A plain client over the stub, so the harness never holds the stub itself. */
-function clientOf(stub: HouseholdStubLike): HouseholdClient {
-  return {
-    read: (document) => stub.read(document),
-    apply: (change) => stub.apply(change),
-  };
+  /** The open storage driver's queue when the harness is open, else the storage itself. */
+  private async runner(): Promise<SnapshotRunner> {
+    const opening = this.opening;
+    return opening === undefined
+      ? storageRunner(this.state.storage)
+      : databaseRunner((await opening).database);
+  }
+
+  /** Closes the harness of this activation; the next event opens it again. */
+  private async closeHarness(): Promise<void> {
+    const opening = this.opening;
+    this.opening = undefined;
+    this.streaming = undefined;
+    this.alarms = undefined;
+    if (opening !== undefined) await (await opening.catch(() => undefined))?.close();
+  }
+
+  /** RPC: the whole database as one dump, taken in one transaction. */
+  async snapshot(contractStep: number): Promise<CellDump> {
+    const dump = await dumpCell(await this.runner(), { contractStep });
+    logEvent("cell.snapshot", {
+      cell: this.storedName() ?? null,
+      digest: dump.digest,
+      rows: dump.rows,
+    });
+    return dump;
+  }
+
+  /**
+   * RPC: replaces the database with `dump` and opens the harness on it as `person`, which resumes
+   * the restored tasks and sets the alarm from the restored timers.
+   */
+  async restore(dump: CellDump, person: string): Promise<{ digest: string; rows: number }> {
+    if (!PERSON.test(person)) throw new Error(`bad cell name "${person}"`);
+    await this.closeHarness();
+    const result = await loadCell(storageRunner(this.state.storage), dump);
+    this.knownName = undefined;
+    await this.cell(person);
+    logEvent("cell.restored", { cell: person, digest: result.digest, rows: result.rows });
+    return result;
+  }
+
+  /** RPC: drops every table and the alarm (the test cell after a restore drill). */
+  async wipe(): Promise<void> {
+    const person = this.storedName() ?? null;
+    await this.closeHarness();
+    await wipeCell(storageRunner(this.state.storage));
+    await this.state.storage.deleteAlarm();
+    this.knownName = undefined;
+    logEvent("cell.wiped", { cell: person });
+  }
+
+  /** RPC: the database digest and row count as they are now. */
+  async digest(): Promise<{ digest: string; rows: number }> {
+    return digestCell(await this.runner());
+  }
+
+  /** RPC: the heartbeat routine's last run, read by waking the cell (check:heartbeats). */
+  async heartbeat(person: string): Promise<HeartbeatState> {
+    return heartbeatState((await this.cell(person)).harness);
+  }
 }

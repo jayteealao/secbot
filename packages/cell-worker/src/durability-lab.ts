@@ -16,6 +16,11 @@
  *   GET  /lab/alarm-report         the check:alarms verdict for the lab cell (read-only)
  *   POST /lab/household-roundtrip  the owner cell adds an item, the second cell reads it, a retry
  *                                  with the same operation id applies once
+ *   POST /lab/load                 the heap load (AC-31): the lead briefs all four specialists at
+ *                                  once on a slow scripted model; one of them is a long job
+ *   GET  /lab/load                 how many tasks are live, and the calls so far
+ *
+ * `writeOne()` (the worker's /ops/write) commits one row in a scratch table: the write-delay probe.
  */
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
@@ -53,6 +58,9 @@ import { type HouseholdNamespaceLike, householdOf } from "./person-cell.ts";
 const LAB = "lab";
 export const LAB_ARM_TEXT = "[lab] hand off";
 export const LAB_BRIEF = "Lab brief: answer with one line so the lead can relay it.";
+export const LAB_LOAD_TEXT = "[lab] load";
+const WRITE_PROBE_TABLE =
+  "CREATE TABLE IF NOT EXISTS ops_write_probe (id INTEGER PRIMARY KEY, at INTEGER NOT NULL)";
 export const LAB_TICK_EVERY_MS = 60_000;
 const REMINDER_AHEAD_MS = 10 * 60_000;
 const MARKER_TABLE = "CREATE TABLE IF NOT EXISTS lab_marker (id INTEGER PRIMARY KEY, at INTEGER)";
@@ -87,6 +95,9 @@ export interface LabOptions {
   readonly hangMs?: number;
   /** How long the armed transaction holds its marker row; under celld's 30 s limit. */
   readonly holdMs?: number;
+  /** Heap load: how long each specialist call hangs, and the one long job. */
+  readonly loadMs?: number;
+  readonly longJobMs?: number;
   readonly pollMs?: number;
 }
 
@@ -121,6 +132,8 @@ export class DurabilityLabCell {
   private hangs = new Set<() => void>();
   /** Set by /lab/arm in this life only: a restarted process never hangs a call. */
   private armedHere = false;
+  /** Set by /lab/load: specialist calls hang until then (the first one until `longUntil`). */
+  private load: { until: number; longUntil: number; calls: number } | undefined;
 
   constructor(
     private readonly state: LabState,
@@ -145,6 +158,14 @@ export class DurabilityLabCell {
           if (system.includes("You are the lead agent")) {
             this.calls.lead++;
             if (role === "toolResult") return fauxAssistantMessage([fauxText("OK.")]);
+            if (text.startsWith(LAB_LOAD_TEXT)) {
+              return fauxAssistantMessage(
+                STARTER_SPECIALISTS.map(({ name }) =>
+                  fauxToolCall("handoff", { specialist: name, brief: LAB_BRIEF }),
+                ),
+                { stopReason: "toolUse" },
+              );
+            }
             if (text.startsWith(LAB_ARM_TEXT)) {
               return fauxAssistantMessage(
                 [fauxToolCall("handoff", { specialist: SPECIALIST, brief: LAB_BRIEF })],
@@ -154,7 +175,14 @@ export class DurabilityLabCell {
             return fauxAssistantMessage([fauxText(`lab lead relays: ${text.slice(0, 80)}`)]);
           }
           this.calls.specialist++;
-          if (this.armedHere && this.calls.specialist === 1) {
+          const load = this.load;
+          if (load !== undefined && Date.now() < load.until) {
+            load.calls++;
+            await this.hang(
+              (load.calls === 1 ? load.longUntil : load.until) - Date.now(),
+              options?.signal,
+            );
+          } else if (this.armedHere && this.calls.specialist === 1) {
             // The cut-off call: hangs in this life until the hang ends or the call is cancelled.
             await new Promise<void>((resolve) => {
               const timer = setTimeout(resolve, this.options.hangMs ?? 100_000);
@@ -219,6 +247,62 @@ export class DurabilityLabCell {
     if (opening === undefined) return;
     const work = opening.then((cell) => this.alarms.rearm(cell)).catch(() => {});
     this.state.waitUntil?.(work);
+  }
+
+  /** Waits `ms`, ended early by `releaseHangs()` or the call's abort signal. */
+  private hang(ms: number, signal?: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(done, Math.max(0, ms));
+      function done() {
+        clearTimeout(timer);
+        resolve();
+      }
+      const release = () => {
+        this.hangs.delete(release);
+        done();
+      };
+      this.hangs.add(release);
+      signal?.addEventListener("abort", release, { once: true });
+    });
+  }
+
+  /** POST /lab/load: the lead briefs every specialist at once; one brief is a long job. */
+  async startLoad(): Promise<Record<string, unknown>> {
+    const cell = await this.cell();
+    const startedAt = Date.now();
+    this.load = {
+      until: startedAt + (this.options.loadMs ?? 60_000),
+      longUntil: startedAt + (this.options.longJobMs ?? 120_000),
+      calls: 0,
+    };
+    await cell.submit(LAB_LOAD_TEXT, `lab-load:${startedAt}`);
+    return { started: true, startedAt, until: this.load.until, longUntil: this.load.longUntil };
+  }
+
+  /** GET /lab/load: live tasks now, and the load's specialist calls so far. */
+  async loadState(): Promise<Record<string, unknown>> {
+    const cell = await this.cell();
+    const inspection = await cell.harness.inspect(context);
+    const live = inspection.tasks.filter(({ record }) =>
+      ["pending", "running", "waiting"].includes(record.state.status),
+    ).length;
+    return {
+      live,
+      specialistCalls: this.load?.calls ?? 0,
+      loading: this.load !== undefined && Date.now() < this.load.longUntil,
+    };
+  }
+
+  /** RPC (/ops/write): one committed single-row write; keeps the last 100 rows. */
+  async writeOne(): Promise<void> {
+    const cell = await this.cell();
+    await cell.database.transaction(async (tx) => {
+      await tx.exec(WRITE_PROBE_TABLE);
+      await tx.run("INSERT INTO ops_write_probe (at) VALUES (?)", Date.now());
+      await tx.run(
+        "DELETE FROM ops_write_probe WHERE id <= (SELECT max(id) - 100 FROM ops_write_probe)",
+      );
+    });
   }
 
   /** Ends a hanging call at once (tests). */
@@ -368,6 +452,8 @@ export class DurabilityLabCell {
     if (route === "POST /lab/household-roundtrip") {
       return Response.json(await this.householdRoundTrip());
     }
+    if (route === "POST /lab/load") return Response.json(await this.startLoad());
+    if (route === "GET /lab/load") return Response.json(await this.loadState());
     if (route === "POST /lab/alarm") {
       await this.cell();
       const set = url.searchParams.get("set") ?? "";

@@ -2,9 +2,14 @@ import { ADAPTER_NAME } from "@secbot/cell-storage";
 
 /** Set by scripts/build-bundle.mjs (esbuild `define`); absent when the source runs unbundled. */
 declare const __SECBOT_VERSION__: string | undefined;
+declare const __SECBOT_CONTRACT_STEP__: number | undefined;
 
 export const releaseVersion = (): string =>
   typeof __SECBOT_VERSION__ === "string" ? __SECBOT_VERSION__ : "0.0.0-dev";
+
+/** The bundle's contract step (scripts/build-bundle.mjs CONTRACT_STEP); 3 when unbundled. */
+export const contractStep = (): number =>
+  typeof __SECBOT_CONTRACT_STEP__ === "number" ? __SECBOT_CONTRACT_STEP__ : 3;
 
 export type CellHealth =
   | { readonly status: "up"; readonly version: string; readonly roles: readonly string[] }
