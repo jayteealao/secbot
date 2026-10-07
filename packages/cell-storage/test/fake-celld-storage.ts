@@ -7,9 +7,15 @@
  * - A failed rollback aborts the object and rethrows the callback's error.
  * - A transaction past the limit (30 s in celld; settable here) rolls back, resets the object,
  *   and rejects with celld's message.
+ * - One alarm per object (`getAlarm`, `setAlarm`, `deleteAlarm`); celld fires a due alarm and
+ *   consumes it, which `takeDueAlarm(now)` stands in for.
+ * - With `file`, the database lives in a file, so a process that is killed mid-transaction leaves
+ *   it as a crash would and a new stand-in on the same file sees only committed writes. The alarm
+ *   is kept in the same file, as celld keeps it in the cell's SQLite.
  */
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type {
+  CelldAlarmStorage,
   CelldSqlBinding,
   CelldSqlCursor,
   CelldSqlRow,
@@ -23,6 +29,8 @@ const RESET_MESSAGE =
 export interface FakeCelldStorageOptions {
   /** Transaction limit in milliseconds; celld's is 30,000. */
   readonly transactionLimitMs?: number;
+  /** A database file in place of memory (crash tests reopen it in another process). */
+  readonly file?: string;
 }
 
 class FakeCursor implements CelldSqlCursor {
@@ -41,13 +49,18 @@ class FakeCursor implements CelldSqlCursor {
   }
 }
 
-export class FakeCelldStorage implements CelldStorage {
-  readonly database = new DatabaseSync(":memory:");
+const ALARM_TABLE =
+  "CREATE TABLE IF NOT EXISTS _fake_celld_alarm (id INTEGER PRIMARY KEY CHECK (id = 1), at INTEGER NOT NULL)";
+
+export class FakeCelldStorage implements CelldStorage, CelldAlarmStorage {
+  readonly database: DatabaseSync;
   readonly sql: CelldSqlStorage;
   /** Every statement in run order, for ordering assertions. */
   readonly statements: string[] = [];
   /** When true, the next rollback fails the way a broken connection would. */
   failNextRollback = false;
+  /** How many times `setAlarm()` ran (each one is a bucket write on celld). */
+  alarmWrites = 0;
   private aborted = false;
   private savepoints = 0;
   private resetOpenTransaction: (() => void) | undefined;
@@ -55,7 +68,45 @@ export class FakeCelldStorage implements CelldStorage {
 
   constructor(options: FakeCelldStorageOptions = {}) {
     this.transactionLimitMs = options.transactionLimitMs ?? 30_000;
+    this.database = new DatabaseSync(options.file ?? ":memory:");
+    this.database.exec(ALARM_TABLE);
     this.sql = { exec: (query, ...bindings) => this.exec(query, bindings) };
+  }
+
+  async getAlarm(): Promise<number | null> {
+    this.assertLive();
+    const row = this.database.prepare("SELECT at FROM _fake_celld_alarm WHERE id = 1").get() as
+      | { at: number }
+      | undefined;
+    return row === undefined ? null : Number(row.at);
+  }
+
+  async setAlarm(scheduledTime: number): Promise<void> {
+    this.assertLive();
+    this.alarmWrites++;
+    this.database
+      .prepare("INSERT OR REPLACE INTO _fake_celld_alarm (id, at) VALUES (1, ?)")
+      .run(Math.trunc(scheduledTime));
+  }
+
+  async deleteAlarm(): Promise<void> {
+    this.assertLive();
+    this.database.exec("DELETE FROM _fake_celld_alarm");
+  }
+
+  /** Consumes the alarm when it is due at `now`, as celld does before it calls `alarm()`. */
+  takeDueAlarm(now: number): number | undefined {
+    const row = this.database.prepare("SELECT at FROM _fake_celld_alarm WHERE id = 1").get() as
+      | { at: number }
+      | undefined;
+    if (row === undefined || Number(row.at) > now) return undefined;
+    this.database.exec("DELETE FROM _fake_celld_alarm");
+    return Number(row.at);
+  }
+
+  /** Closes the file, as a stopped process would. */
+  closeFile(): void {
+    this.database.close();
   }
 
   get isAborted(): boolean {
@@ -114,7 +165,9 @@ export class FakeCelldStorage implements CelldStorage {
   async deleteAll(): Promise<void> {
     this.assertLive();
     const tables = this.database
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name != '_fake_celld_alarm'",
+      )
       .all() as { name: string }[];
     for (const { name } of tables) this.database.exec(`DROP TABLE "${name}"`);
   }

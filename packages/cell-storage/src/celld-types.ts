@@ -32,3 +32,25 @@ export interface CelldStorage {
   /** Deletes every key and table of the object. */
   deleteAll(): Promise<void>;
 }
+
+/**
+ * celld's one alarm per object (`storage.setAlarm()`, `getAlarm()`, `deleteAlarm()`), the
+ * Cloudflare Alarms API shape (source: .scratch/sources/git/celld tag v0.6.1,
+ * crates/celld/js/harness.js:1696-1716; docs/services/durable-objects.md:133-142). celld answers
+ * a `setAlarm()` only after a durable wake entry in the bucket covers it.
+ */
+export interface CelldAlarmStorage {
+  getAlarm(): Promise<number | null>;
+  setAlarm(scheduledTime: number): Promise<void>;
+  deleteAlarm(): Promise<void>;
+}
+
+/** What a Durable Object that keeps routines gets as `ctx.storage`. */
+export type CelldCellStorage = CelldStorage & CelldAlarmStorage;
+
+/** What celld passes to a Durable Object's `alarm()` handler (harness.js:5843-5848). */
+export interface CelldAlarmInfo {
+  readonly scheduledTime?: number;
+  readonly retryCount: number;
+  readonly isRetry: boolean;
+}

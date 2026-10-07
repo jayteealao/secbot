@@ -1,12 +1,11 @@
 {
-  "name": "@secbot/cell-worker",
+  "name": "@secbot/household-cell",
   "version": "0.0.0",
   "private": true,
-  "description": "The celld worker: person cells with the harness and the CLI routes, health, and the in-cell storage conformance run.",
+  "description": "The household cell: shared household documents as items plus an ordered change log, read and changed by the person cells over RPC.",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./conformance": "./src/conformance-entry.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "build": "tsc --noEmit",
@@ -18,7 +17,6 @@
     "@earendil-works/pi-ai": "1.0.3",
     "@earendil-works/pi-durable": "github:jayteealao/pi#v1.0.3-secbot.1&path:/packages/durable",
     "@secbot/cell-harness": "workspace:*",
-    "@secbot/cell-storage": "workspace:*",
-    "@secbot/household-cell": "workspace:*"
+    "@secbot/cell-storage": "workspace:*"
   }
 }

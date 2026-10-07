@@ -97,7 +97,20 @@
       BETTERSTACK_REQUESTER_EMAIL={{ lookup('ansible.builtin.env', 'BETTERSTACK_REQUESTER_EMAIL') }}
       SECBOT_DEVICE_KEYS={{ lookup('ansible.builtin.env', 'SECBOT_DEVICE_KEYS') }}
       SECBOT_PRIVATE_HOSTS={{ lookup('ansible.builtin.env', 'SECBOT_PRIVATE_HOSTS') }}
+      SECBOT_HEARTBEAT_URLS={{ lookup('ansible.builtin.env', 'SECBOT_HEARTBEAT_URLS', default='') }}
+      SECBOT_TIME_ZONE={{ lookup('ansible.builtin.env', 'SECBOT_TIME_ZONE', default='') }}
     owner: root
     group: secbot-test
     mode: "0640"
   no_log: true
+
+- name: Let the deploy users kill, stop, and start the test cell's unit only
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/secbot-test-cell
+    content: |
+      # The test cell's crash and downtime checks; nothing else, and never the production unit.
+      deploy-test,deploy ALL=(root) NOPASSWD: /usr/bin/systemctl kill -s KILL celld@test, /usr/bin/systemctl stop celld@test, /usr/bin/systemctl start celld@test
+    owner: root
+    group: root
+    mode: "0440"
+    validate: visudo -cf %s

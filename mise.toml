@@ -145,7 +145,11 @@ run = "node packages/cli/src/main.ts"
 
 [tasks."check:alarms"]
 description = "Check that every cell has its next alarm at or before its earliest routine timer"
-run = "node -e \"console.error('check:alarms arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs check-alarms"
+
+[tasks."test:durability"]
+description = "On the test cell: SIGKILL with work in flight, a late alarm after downtime, the household round trip, and the alarm check (--crash-only just kills and waits)"
+run = "node scripts/vps.mjs durability"
 
 [tasks."check:heartbeats"]
 description = "Check heartbeat freshness for every cell and routine since the deploy"

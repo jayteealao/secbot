@@ -11,6 +11,9 @@ export {
   CellStorageTransactionTimeout,
 } from "./celld-sqlite-database.ts";
 export type {
+  CelldAlarmInfo,
+  CelldAlarmStorage,
+  CelldCellStorage,
   CelldSqlBinding,
   CelldSqlCursor,
   CelldSqlRow,
@@ -24,4 +27,17 @@ export function openCelldStorage(
   options?: CelldSqliteDatabaseOptions,
 ): Promise<SqliteStorage> {
   return SqliteStorage.open(new CelldSqliteDatabase(storage, options));
+}
+
+/**
+ * Opens pi-durable storage and returns the driver with it, so the cell's own tables (the household
+ * change log) run through the same operation queue as pi-durable and never join one of its open
+ * transactions.
+ */
+export async function openCelldStorageWithDatabase(
+  storage: CelldStorage,
+  options?: CelldSqliteDatabaseOptions,
+): Promise<{ readonly storage: SqliteStorage; readonly database: CelldSqliteDatabase }> {
+  const database = new CelldSqliteDatabase(storage, options);
+  return { storage: await SqliteStorage.open(database), database };
 }

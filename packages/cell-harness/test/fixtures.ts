@@ -1,7 +1,8 @@
 /**
  * Test fixtures: a person cell's harness on the node:sqlite celld stand-in, with pi-ai's faux
  * provider registered as "openrouter" (the release's model ids plus one more) behind the same
- * credit-pause decorator the gateway uses. No network, no key.
+ * credit-pause decorator the gateway uses. No network, no key. Also an in-process household cell
+ * (the real change log on the stand-in) for the household tools.
  */
 import {
   type AssistantMessage,
@@ -14,9 +15,17 @@ import {
   type Message,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
+import { CelldSqliteDatabase } from "../../cell-storage/src/index.ts";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
+import { ChangeLog } from "../../household-cell/src/change-log.ts";
 import { withCreditPause } from "../src/credit-pause.ts";
-import { type CellEnv, type CellHarness, openCellHarness } from "../src/open-harness.ts";
+import type { HouseholdChange, HouseholdClient } from "../src/household-tools.ts";
+import {
+  type CellEnv,
+  type CellHarness,
+  type OpenCellOptions,
+  openCellHarness,
+} from "../src/open-harness.ts";
 import { DEFAULT_LEAD_MODEL, DEFAULT_SPECIALIST_MODEL } from "../src/release-defaults.ts";
 
 export { FakeCelldStorage, fauxAssistantMessage, fauxText, fauxToolCall };
@@ -120,9 +129,13 @@ export async function openTestCell(
     readonly gateway?: FauxGateway;
     readonly now?: () => number;
     readonly fetch?: typeof fetch;
+    readonly household?: HouseholdClient;
+    readonly onWakeChange?: () => void;
+    readonly routines?: OpenCellOptions["routines"];
+    readonly storage?: FakeCelldStorage;
   } = {},
 ): Promise<TestCell> {
-  const storage = new FakeCelldStorage();
+  const storage = options.storage ?? new FakeCelldStorage();
   const gateway = options.gateway ?? createFauxGateway();
   const open = () =>
     openCellHarness(storage, {
@@ -132,6 +145,9 @@ export async function openTestCell(
       models: gateway.models,
       ...(options.now === undefined ? {} : { now: options.now }),
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+      ...(options.household === undefined ? {} : { household: options.household }),
+      ...(options.onWakeChange === undefined ? {} : { onWakeChange: options.onWakeChange }),
+      ...(options.routines === undefined ? {} : { routines: options.routines }),
     });
   const test: TestCell = {
     storage,
@@ -153,4 +169,36 @@ export async function until(check: () => boolean | Promise<boolean>, ms = 10_000
     if (Date.now() > deadline) throw new Error("condition not met in time");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+/** An in-process household cell: the real change log on the stand-in, with every change recorded. */
+export interface HouseholdStub extends HouseholdClient {
+  readonly log: ChangeLog;
+  readonly changes: HouseholdChange[];
+}
+
+export function createHouseholdStub(): HouseholdStub {
+  const log = new ChangeLog(new CelldSqliteDatabase(new FakeCelldStorage()));
+  const changes: HouseholdChange[] = [];
+  return {
+    log,
+    changes,
+    read: (document) => log.read(document),
+    apply: (change) => {
+      changes.push(change);
+      return log.apply(change);
+    },
+  };
+}
+
+/** Every JSON log line written through console.log while `spy` was active. */
+export function loggedEvents(calls: readonly unknown[][]): Record<string, unknown>[] {
+  return calls.flatMap(([line]) => {
+    try {
+      const value = JSON.parse(String(line)) as unknown;
+      return value !== null && typeof value === "object" ? [value as Record<string, unknown>] : [];
+    } catch {
+      return [];
+    }
+  });
 }

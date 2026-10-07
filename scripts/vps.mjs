@@ -6,6 +6,8 @@
 //   node scripts/vps.mjs deploy  --env test-cell|production --version V [--sha256 S] [--cells C]
 //   node scripts/vps.mjs dry-run
 //   node scripts/vps.mjs check-cells --env test-cell|production [--version V] [--cells owner,second]
+//   node scripts/vps.mjs check-alarms --env test-cell|production [--cells person,household]
+//   node scripts/vps.mjs durability --env test-cell [--crash-only] [--down-seconds 90]
 //
 // The SSH target is SECBOT_VPS_SSH, an alias in the caller's SSH config. In GitHub Actions the
 // vps-access action writes the alias "secbot-vps", which is the default there. The repo never
@@ -70,6 +72,8 @@ const flags = (argv) =>
       file: { type: "string" },
       env: { type: "string" },
       cells: { type: "string" },
+      "crash-only": { type: "boolean" },
+      "down-seconds": { type: "string" },
     },
   }).values;
 
@@ -138,13 +142,248 @@ export async function checkCells({ env, version, cells = DEFAULT_CELLS }) {
   if (!report.ok) throw new Error("one or more cells are down or on another version");
 }
 
+/** The cells check:alarms reads when no --cells is given; `person` stands for every person cell. */
+export const DEFAULT_ALARM_CELLS = "person,household";
+const PERSON_CELLS = ["owner", "second"];
+
+export const expandCells = (cells) => [
+  ...new Set(
+    cells
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean)
+      .flatMap((name) => (name === "person" ? PERSON_CELLS : [name])),
+  ),
+];
+
+const at = (ms) => (ms === null || ms === undefined ? "none" : new Date(ms).toISOString());
+
+/**
+ * Turns the release tool's alarm answer into the check:alarms phrases, which the alarm-lost
+ * runbook matches. A cell passes when its stored alarm is at or before its earliest stored timer.
+ * Pure, so the phrases are tested without a VPS.
+ */
+export function reportAlarms(answer, { cells = DEFAULT_ALARM_CELLS } = {}) {
+  const lines = [];
+  let ok = true;
+  for (const name of expandCells(cells)) {
+    const cell = answer?.cells?.[name];
+    if (cell === undefined || (cell.ok === false && cell.problem === undefined)) {
+      ok = false;
+      lines.push(`cell ${name} down: ${cell?.reason ?? "no answer"}`);
+    } else if (cell.problem === "no next alarm") {
+      ok = false;
+      lines.push(`cell ${name}: no next alarm (earliest timer ${cell.earliest ?? "none"})`);
+    } else if (cell.problem === "alarm mismatch") {
+      ok = false;
+      lines.push(
+        `cell ${name}: alarm mismatch: alarm ${cell.alarm} later than earliest timer ${cell.earliest} (${cell.earliestSource})`,
+      );
+    } else if (cell.earliest === null) {
+      lines.push(`cell ${name} alarm ok: no timers`);
+    } else {
+      lines.push(
+        `cell ${name} alarm ok ${cell.alarm} (earliest timer ${cell.earliest}, ${cell.earliestSource})`,
+      );
+    }
+  }
+  return { ok, lines };
+}
+
+const parseJson = (stdout, what) => {
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    throw new Error(`the VPS ${what} answer was not JSON`);
+  }
+};
+
+export async function checkAlarms({ env, cells = DEFAULT_ALARM_CELLS }) {
+  if (env !== "test-cell" && env !== "production")
+    throw new Error("check-alarms needs --env test-cell|production");
+  const stdout = await runRemote(["alarms", "--env", env, "--cells", cells], { echo: false });
+  const report = reportAlarms(parseJson(stdout, "alarm"), { cells });
+  for (const line of report.lines) console.log(line);
+  if (!report.ok) throw new Error("one or more cells have no next alarm or a late one");
+}
+
+const ROUTINE_PREFIX = "secbot.routine:";
+
+/**
+ * The crash case on the test cell (AC-19, AC-21): `before` is the lab state before arming,
+ * `armed` the arm answer, `after` the state after the SIGKILL and the restart, once idle. Pure.
+ */
+export function judgeCrash(before, armed, after) {
+  const results = [];
+  const check = (name, pass, detail) => results.push({ name, pass: Boolean(pass), detail });
+  check(
+    "crash-restarted",
+    after.startedAt > armed.armedAt && armed.specialistCallStarted === true,
+    `the lab started again at ${at(after.startedAt)}`,
+  );
+  check(
+    "crash-conversation",
+    after.armed === true && after.leadEntries > before.leadEntries,
+    `lead entries ${before.leadEntries} before, ${after.leadEntries} after`,
+  );
+  check(
+    "crash-no-partial-write",
+    after.markerRows === before.markerRows,
+    `marker rows ${before.markerRows} before, ${after.markerRows} after (the open transaction's row must be gone)`,
+  );
+  const reminder = (after.tasks ?? []).find(
+    (task) => task.kind === `${ROUTINE_PREFIX}reminder` && task.id === armed.reminderTaskId,
+  );
+  check(
+    "crash-timer",
+    reminder !== undefined && reminder.wakeAt === armed.reminderAt,
+    reminder === undefined ? "the reminder task is gone" : `reminder wake ${at(reminder.wakeAt)}`,
+  );
+  check(
+    "crash-job-and-cut-off-call",
+    after.followupReported === true && (after.calls?.specialist ?? 0) >= 1,
+    `specialist calls after the restart: ${after.calls?.specialist ?? 0}; answer relayed: ${after.followupReported}`,
+  );
+  check(
+    "crash-alarm",
+    after.alarm !== null && after.earliest !== null && after.alarm === after.earliest?.at,
+    `alarm ${at(after.alarm)}, earliest timer ${at(after.earliest?.at)}`,
+  );
+  return results;
+}
+
+/** The late-alarm case (AC-20): the cell was down from `down.downFrom` to `down.upAt`. Pure. */
+export function judgeLateAlarm(down, after) {
+  const overdue = (after.ticks ?? []).filter(
+    (tick) => tick.wakeAt <= down.upAt && tick.firedAt >= down.downFrom,
+  );
+  const tick = (after.tasks ?? []).find((task) => task.kind === `${ROUTINE_PREFIX}lab-tick`);
+  return [
+    {
+      name: "late-alarm-runs-once",
+      pass: overdue.length === 1,
+      detail: `lab-tick runs for wake times inside the ${Math.round((down.upAt - down.downFrom) / 1000)} s down window: ${overdue.length}`,
+    },
+    {
+      name: "late-alarm-moves-on",
+      pass:
+        tick !== undefined &&
+        tick.wakeAt > down.upAt &&
+        after.alarm !== null &&
+        after.earliest !== null &&
+        after.alarm === after.earliest?.at,
+      detail: `next lab-tick ${at(tick?.wakeAt)}, alarm ${at(after.alarm)}`,
+    },
+  ];
+}
+
+const lab = async (env, route, extra = []) =>
+  parseJson(
+    await runRemote(["lab", "--env", env, "--route", route, ...extra], { echo: false }),
+    `lab ${route}`,
+  );
+
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function labUntil(env, ready, ms) {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const state = await lab(env, "state");
+    if (ready(state) || Date.now() > deadline) return state;
+    await pause(5_000);
+  }
+}
+
+export const printResults = (results, log = console.log) => {
+  for (const result of results) {
+    log(`durability ${result.name} ${result.pass ? "pass" : "fail"}: ${result.detail}`);
+  }
+  return results.every((result) => result.pass);
+};
+
+/**
+ * Drives the test cell's durability lab: a SIGKILL with three things in flight, a late alarm after
+ * the cell was down, the household round trip, and the induced alarm checks. With --crash-only, it
+ * only kills the test cell and waits for it to come back (Charter Scenario step 7).
+ */
+export async function durability({ env, "crash-only": crashOnly, "down-seconds": downSeconds }) {
+  if (env !== "test-cell") throw new Error("durability runs only with --env test-cell");
+  if (crashOnly) {
+    await runRemote(["crash", "--env", env]);
+    return;
+  }
+  const results = [];
+  const before = await labUntil(env, (state) => state.liveUntimed === 0, 120_000);
+  const armed = await lab(env, "arm");
+  await runRemote(["crash", "--env", env]);
+  const after = await labUntil(
+    env,
+    (state) => state.followupReported === true && state.liveUntimed === 0,
+    300_000,
+  );
+  results.push(...judgeCrash(before, armed, after));
+
+  const down = parseJson(
+    await runRemote(["down", "--env", env, "--seconds", downSeconds ?? "90"], { echo: false }),
+    "down",
+  );
+  const late = await labUntil(
+    env,
+    (state) => (state.ticks ?? []).some((tick) => tick.firedAt >= down.downFrom),
+    120_000,
+  );
+  results.push(...judgeLateAlarm(down, late));
+
+  const household = await lab(env, "household-roundtrip");
+  results.push({
+    name: "household-roundtrip",
+    pass: household.ok === true,
+    detail: `second cell copies of the owner's item: ${household.copies ?? 0}; retry applied once: ${household.retried?.duplicate ?? false}`,
+  });
+
+  // The alarm check fails on an induced late alarm and on a missing one, then passes after a re-arm.
+  const report = await lab(env, "alarm-report");
+  const earliest = Date.parse(report.earliest);
+  const judgeInduced = async (name, set, problem) => {
+    await lab(env, "alarm", ["--at", set]);
+    const answer = parseJson(
+      await runRemote(["alarms", "--env", env, "--cells", "lab"], { echo: false }),
+      "alarm",
+    );
+    const verdict = reportAlarms(answer, { cells: "lab" });
+    results.push({
+      name,
+      pass: !verdict.ok && verdict.lines.some((line) => line.includes(problem)),
+      detail: verdict.lines.join("; "),
+    });
+  };
+  await judgeInduced("check-alarms-late", String(earliest + 3_600_000), "alarm mismatch");
+  await judgeInduced("check-alarms-missing", "none", "no next alarm");
+  await lab(env, "rearm");
+  const healed = reportAlarms(
+    parseJson(
+      await runRemote(["alarms", "--env", env, "--cells", "lab"], { echo: false }),
+      "alarm",
+    ),
+    { cells: "lab" },
+  );
+  results.push({ name: "check-alarms-rearmed", pass: healed.ok, detail: healed.lines.join("; ") });
+
+  if (!printResults(results)) throw new Error("one or more durability cases failed");
+}
+
 const main = async () => {
   const [command, ...rest] = process.argv.slice(2);
   if (command === "stage") await stage(flags(rest));
   else if (command === "deploy") await deploy(flags(rest));
   else if (command === "dry-run") await dryRun();
   else if (command === "check-cells") await checkCells(flags(rest));
-  else throw new Error("usage: vps.mjs stage|deploy|dry-run|check-cells [flags]");
+  else if (command === "check-alarms") await checkAlarms(flags(rest));
+  else if (command === "durability") await durability(flags(rest));
+  else
+    throw new Error(
+      "usage: vps.mjs stage|deploy|dry-run|check-cells|check-alarms|durability [flags]",
+    );
 };
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

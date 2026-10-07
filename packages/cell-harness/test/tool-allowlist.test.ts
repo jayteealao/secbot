@@ -1,13 +1,20 @@
-// Each role's resolved tool list. Wave 1 allows history search and (with the household lists)
-// household document read and write; the lead also holds the hand-off tool, the only routing
-// path. No built-in pi-durable tool (read, write, edit, bash) is installed.
+// Each role's resolved tool list (AC-12). Wave 1 allows history search and household document read
+// and write; the lead also holds the hand-off tool, the only routing path, and the reminder tool,
+// which only schedules a message to the lead itself. None has an outside effect. No built-in
+// pi-durable tool (read, write, edit, bash) is installed.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RosterDoc } from "../src/docs.ts";
 import { openTestCell, type TestCell } from "./fixtures.ts";
 
-const LEAD_TOOLS = ["handoff", "search_history"];
-const SPECIALIST_TOOLS = ["search_history"];
+const LEAD_TOOLS = [
+  "handoff",
+  "household_change",
+  "household_read",
+  "search_history",
+  "set_reminder",
+];
+const SPECIALIST_TOOLS = ["household_change", "household_read", "search_history"];
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -17,7 +24,7 @@ afterEach(async () => {
 });
 
 describe("tool lists", () => {
-  it("gives the lead the hand-off and history search, and each specialist history search only", async () => {
+  it("gives the lead the hand-off, history, household, and reminder tools, and each specialist history and household only", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     test = await openTestCell();
     const lead = await test.cell.root.agent(BACKGROUND_CONTEXT);
@@ -32,7 +39,7 @@ describe("tool lists", () => {
         BACKGROUND_CONTEXT,
       );
       const agent = await conversation?.agent(BACKGROUND_CONTEXT);
-      expect(agent?.tools.map((tool) => tool.name)).toEqual(SPECIALIST_TOOLS);
+      expect(agent?.tools.map((tool) => tool.name).sort()).toEqual(SPECIALIST_TOOLS);
     }
     const installed = test.cell.extensions.lead.flatMap((extension) => extension.tools ?? []);
     expect(installed.map((tool) => tool.name).sort()).toEqual(LEAD_TOOLS);

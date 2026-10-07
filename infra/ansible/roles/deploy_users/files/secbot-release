@@ -8,9 +8,17 @@
 #   conformance --version V [--long-transaction] deploy V to the test cell, run the in-cell suite
 #   manifest    --env E                          print the deployed manifest
 #   health      --env E [--cells C]              print the cell health (version, and each named cell)
+#   alarms      --env E [--cells C]              print each cell's stored alarm against its earliest timer
+#   lab         --env test-cell --route R [--at T]  call the test cell's durability lab
+#   crash       --env test-cell                  SIGKILL celld@test, wait until it answers again
+#   down        --env test-cell --seconds N      stop celld@test for N seconds, start it, wait for it
+#
+# crash and down use exactly three sudo commands for celld@test (sudoers drop-in from host setup);
+# nothing here can stop, kill, or start the production unit.
 #
 # A deploy fills the worker config's runtime vars (the OpenRouter key, the Better Stack incidents
-# token and e-mail, the device keys, the private host names) from /etc/secbot/<env>-runtime.env into
+# token and e-mail, the device keys, the private host names, and the optional heartbeat ping URLs
+# and time zone) from /etc/secbot/<env>-runtime.env into
 # a temporary copy, because celld deploy has no secret mechanism; the values never enter the repo,
 # the bundle, CI, or this tool's output.
 #
@@ -35,9 +43,9 @@ case "$caller" in
 esac
 
 read -r -a argv <<<"${SSH_ORIGINAL_COMMAND:-}"
-[ "${#argv[@]}" -gt 0 ] || die "no command; expected stage, deploy, conformance, manifest, or health"
+[ "${#argv[@]}" -gt 0 ] || die "no command; expected stage, deploy, conformance, manifest, health, alarms, lab, crash, or down"
 command="${argv[0]}"
-version="" sha256="" env="" long_transaction=0 cells=""
+version="" sha256="" env="" long_transaction=0 cells="" lab_route="" at="" seconds=""
 i=1
 while [ "$i" -lt "${#argv[@]}" ]; do
   flag="${argv[$i]}"
@@ -48,6 +56,9 @@ while [ "$i" -lt "${#argv[@]}" ]; do
     --env) env="$value"; i=$((i + 2)) ;;
     --long-transaction) long_transaction=1; i=$((i + 1)) ;;
     --cells) cells="$value"; i=$((i + 2)) ;;
+    --route) lab_route="$value"; i=$((i + 2)) ;;
+    --at) at="$value"; i=$((i + 2)) ;;
+    --seconds) seconds="$value"; i=$((i + 2)) ;;
     *) die "unknown argument '$flag'" ;;
   esac
 done
@@ -56,8 +67,11 @@ done
 [ -z "$sha256" ] || [[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || die "bad sha256"
 [ -z "$env" ] || [[ " $allowed_envs " == *" $env "* ]] || die "$caller may not use environment '$env'"
 [ -z "$cells" ] || [[ "$cells" =~ ^[a-z][a-z0-9,-]*$ ]] || die "bad cells '$cells'"
-[ -z "$cells" ] || [ "$command" = "health" ] ||
+[ -z "$cells" ] || [ "$command" = "health" ] || [ "$command" = "alarms" ] ||
   die "deploy --cells arrives with the production rollout; this release deploys the whole environment"
+[ -z "$lab_route" ] || [[ "$lab_route" =~ ^(arm|state|alarm-report|household-roundtrip|rearm|alarm)$ ]] || die "bad lab route '$lab_route'"
+[ -z "$at" ] || [[ "$at" =~ ^([0-9]{13}|none)$ ]] || die "bad --at '$at'"
+[ -z "$seconds" ] || [[ "$seconds" =~ ^[0-9]{1,3}$ ]] || die "bad --seconds '$seconds'"
 
 with_lock() {
   exec 9<"$LOCK"
@@ -74,6 +88,8 @@ env_file() {
 
 # Runtime vars the worker config declares with empty values; each must be set for a deploy.
 RUNTIME_VARS="OPENROUTER_API_KEY BETTERSTACK_INCIDENTS_TOKEN BETTERSTACK_REQUESTER_EMAIL SECBOT_DEVICE_KEYS SECBOT_PRIVATE_HOSTS"
+# Runtime vars a deploy fills when the settings file has them; they stay empty otherwise.
+OPTIONAL_RUNTIME_VARS="SECBOT_HEARTBEAT_URLS SECBOT_TIME_ZONE"
 
 # Copies the app to a private temporary directory and fills its runtime vars; prints the copy's path.
 # Names a missing or unsafe setting, never its value.
@@ -97,6 +113,17 @@ render_app() {
         exit 1
       fi
       grep -q "\"$name\": \"\"" "$copy/wrangler.jsonc" || { echo "secbot-release: the bundle's config does not declare $name" >&2; exit 1; }
+      sed -i "s|\"$name\": \"\"|\"$name\": \"$value\"|" "$copy/wrangler.jsonc"
+    done
+    for name in $OPTIONAL_RUNTIME_VARS; do
+      value="${!name:-}"
+      [ -n "$value" ] || continue
+      if ! [[ "$value" =~ ^[A-Za-z0-9._@:,+/=-]+$ ]]; then
+        echo "secbot-release: runtime setting $name has characters the config cannot carry" >&2
+        exit 1
+      fi
+      # An older bundle that does not declare the var keeps its config unchanged.
+      grep -q "\"$name\": \"\"" "$copy/wrangler.jsonc" || continue
       sed -i "s|\"$name\": \"\"|\"$name\": \"$value\"|" "$copy/wrangler.jsonc"
     done
   ); then
@@ -218,11 +245,82 @@ do_health() {
   echo
 }
 
+do_alarms() {
+  [ -n "$env" ] || die "alarms needs --env"
+  env_file "$env"
+  curl -sS --fail --max-time 120 "http://$CELLD_LISTEN/alarms?cells=${cells:-person,household}"
+  echo
+}
+
+test_cell_only() {
+  [ "$env" = "test-cell" ] || die "$command runs only with --env test-cell"
+}
+
+# Waits until the test cell answers /health again; prints the seconds it took.
+wait_for_test_cell() {
+  local started now
+  started="$(date +%s)"
+  for _ in $(seq 1 120); do
+    if curl -sS --fail --max-time 5 "http://$CELLD_LISTEN/health" >/dev/null 2>&1; then
+      now="$(date +%s)"
+      echo $((now - started))
+      return 0
+    fi
+    sleep 1
+  done
+  die "celld@test did not answer within 120 s"
+}
+
+do_lab() {
+  test_cell_only
+  [ -n "$lab_route" ] || die "lab needs --route"
+  env_file "$env"
+  with_lock
+  local method=POST path="/lab/$lab_route"
+  case "$lab_route" in
+    state | alarm-report) method=GET ;;
+    alarm)
+      [ -n "$at" ] || die "lab --route alarm needs --at <epoch ms>|none"
+      path="/lab/alarm?set=$at"
+      ;;
+  esac
+  curl -sS --fail --max-time 120 -X "$method" "http://$CELLD_LISTEN$path"
+  echo
+}
+
+do_crash() {
+  test_cell_only
+  env_file "$env"
+  with_lock
+  sudo -n /usr/bin/systemctl kill -s KILL celld@test
+  sleep 2
+  echo "killed celld@test with SIGKILL; it answered again after $(wait_for_test_cell) s" >&2
+}
+
+do_down() {
+  test_cell_only
+  [ -n "$seconds" ] && [ "$seconds" -ge 1 ] && [ "$seconds" -le 600 ] || die "down needs --seconds 1-600"
+  env_file "$env"
+  with_lock
+  local from up
+  from="$(date +%s%3N)"
+  sudo -n /usr/bin/systemctl stop celld@test
+  sleep "$seconds"
+  sudo -n /usr/bin/systemctl start celld@test
+  wait_for_test_cell >/dev/null
+  up="$(date +%s%3N)"
+  printf '{"downFrom":%s,"upAt":%s}\n' "$from" "$up"
+}
+
 case "$command" in
   stage) do_stage ;;
   deploy) do_deploy ;;
   conformance) do_conformance ;;
   manifest) do_manifest ;;
   health) do_health ;;
-  *) die "unknown command '$command'; expected stage, deploy, conformance, manifest, or health" ;;
+  alarms) do_alarms ;;
+  lab) do_lab ;;
+  crash) do_crash ;;
+  down) do_down ;;
+  *) die "unknown command '$command'; expected stage, deploy, conformance, manifest, health, alarms, lab, crash, or down" ;;
 esac

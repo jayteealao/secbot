@@ -13,8 +13,10 @@ import { parseArgs } from "node:util";
 import { build } from "esbuild";
 
 /** Raise when a release changes stored data so that an older bundle can no longer read it.
- * Step 2: the PersonCell Durable Object class and its migration (the per-person harness). */
-export const CONTRACT_STEP = 2;
+ * Step 2: the PersonCell Durable Object class and its migration (the per-person harness).
+ * Step 3: the HouseholdCell class (shared household lists) and, on the test cell only, the
+ * DurabilityLabCell class, with their migrations; person cells now store routine timers. */
+export const CONTRACT_STEP = 3;
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");

@@ -219,6 +219,26 @@ describe("PersonCell", () => {
     expect(socket.closed).toBe(true);
   });
 
+  it("re-arms its alarm after opening and after a chat input, instead of a timed keep-alive", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const s = await setup();
+    s.sockets.splice(0);
+    await call(s, "GET", "/v1/cells/owner/status");
+    const cell = s.cells.get("owner");
+    const storage = (cell as unknown as { state: { storage: FakeCelldStorage } }).state.storage;
+    await until(async () => (await storage.getAlarm()) !== null);
+    await cell?.submitInput("owner", "hello again", "req-00000003");
+    await s.opened[0]?.harness.waitForIdle(BACKGROUND_CONTEXT);
+    const wakes = await s.opened[0]?.wakes();
+    await until(async () => (await storage.getAlarm()) === wakes?.summary.wakes[0]?.at);
+    const body = (await (await call(s, "GET", "/v1/cells/owner/status?tasks=1")).json()) as {
+      tasks: { kind: string; checkpoint?: { wakeAt: number } }[];
+    };
+    expect(
+      body.tasks.find((task) => task.kind === "secbot.routine:heartbeat")?.checkpoint?.wakeAt,
+    ).toBe(wakes?.summary.wakes[0]?.at);
+  });
+
   it("shows live tasks with the hand-off brief on request", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = await setup();

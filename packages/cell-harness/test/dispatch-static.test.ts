@@ -9,8 +9,12 @@ import { STARTER_SPECIALISTS } from "../src/release-defaults.ts";
 
 const packages = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const DISPATCH_DIRS = [join(packages, "cli", "src"), join(packages, "cell-worker", "src")];
-/** The storage conformance run on the test cell compares assertion errors; it carries no messages. */
-const NOT_DISPATCH = new Set(["cell-assertions.ts", "conformance-cell.ts"]);
+/**
+ * Not dispatch code: the storage conformance run on the test cell compares assertion errors and
+ * carries no messages; the test cell's durability lab holds a scripted model that stands in for
+ * the lead's decision, like the tests' responders, and is never deployed to a person cell.
+ */
+const NOT_DISPATCH = new Set(["cell-assertions.ts", "conformance-cell.ts", "durability-lab.ts"]);
 
 const names = STARTER_SPECIALISTS.map((specialist) => specialist.name).join("|");
 const MESSAGE = "text|message|content|line|input|prompt|brief";
