@@ -1,0 +1,616 @@
+/**
+ * `PersonCell`: one Durable Object per person (named "owner", "second"), hosting that person's
+ * pi-durable harness on the cell's own storage. The worker reaches it only after the device check
+ * and passes the person and the device name in headers it sets itself.
+ *
+ * Chat sessions are hibernatable WebSockets: celld delivers each frame a handler sends while the
+ * handler still runs (celld v0.6.1 docs/services/durable-objects.md, "Ownership and the
+ * single-threaded model"), and a socket closes when the cell moves, so the client reconnects. Every
+ * message goes to the lead's root conversation unchanged; the lead alone decides on a hand-off.
+ *
+ * The cell's one alarm is kept at the earliest durable wake time (routine timers, model retries)
+ * and re-armed after every event that can change the tasks. `alarm()` only wakes the cell: opening
+ * the harness resumes every due task from its checkpoint.
+ *
+ * Snapshots (`snapshot`, `restore`, `wipe`, `digest`) are RPC for the worker's operator routes. A
+ * restore closes the harness, loads the dump in one transaction checked against its digest, and
+ * reopens it, which resumes the restored tasks and re-arms the alarm from the restored timers.
+ */
+import { BACKGROUND_CONTEXT as cellContext } from "@earendil-works/chord/context";
+import {
+  alarmVerdict,
+  CELL_NAME,
+  CellAlarm,
+  type CellEnv,
+  type CellHarness,
+  errorFields,
+  type Frame,
+  type HeartbeatState,
+  type HouseholdApplyResult,
+  type HouseholdChange,
+  type HouseholdClient,
+  type HouseholdDocument,
+  heartbeatState,
+  logEvent,
+  openCellHarness,
+  RefusedChange,
+  type SessionStream,
+} from "@secbot/cell-harness";
+import {
+  type CellDump,
+  type CelldAlarmInfo,
+  type CelldCellStorage,
+  CellSnapshots,
+} from "@secbot/cell-storage";
+import { HOUSEHOLD_CELL_NAME } from "@secbot/household-cell";
+import { releaseVersion } from "./health.ts";
+import { type HouseholdClientEnv, householdClientOf } from "./household-client.ts";
+
+export interface SocketLike {
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+}
+
+export interface PersonCellState {
+  readonly storage: CelldCellStorage;
+  acceptWebSocket?(socket: SocketLike, tags?: string[]): void;
+  getWebSockets?(tag?: string): SocketLike[];
+  getTags?(socket: SocketLike): string[];
+  waitUntil?(promise: Promise<unknown>): void;
+}
+
+/** The household cell's RPC surface, as a stub from the `HOUSEHOLD_CELL` binding exposes it. */
+export interface HouseholdStubLike extends HouseholdClient {
+  history?(document: string, itemId?: string): Promise<unknown>;
+  status?(): Promise<{ status: "up"; version: string; roles: string[] }>;
+  alarmReport?(): Promise<unknown>;
+}
+
+export interface HouseholdNamespaceLike {
+  idFromName(name: string): unknown;
+  get(id: unknown): HouseholdStubLike;
+}
+
+export interface PersonCellEnv extends CellEnv, HouseholdClientEnv {
+  readonly HOUSEHOLD_CELL?: HouseholdNamespaceLike;
+}
+
+/** What the cell gives the harness it opens. */
+export interface OpenExtras {
+  readonly household?: HouseholdClient;
+  readonly onWakeChange: () => void;
+}
+
+export interface PersonCellOptions {
+  /** Tests: how often a settling cell looks at its tasks (2 s in a cell). */
+  readonly pollMs?: number;
+  /** Tests: a clock; defaults to Date.now. */
+  readonly now?: () => number;
+}
+
+/** Headers the worker sets after the device check; any client copy is removed first. */
+export const PERSON_HEADER = "x-secbot-person";
+export const DEVICE_HEADER = "x-secbot-device";
+
+export const householdOf = (env: {
+  readonly HOUSEHOLD_CELL?: HouseholdNamespaceLike;
+}): HouseholdStubLike | undefined =>
+  env.HOUSEHOLD_CELL?.get(env.HOUSEHOLD_CELL.idFromName(HOUSEHOLD_CELL_NAME));
+
+type InputFrame = { readonly type: "input"; readonly text: string; readonly requestId: string };
+
+const REQUEST_ID = /^[A-Za-z0-9._:-]{8,128}$/;
+const PERSON = CELL_NAME;
+const NAME_TABLE =
+  "CREATE TABLE IF NOT EXISTS secbot_cell_name (id INTEGER PRIMARY KEY CHECK (id = 1), name TEXT NOT NULL)";
+
+/** The longest chat line the cell accepts; the CLI checks the same limit before sending. */
+export const INPUT_LIMIT = 20_000;
+
+/** The largest JSON body the model and specialist routes read. */
+export const BODY_LIMIT = 16 * 1024;
+
+type ParsedInput =
+  | { readonly ok: true; readonly input: InputFrame }
+  | { readonly ok: false; readonly reason: string; readonly requestId?: string };
+
+function parseInput(data: string | ArrayBuffer): ParsedInput {
+  let value: Record<string, unknown>;
+  try {
+    value = JSON.parse(typeof data === "string" ? data : new TextDecoder().decode(data)) as Record<
+      string,
+      unknown
+    >;
+  } catch {
+    return { ok: false, reason: "not JSON: send {type: input, text, requestId}" };
+  }
+  if (typeof value !== "object" || value === null) {
+    return { ok: false, reason: "send {type: input, text, requestId}" };
+  }
+  const requestId =
+    typeof value.requestId === "string" && REQUEST_ID.test(value.requestId)
+      ? value.requestId
+      : undefined;
+  const refuse = (reason: string): ParsedInput =>
+    requestId === undefined ? { ok: false, reason } : { ok: false, reason, requestId };
+  if (value.type !== "input" || typeof value.text !== "string") {
+    return refuse("send {type: input, text, requestId}");
+  }
+  if (requestId === undefined)
+    return refuse("a requestId of 8-128 letters, digits, or ._:- is required");
+  if (value.text.trim() === "") return refuse("the message is empty");
+  if (value.text.length > INPUT_LIMIT) {
+    return refuse(`the message is longer than ${INPUT_LIMIT} characters`);
+  }
+  return { ok: true, input: { type: "input", text: value.text, requestId } };
+}
+
+const json = (body: unknown, status = 200) => Response.json(body, { status });
+
+/** Reads a JSON body of at most BODY_LIMIT characters; undefined when it is larger or not JSON. */
+async function readJson(request: Request): Promise<Record<string, unknown> | undefined> {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (declared > BODY_LIMIT) return undefined;
+  const text = await request.text().catch(() => "");
+  if (text.length > BODY_LIMIT) return undefined;
+  try {
+    const value = JSON.parse(text) as unknown;
+    return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+export class PersonCell {
+  private opening: Promise<CellHarness> | undefined;
+  private streaming: Promise<SessionStream> | undefined;
+  private readonly framesSent = new Map<string, number>();
+  private alarms: CellAlarm | undefined;
+  private knownName: string | undefined;
+  private snapshotOps: CellSnapshots | undefined;
+  /** The devices whose socket took the last answer or follow-up frame. */
+  private lastSentDevices = new Set<string>();
+
+  constructor(
+    private readonly state: PersonCellState,
+    private readonly env: PersonCellEnv,
+    /** Tests: opens the harness with a scripted model in place of the gateway. celld passes two arguments. */
+    private readonly open: (
+      storage: CelldCellStorage,
+      person: string,
+      extras: OpenExtras,
+    ) => Promise<CellHarness> = (storage, person, extras) =>
+      openCellHarness(storage, { person, version: releaseVersion(), env, ...extras }),
+    private readonly options: PersonCellOptions = {},
+  ) {}
+
+  /** Remembers which person this cell is, so an alarm (which carries no request) can open it. */
+  private rememberName(person: string): void {
+    if (this.knownName === person) return;
+    const sql = this.state.storage.sql;
+    sql.exec(NAME_TABLE).toArray();
+    const stored = sql.exec("SELECT name FROM secbot_cell_name WHERE id = 1").toArray()[0]?.name;
+    if (stored !== person) {
+      sql
+        .exec("INSERT OR REPLACE INTO secbot_cell_name (id, name) VALUES (1, ?)", person)
+        .toArray();
+    }
+    this.knownName = person;
+  }
+
+  private storedName(): string | undefined {
+    if (this.knownName !== undefined) return this.knownName;
+    const sql = this.state.storage.sql;
+    sql.exec(NAME_TABLE).toArray();
+    const name = sql.exec("SELECT name FROM secbot_cell_name WHERE id = 1").toArray()[0]?.name;
+    if (typeof name === "string" && PERSON.test(name)) this.knownName = name;
+    return this.knownName;
+  }
+
+  /** The cell's name is known only once the first event (or the stored name) gives it. */
+  private alarmFor(person: string): CellAlarm {
+    this.alarms ??= new CellAlarm(this.state.storage, person, {
+      ...(this.options.now === undefined ? {} : { now: this.options.now }),
+      ...(this.options.pollMs === undefined ? {} : { pollMs: this.options.pollMs }),
+    });
+    return this.alarms;
+  }
+
+  /**
+   * Opens the harness once per activation; a failed open is retried by the next event. After the
+   * open the alarm is set again from the stored timers.
+   */
+  /** Snapshot, restore, wipe, and digest, shared with the household cell. */
+  private snapshots(): CellSnapshots {
+    this.snapshotOps ??= new CellSnapshots(
+      this.state.storage,
+      {
+        openDatabase: async () => {
+          const opening = this.opening;
+          return opening === undefined ? undefined : (await opening).database;
+        },
+        close: () => this.closeHarness(),
+      },
+      this.options.now ?? Date.now,
+    );
+    return this.snapshotOps;
+  }
+
+  private cell(person: string): Promise<CellHarness> {
+    if (this.opening === undefined) {
+      this.rememberName(person);
+      const household = householdClientOf(this.env);
+      // A restore or wipe in progress finishes first, so the harness opens on the new database.
+      this.opening = this.snapshots()
+        .idle()
+        .then(() =>
+          this.open(this.state.storage, person, {
+            ...(household === undefined ? {} : { household }),
+            onWakeChange: () => this.rearmSoon(person),
+          }),
+        )
+        .then(async (cell) => {
+          try {
+            await this.alarmFor(person).rearm(cell);
+          } catch (error) {
+            // An opened harness must not stay running while the next event opens another one.
+            await cell.close().catch(() => {});
+            throw error;
+          }
+          // Work the open resumed (or the roster just created) settles; re-arm once it has.
+          this.keepBusy(cell);
+          return cell;
+        });
+      const opening = this.opening;
+      opening.catch((error: unknown) => {
+        if (this.opening === opening) this.opening = undefined;
+        logEvent("cell.open_failed", { cell: person, ...errorFields(error) }, "error");
+      });
+    }
+    return this.opening;
+  }
+
+  private rearmSoon(person: string): void {
+    const opening = this.opening;
+    if (opening === undefined) return;
+    const work = opening
+      .then((cell) => this.alarmFor(person).rearm(cell))
+      .catch((error: unknown) => {
+        // The wake path: a cell with no alarm sleeps through its timers, so the failure is logged.
+        logEvent("alarm.rearm_failed", { cell: person, ...errorFields(error) }, "error");
+      });
+    this.state.waitUntil?.(work);
+  }
+
+  private sockets(): SocketLike[] {
+    return this.state.getWebSockets?.() ?? [];
+  }
+
+  private tagsOf(socket: SocketLike): { device: string; person: string } {
+    const [device = "unknown", person = "owner"] = this.state.getTags?.(socket) ?? [];
+    return { device, person };
+  }
+
+  /** Sends a frame to every open socket; returns the devices whose socket took it. */
+  private broadcast(frame: Frame): Set<string> {
+    const text = JSON.stringify(frame);
+    const sent = new Set<string>();
+    for (const socket of this.sockets()) {
+      const { device } = this.tagsOf(socket);
+      try {
+        socket.send(text);
+        sent.add(device);
+        this.framesSent.set(device, (this.framesSent.get(device) ?? 0) + 1);
+      } catch {
+        // A closed socket; its client reconnects and gets the message as a missed frame.
+      }
+    }
+    if (frame.type === "answer" || frame.type === "followup") this.lastSentDevices = sent;
+    return sent;
+  }
+
+  /** One watch of the lead per activation, fanned out to every open socket. */
+  private ensureStream(cell: CellHarness): Promise<SessionStream> {
+    if (this.streaming === undefined) {
+      this.streaming = cell.session(
+        (frame) => {
+          this.broadcast(frame);
+        },
+        async (entryId) => {
+          // Only devices whose socket took the frame count it as delivered; a send that failed on
+          // a closing socket leaves the message in that device's missed list.
+          for (const device of this.lastSentDevices) await cell.markDelivered(device, entryId);
+        },
+      );
+      const streaming = this.streaming;
+      streaming.catch((error: unknown) => {
+        if (this.streaming === streaming) this.streaming = undefined;
+        logEvent("cli.stream_failed", { cell: cell.person, ...errorFields(error) }, "error");
+      });
+    }
+    return this.streaming;
+  }
+
+  /**
+   * Keeps the cell busy while due or untimed work runs (a hand-off, a model call), re-arming as it
+   * goes. No ceiling on the work: when the event ends first, the alarm's liveness wake (one minute
+   * ahead while such work is live) brings the cell back to finish it.
+   */
+  private keepBusy(cell: CellHarness): void {
+    const alarms = this.alarmFor(cell.person);
+    if (alarms.isSettling) return;
+    const work = alarms.settle(cell).catch((error: unknown) => {
+      // Due routines and hand-offs may be left unrun; the next event or alarm settles again.
+      logEvent("cell.settle_failed", { cell: cell.person, ...errorFields(error) }, "error");
+    });
+    if (this.state.waitUntil === undefined) return;
+    this.state.waitUntil(work);
+  }
+
+  /** celld calls this when the alarm is due, also on an idle or evicted cell. */
+  async alarm(info?: CelldAlarmInfo): Promise<void> {
+    const person = this.storedName();
+    if (person === undefined) return;
+    const alarms = this.alarmFor(person);
+    alarms.fired(info, undefined);
+    const cell = await this.cell(person);
+    // Wait while the due work runs: a routine fires, a reminder reaches the lead and is relayed.
+    if (this.sockets().length > 0) await this.ensureStream(cell);
+    await alarms.settle(cell);
+  }
+
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    const person = request.headers.get(PERSON_HEADER) ?? "";
+    const device = request.headers.get(DEVICE_HEADER) ?? "";
+    const prefix = `/v1/cells/${person}`;
+    if (!PERSON.test(person) || !url.pathname.startsWith(`${prefix}/`))
+      return json({ error: "not found" }, 404);
+    const route = url.pathname.slice(prefix.length);
+    if (request.method === "GET" && route === "/alarm") {
+      // The stored alarm is read before anything else, and this route never re-arms it. Waking an
+      // evicted cell to answer opens its harness, and an open re-arms (a cell that was never
+      // opened gets its first alarm then), so the next check sees the result.
+      const alarm = await this.state.storage.getAlarm();
+      const cell = await this.cell(person);
+      const { summary } = await cell.wakes();
+      return json(alarmVerdict(person, alarm, summary));
+    }
+    const cell = await this.cell(person);
+    try {
+      if (request.method === "GET" && route === "/status") {
+        const status = await cell.status();
+        if (url.searchParams.get("tasks") !== "1") return json(status);
+        const inspection = await cell.harness.inspect(cellContext);
+        const tasks = inspection.tasks.map(({ record, state }) => ({
+          id: record.id,
+          kind: record.kind,
+          conversationId: record.conversationId,
+          background: record.background ?? false,
+          state: state.kind,
+          ...(record.kind === "secbot.handoff-reporter" ? { input: record.input } : {}),
+          ...(record.kind.startsWith("secbot.routine:") &&
+          record.state.status !== "terminal" &&
+          record.state.status !== "completing"
+            ? { checkpoint: record.state.checkpoint }
+            : {}),
+        }));
+        return json({ ...status, tasks });
+      }
+      if (request.method === "GET" && route === "/session")
+        return this.openSession(cell, person, device);
+      if (request.method === "GET" && route === "/missed") {
+        return json(await cell.missed(device));
+      }
+      if (request.method === "GET" && route === "/models") {
+        return json({ roles: await cell.listRoleModels() });
+      }
+      const modelRoute = /^\/models\/([a-z][a-z0-9-]{0,31})$/.exec(route);
+      if (request.method === "PUT" && modelRoute !== null) {
+        const body = await readJson(request);
+        if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+        if (typeof body.model !== "string") return json({ error: 'send {"model": "<id>"}' }, 400);
+        return json(await cell.setRoleModel(modelRoute[1] ?? "", body.model));
+      }
+      if (request.method === "POST" && route === "/specialists") {
+        const body = await readJson(request);
+        if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+        if (typeof body.name !== "string" || typeof body.instruction !== "string") {
+          return json({ error: "send name and instruction" }, 400);
+        }
+        await cell.addSpecialist({
+          name: body.name,
+          instruction: body.instruction,
+          ...(typeof body.model === "string" ? { model: body.model } : {}),
+        });
+        this.rearmSoon(person);
+        return json({ name: body.name, status: "added" }, 201);
+      }
+      return json({ error: "not found" }, 404);
+    } catch (error) {
+      if (error instanceof RefusedChange) return json({ error: error.message }, 400);
+      throw error;
+    }
+  }
+
+  private async openSession(cell: CellHarness, person: string, device: string): Promise<Response> {
+    const Pair = (globalThis as { WebSocketPair?: new () => { 0: SocketLike; 1: SocketLike } })
+      .WebSocketPair;
+    if (Pair === undefined || this.state.acceptWebSocket === undefined) {
+      return json({ error: "this runtime has no WebSocket support" }, 501);
+    }
+    const pair = new Pair();
+    this.state.acceptWebSocket(pair[1], [device, person]);
+    pair[1].send(JSON.stringify({ type: "connected", lead: person } satisfies Frame));
+    let framesSent = 1;
+    // What the lead said while this device had no open socket comes first, oldest first, so an
+    // answer that committed during a reconnect is shown before the next live answer moves the
+    // device's cursor past it.
+    const { messages, remaining } = await cell.missed(device);
+    for (const message of messages) {
+      pair[1].send(
+        JSON.stringify({
+          type: "missed",
+          entryId: message.entryId,
+          from: message.kind === "followup" ? message.from : null,
+          text: message.text,
+          remaining,
+        } satisfies Frame),
+      );
+      framesSent++;
+    }
+    this.framesSent.set(device, framesSent);
+    await this.ensureStream(cell);
+    logEvent("cli.session", {
+      cell: person,
+      device,
+      phase: "open",
+      frames_sent: framesSent,
+      missed_delivered: messages.length,
+    });
+    const init: ResponseInit & { webSocket: SocketLike } = { status: 101, webSocket: pair[0] };
+    return new Response(null, init);
+  }
+
+  /** One chat line from a socket: submitted to the lead unchanged, acknowledged by request id. */
+  async webSocketMessage(socket: SocketLike, data: string | ArrayBuffer): Promise<void> {
+    const { person, device } = this.tagsOf(socket);
+    const parsed = parseInput(data);
+    if (!parsed.ok) {
+      logEvent(
+        "input.rejected",
+        { cell: person, device, request_id: parsed.requestId ?? null, reason: parsed.reason },
+        "warn",
+      );
+      // A frame keyed by request id tells the client to stop resending that line.
+      const frame: Frame =
+        parsed.requestId === undefined
+          ? { type: "error", message: parsed.reason }
+          : { type: "rejected", requestId: parsed.requestId, message: parsed.reason };
+      socket.send(JSON.stringify(frame));
+      return;
+    }
+    const { input } = parsed;
+    try {
+      const cell = await this.cell(person);
+      await this.ensureStream(cell);
+      const { submissionId } = await this.submitInput(person, input.text, input.requestId);
+      logEvent("input.submitted", {
+        cell: person,
+        device,
+        request_id: input.requestId,
+        submission_id: submissionId,
+        chars: input.text.length,
+      });
+    } catch (error) {
+      logEvent(
+        "input.failed",
+        { cell: person, device, request_id: input.requestId, ...errorFields(error) },
+        "error",
+      );
+      // Not acknowledged: the client keeps the line and resends it after a reconnect.
+      socket.send(
+        JSON.stringify({
+          type: "error",
+          requestId: input.requestId,
+          message: "the cell could not take this message now; it is sent again on reconnect",
+        } satisfies Frame),
+      );
+      return;
+    }
+    socket.send(JSON.stringify({ type: "accepted", requestId: input.requestId } satisfies Frame));
+  }
+
+  async webSocketClose(socket: SocketLike, code: number): Promise<void> {
+    const { device, person } = this.tagsOf(socket);
+    logEvent("cli.session", {
+      cell: person,
+      device,
+      phase: "close",
+      code,
+      frames_sent: this.framesSent.get(device) ?? 0,
+    });
+    try {
+      socket.close(1000, "closed");
+    } catch {
+      // Already closed.
+    }
+  }
+
+  /** RPC for other cells and later inputs (such as mail): submit into the lead, unchanged. */
+  async submitInput(
+    person: string,
+    text: string,
+    requestId: string,
+  ): Promise<{ submissionId: number }> {
+    const cell = await this.cell(person);
+    const submission = await cell.submit(text, requestId);
+    this.keepBusy(cell);
+    return { submissionId: Number(submission.id) };
+  }
+
+  /** RPC (test-cell lab): this person cell reads a household document through its own client. */
+  async householdRead(document: string): Promise<HouseholdDocument> {
+    const household = householdClientOf(this.env);
+    if (household === undefined) throw new Error("no household cell: no binding and no URL");
+    return household.read(document);
+  }
+
+  /** RPC (test-cell lab): this person cell changes a household document as `person`. */
+  async householdChange(person: string, change: HouseholdChange): Promise<HouseholdApplyResult> {
+    const household = householdClientOf(this.env);
+    if (household === undefined) throw new Error("no household cell: no binding and no URL");
+    return household.apply({ ...change, fromCell: person });
+  }
+
+  /** Closes the harness of this activation; the next event opens it again. */
+  private async closeHarness(): Promise<void> {
+    const opening = this.opening;
+    this.opening = undefined;
+    this.streaming = undefined;
+    this.alarms = undefined;
+    if (opening !== undefined) await (await opening.catch(() => undefined))?.close();
+  }
+
+  /** RPC: the whole database as one dump, taken in one transaction. */
+  async snapshot(contractStep: number): Promise<CellDump> {
+    const dump = await this.snapshots().snapshot(contractStep);
+    logEvent("cell.snapshot", {
+      cell: this.storedName() ?? null,
+      digest: dump.digest,
+      rows: dump.rows,
+    });
+    return dump;
+  }
+
+  /**
+   * RPC: replaces the database with `dump` and opens the harness on it as `person`, which resumes
+   * the restored tasks and sets the alarm from the restored timers.
+   */
+  async restore(dump: CellDump, person: string): Promise<{ digest: string; rows: number }> {
+    if (!PERSON.test(person)) throw new Error(`bad cell name "${person}"`);
+    const result = await this.snapshots().restore(dump);
+    this.knownName = undefined;
+    await this.cell(person);
+    logEvent("cell.restored", { cell: person, digest: result.digest, rows: result.rows });
+    return result;
+  }
+
+  /** RPC: drops every table and the alarm (the test cell after a restore drill). */
+  async wipe(): Promise<void> {
+    const person = this.storedName() ?? null;
+    await this.snapshots().wipe();
+    this.knownName = undefined;
+    logEvent("cell.wiped", { cell: person });
+  }
+
+  /** RPC: the database digest and row count as they are now. */
+  async digest(): Promise<{ digest: string; rows: number }> {
+    return this.snapshots().digest();
+  }
+
+  /** RPC: the heartbeat routine's last run, read by waking the cell (check:heartbeats). */
+  async heartbeat(person: string): Promise<HeartbeatState> {
+    return heartbeatState((await this.cell(person)).harness);
+  }
+}

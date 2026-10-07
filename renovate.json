@@ -3,7 +3,18 @@
   "extends": ["config:recommended", ":semanticCommits"],
   "timezone": "UTC",
   "schedule": ["before 6am on monday"],
-  "enabledManagers": ["npm", "gradle", "gradle-wrapper", "github-actions", "mise"],
+  "enabledManagers": ["npm", "gradle", "gradle-wrapper", "github-actions", "mise", "custom.regex"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "celld release pin used by the VPS host setup",
+      "managerFilePatterns": ["/^infra/ansible/roles/celld/defaults/main\\.yml$/"],
+      "matchStrings": ["celld_version: \"(?<currentValue>[^\"]+)\""],
+      "depNameTemplate": "denoland/celld",
+      "datasourceTemplate": "github-releases",
+      "extractVersionTemplate": "^v(?<version>.+)$"
+    }
+  ],
   "labels": ["deps"],
   "packageRules": [
     {

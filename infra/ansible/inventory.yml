@@ -1,0 +1,7 @@
+# The VPS is reached through the owner's SSH config alias in SECBOT_VPS_SSH.
+# Its address never appears in this repo.
+all:
+  hosts:
+    secbot_vps:
+      ansible_host: "{{ lookup('ansible.builtin.env', 'SECBOT_VPS_SSH') }}"
+      ansible_become: true

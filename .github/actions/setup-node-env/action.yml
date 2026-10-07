@@ -40,7 +40,7 @@ runs:
     # The fork token exists only in this step's environment, as GIT_CONFIG_* variables.
     # Nothing writes it to ~/.gitconfig, and --ignore-scripts keeps every package
     # script from running while the token is present. Later steps never see it.
-    # When pnpm-workspace.yaml onlyBuiltDependencies gains an entry, add a
+    # When a pnpm-workspace.yaml allowBuilds entry becomes true, add a
     # "pnpm rebuild <package>" step after this one, without the token.
     - name: Install dependencies
       if: ${{ inputs.install == 'true' }}

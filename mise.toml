@@ -10,6 +10,10 @@ java = "temurin-21"
 lefthook = "2"
 gitleaks = "8"
 osv-scanner = "2"
+# Infrastructure code (infra/). Ansible runs from Linux or macOS (WSL2 on Windows).
+opentofu = "1"
+"pipx:ansible-core" = "2"
+"pipx:ansible-lint" = "latest"
 
 [tasks.setup]
 description = "Install dependencies and the git hooks"
@@ -25,12 +29,57 @@ run = "./gradlew -p app ktlintCheck detekt"
 run_windows = "gradlew.bat -p app ktlintCheck detekt"
 
 [tasks.test]
-description = "Run the server and extension tests with coverage (80% lines minimum)"
-run = "pnpm -r exec vitest run --coverage --coverage.thresholds.lines=80"
+description = "Run the server and extension tests with coverage (80% lines minimum), then the task-script tests"
+run = [
+  "pnpm -r exec vitest run --coverage --coverage.thresholds.lines=80",
+  "node --test scripts/*.test.mjs",
+]
 
 [tasks.build]
-description = "Build the server bundle"
-run = "pnpm -r run build"
+description = "Type-check the packages and build the server bundle into dist/ (worker, test-cell worker, VPS tool, manifest)"
+run = ["pnpm -r run build", "node scripts/build-bundle.mjs"]
+
+[tasks."check:identifiers"]
+description = "Fail when a tracked file holds an IP address, private-network hostname, account id, ping URL, or private key (--staged for the staged files)"
+run = "node scripts/check-identifiers.mjs"
+
+[tasks."infra:plan"]
+description = "OpenTofu plan for the R2 buckets, their tokens, and the heartbeat (reads TF_VAR_* from your shell)"
+dir = "infra/tofu"
+run = ["tofu init -input=false", "tofu plan -input=false -out=secbot.tfplan"]
+
+[tasks."infra:apply"]
+description = "Apply the reviewed OpenTofu plan (owner only, after reading infra:plan)"
+dir = "infra/tofu"
+run = "tofu apply -input=false secbot.tfplan"
+
+[tasks."infra:check"]
+description = "Static checks of infra/: tofu fmt and validate, ansible-lint, playbook syntax"
+# Ansible skips an ansible.cfg in a world-writable working directory (a Windows drive under WSL2);
+# ANSIBLE_CONFIG is always read (ansible/config/manager.py find_ini_config_file).
+env = { ANSIBLE_CONFIG = "{{config_root}}/infra/ansible/ansible.cfg" }
+run = [
+  "tofu -chdir=infra/tofu fmt -check -recursive",
+  "tofu -chdir=infra/tofu init -backend=false -input=false",
+  "tofu -chdir=infra/tofu validate",
+  "cd infra/ansible && ansible-galaxy collection install -r requirements.yml && ansible-lint && ansible-playbook --syntax-check site.yml",
+]
+
+[tasks."host:setup"]
+description = "Run the Ansible host setup on the VPS (SECBOT_VPS_SSH names your SSH alias; its user needs passwordless sudo); prints the diff"
+# Ansible skips an ansible.cfg in a world-writable working directory (a Windows drive under WSL2);
+# ANSIBLE_CONFIG is always read (ansible/config/manager.py find_ini_config_file).
+env = { ANSIBLE_CONFIG = "{{config_root}}/infra/ansible/ansible.cfg" }
+dir = "infra/ansible"
+run = ["ansible-galaxy collection install -r requirements.yml", "ansible-playbook site.yml --diff"]
+
+[tasks."smoke:r2"]
+description = "Prove the bucket refuses a second If-None-Match: * create with 412 (run before replication is turned on)"
+run = "node scripts/r2-smoke.mjs"
+
+[tasks."probe:ports"]
+description = "Probe the celld ports at SECBOT_PROBE_HOST; every port must refuse or drop the connection"
+run = "node scripts/probe-ports.mjs"
 
 [tasks."audit:deps"]
 description = "Dependency audit: fail on CVSS >= 7.0, unscored findings, or MAL-* ids unless osv-scanner.toml lists them with a reason and an expiry"
@@ -40,8 +89,9 @@ run = "node scripts/audit-deps.mjs"
 description = "License gate: fail on any dependency license outside the plan's allowlist"
 run = "node scripts/check-licenses.mjs"
 
-# The tasks below are stubs. Each one fails with a clear message until the
-# work packet named in the message replaces it with a real implementation.
+# Cell tasks. Every cell task below is real; docs/reference/mise-tasks.md lists each one's flags,
+# exit codes, and printed phrases. Cell names follow the release workflows: owner, person (the
+# second person's cell), household, and secrets (skipped with a printed line until it exists).
 #
 # VPS-side contract for the real tasks (ship plan v2, Blocks A, C, and E):
 # - Two VPS users. deploy-test has a forced command that only stages bundles and deploys
@@ -55,57 +105,93 @@ run = "node scripts/check-licenses.mjs"
 # - The release store keeps the last 5 bundles and mirrors each one to the off-provider bucket.
 
 [tasks."test:conformance"]
-description = "Run the pi-durable storage conformance suite against the cell storage adapter"
-run = "node -e \"console.error('test:conformance arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+description = "Run the pi-durable storage conformance suite inside a real celld cell (--target test-cell|local, --long-transaction)"
+run = "node scripts/conformance.mjs"
 
 [tasks."deploy:dry-run"]
-description = "Build the server bundle and show what a deploy would change"
-run = "node -e \"console.error('deploy:dry-run arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+description = "Build the server bundle and print its manifest; needs no credentials (deploy prints the diff against the live cell)"
+run = ["node scripts/build-bundle.mjs", "node scripts/vps.mjs dry-run"]
 
 [tasks.stage]
-description = "Stage a server bundle in the VPS release store by tag and SHA-256"
-run = "node -e \"console.error('stage arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+description = "Stage a server bundle in the VPS release store by tag and SHA-256 (--version --sha256 --file)"
+run = "node scripts/vps.mjs stage"
 
 [tasks.deploy]
-description = "Deploy a staged tag to some or all cells of an environment; holds the VPS lock and refuses a downgrade past a contract step"
-run = "node -e \"console.error('deploy arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+description = "Deploy a staged tag to an environment's fleets (--env test-cell|production --version [--sha256] [--cells]); holds the VPS lock and refuses a downgrade past a contract step"
+run = "node scripts/vps.mjs deploy"
 
 [tasks.snapshot]
 description = "Snapshot every cell of an environment to the off-provider bucket under a run-pinned id (pre-<tag>-<run-id>)"
-run = "node -e \"console.error('snapshot arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs snapshot"
 
 [tasks."ledger:record"]
 description = "Record an approved release, rollback, or restore attempt in the VPS deploy ledger"
-run = "node -e \"console.error('ledger:record arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs ledger-record"
 
 [tasks."ledger:verify"]
 description = "Fail unless the deploy ledger holds this run's approved attempt and no newer deploy, rollback, or restore"
-run = "node -e \"console.error('ledger:verify arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs ledger-verify"
 
 [tasks.restore]
 description = "Disaster step: restore one cell from a snapshot under the VPS lock, then confirm it read the outbound-effects log; never the secrets cell"
-run = "node -e \"console.error('restore arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs restore"
 
 [tasks."check:cells"]
 description = "Check that every cell in an environment is up on a version"
-run = "node -e \"console.error('check:cells arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs check-cells"
+
+[tasks.cli]
+description = "Run the secbot command line (chat, missed, model, specialist, device)"
+run = "node packages/cli/src/main.ts"
 
 [tasks."check:alarms"]
 description = "Check that every cell has its next alarm at or before its earliest routine timer"
-run = "node -e \"console.error('check:alarms arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+run = "node scripts/vps.mjs check-alarms"
+
+[tasks."test:durability"]
+description = "On the test cell: SIGKILL with work in flight, a late alarm after downtime, the household round trip, and the alarm check (--crash-only just kills and waits)"
+run = "node scripts/vps.mjs durability"
 
 [tasks."check:heartbeats"]
-description = "Check heartbeat freshness for every cell and routine since the deploy"
-run = "node -e \"console.error('check:heartbeats arrives with the cell-runtime packet (wave 1)'); process.exit(1)\""
+description = "Check heartbeat freshness for every cell and routine (--since-deploy [--cells] [--env]); needs HEARTBEAT_API_TOKEN"
+run = "node scripts/vps.mjs check-heartbeats"
+
+[tasks."restore:drill"]
+description = "Restore drill: copy a production snapshot (default: the newest release snapshot) into the test cell and restore it ([--snapshot] [--cells owner]); the next test-cell deploy wipes it"
+run = "node scripts/vps.mjs drill"
+
+[tasks."test:integration"]
+description = "The release integration suite on the test cell under one lease: the durability lab, a snapshot round trip, and the alarm check (--env test-cell)"
+run = "node scripts/vps.mjs integration"
+
+[tasks."measure:heap"]
+description = "Heap of one cell with a lead and four specialists at once and a long job, from celld /state (--env test-cell [--seconds 180])"
+run = "node scripts/vps.mjs measure-heap"
+
+[tasks."measure:write-delay"]
+description = "Median and 95th percentile of committed single-row writes on the test cell (--env test-cell [--writes 200])"
+run = "node scripts/vps.mjs measure-write-delay"
+
+[tasks."measure:cost"]
+description = "Monthly model and fixed cost per person with the arithmetic (--assumptions <json> [--log <cell log> --log-days N] [--out <md>])"
+run = "node scripts/measure-cost.mjs"
+
+[tasks."drill:heartbeat-alert"]
+description = "Induced heartbeat alert: stop the test cell for 420 s (past the 300 s period and 60 s grace), then start it"
+run = "node scripts/vps.mjs alert-drill --env test-cell --down-seconds 420"
+
+[tasks."vps:lease"]
+description = "Hold or free the VPS lock across several commands (acquire|release --holder H [--seconds N])"
+run = "node scripts/vps.mjs lease"
 
 [tasks."check:app-builds"]
 description = "Check the processing state in Play internal testing and TestFlight"
-run = "node -e \"console.error('check:app-builds arrives with the access-and-app packet'); process.exit(1)\""
+run = "node -e \"console.error('check:app-builds is not built yet'); process.exit(1)\""
 
 [tasks."app:build-ios"]
 description = "Build an unsigned iOS archive"
-run = "node -e \"console.error('app:build-ios arrives with the access-and-app packet'); process.exit(1)\""
+run = "node -e \"console.error('app:build-ios is not built yet'); process.exit(1)\""
 
 [tasks."app:sign"]
 description = "Sign the Android bundle and export the signed iOS build"
-run = "node -e \"console.error('app:sign arrives with the access-and-app packet'); process.exit(1)\""
+run = "node -e \"console.error('app:sign is not built yet'); process.exit(1)\""

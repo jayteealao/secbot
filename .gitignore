@@ -4,3 +4,15 @@
 .ai/*
 !.ai/ship-plan.md
 !.ai/sdlc-config.json
+
+# Build, test, and infrastructure outputs (cell runtime)
+node_modules/
+dist/
+coverage/
+.celld/
+infra/tofu/*.tfstate*
+infra/tofu/.terraform/
+infra/tofu/.terraform.lock.hcl.bak
+*.tfplan
+infra/ansible/*.retry
+secbot-*.tar.gz

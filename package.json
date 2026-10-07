@@ -6,13 +6,18 @@
   "type": "module",
   "scripts": {
     "check": "biome ci . && pnpm -r exec tsc --noEmit",
-    "test": "pnpm -r exec vitest run --coverage"
+    "test": "pnpm -r exec vitest run --coverage",
+    "build:bundle": "node scripts/build-bundle.mjs"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.15",
     "@commitlint/cli": "^21.2.3",
     "@commitlint/config-conventional": "^21.2.3",
+    "@types/node": "^24.0.0",
     "@vitest/coverage-v8": "^5.0.3",
+    "aws4fetch": "^1.0.20",
+    "esbuild": "^0.28.2",
+    "js-yaml": "4.3.2",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
   }

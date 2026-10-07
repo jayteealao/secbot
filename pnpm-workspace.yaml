@@ -1,10 +1,26 @@
 # Created by wf ship-plan build — plan v1, 2026-10-05
-# Server and pi-durable extension packages live under packages/ (from wave 1).
+# Server and pi-durable extension packages live under packages/.
 # The Compose Multiplatform app under app/ is a Gradle project, not a workspace package.
 packages:
   - "packages/*"
 
 # Added by wf ship-plan build — plan v2, 2026-10-05
 # Dependencies whose install scripts may run. CI installs with --ignore-scripts, so an
-# entry here also needs a "pnpm rebuild <package>" step in setup-node-env.
-onlyBuiltDependencies: []
+# entry set to true here also needs a "pnpm rebuild <package>" step in setup-node-env.
+# None runs today: @google/genai's preinstall is a no-op echo, esbuild's postinstall only
+# checks the platform binary that pnpm already installs, and protobufjs's postinstall only
+# checks versions for its CLI.
+allowBuilds:
+  '@google/genai': false
+  esbuild: false
+  protobufjs: false
+
+# pnpm's one-day minimumReleaseAge has no older match for these exact versions:
+# the pi fork at v1.0.3-secbot.1 needs chord, pi-ai, and pi-telemetry 1.0.3, and
+# @commitlint 21.2.3 needs conventional-commits-parser 7.1.3. Remove each entry once it is a day old.
+# Each entry carries a remove-by date; past it, the entry is stale and goes in the next change.
+minimumReleaseAgeExclude:
+  - '@earendil-works/chord@1.0.3' # remove by 2026-10-12
+  - '@earendil-works/pi-ai@1.0.3' # remove by 2026-10-12
+  - '@earendil-works/pi-telemetry@1.0.3' # remove by 2026-10-12
+  - conventional-commits-parser@7.1.3 # remove by 2026-10-12

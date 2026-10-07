@@ -1,0 +1,16 @@
+{
+  "name": "@secbot/cli",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The owner's command-line client: chat with the lead, missed messages, models, specialists.",
+  "type": "module",
+  "bin": {
+    "secbot": "./src/main.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "start": "node --experimental-strip-types --no-warnings=ExperimentalWarning src/main.ts",
+    "test": "vitest run"
+  }
+}

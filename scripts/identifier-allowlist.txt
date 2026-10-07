@@ -1,0 +1,2 @@
+# Exceptions to scripts/check-identifiers.mjs, one per line: path | text | reason
+# Keep this empty unless a value is provably public and not ours.
