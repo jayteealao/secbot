@@ -1,5 +1,5 @@
-// Routines and the durable wake-time store. AC-17 (the computation): the next alarm is the
-// earliest wake time stored in the live tasks' checkpoints. AC-20: a routine that is overdue when
+// Routines and the durable wake-time store. The next alarm is the
+// earliest wake time stored in the live tasks' checkpoints. A routine that is overdue when
 // the cell starts runs once, and its next wake counts from then.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { HarnessInspection } from "@earendil-works/pi-durable";
@@ -117,7 +117,7 @@ describe("wake times", () => {
 });
 
 describe("routines", () => {
-  it("runs an overdue routine once after a late start and counts its next wake from then (AC-20)", async () => {
+  it("runs an overdue routine once after a late start and counts its next wake from then", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     let clock = Date.now();
     const pings: string[] = [];

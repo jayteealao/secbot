@@ -1,4 +1,4 @@
-// AC-19 and AC-21 with a real SIGKILL (the local half; the test cell repeats it on real celld
+// A crash with a real SIGKILL (the local half; the test cell repeats it on real celld
 // storage with test:durability). A child process holds a running specialist job whose model call
 // is mid-flight, an open transaction with a marker row, and a pending reminder; it is killed with
 // SIGKILL. A new harness on the same database file then shows: the conversation intact, no

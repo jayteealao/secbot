@@ -1,5 +1,5 @@
-// The household change log. AC-23: two changes to different items at once both land; two changes
-// to the same item: the later wins and both stay in the history. AC-24: the same operation id
+// The household change log. Two changes to different items at once both land; two changes
+// to the same item: the later wins and both stay in the history. The same operation id
 // twice applies once and returns the same result.
 import { describe, expect, it } from "vitest";
 import { CelldSqliteDatabase } from "../../cell-storage/src/index.ts";
@@ -15,7 +15,7 @@ const add = (opId: string, text: string, fromCell = "owner") =>
   ({ opId, document: "list", fromCell, kind: "add", text }) as const;
 
 describe("household change log", () => {
-  it("lands two changes to different items made at the same time (AC-23)", async () => {
+  it("lands two changes to different items made at the same time", async () => {
     const { log } = open();
     await log.apply(add("op-milk", "milk"));
     await log.apply(add("op-eggs", "eggs"));
@@ -45,7 +45,7 @@ describe("household change log", () => {
     ]);
   });
 
-  it("lets the later change to the same item win and keeps both in the history (AC-23)", async () => {
+  it("lets the later change to the same item win and keeps both in the history", async () => {
     const { log } = open();
     await log.apply(add("op-bread", "bread"));
     const [first, second] = await Promise.all([
@@ -79,7 +79,7 @@ describe("household change log", () => {
     ]);
   });
 
-  it("applies a repeated operation id once and returns the stored result (AC-24)", async () => {
+  it("applies a repeated operation id once and returns the stored result", async () => {
     const { log, storage } = open();
     const first = await log.apply(add("owner:12:call-1", "apples"));
     const again = await log.apply(add("owner:12:call-1", "apples"));

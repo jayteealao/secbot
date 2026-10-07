@@ -1,4 +1,4 @@
-// Each role's resolved tool list (AC-12). Wave 1 allows history search and household document read
+// Each role's resolved tool list. Wave 1 allows history search and household document read
 // and write; the lead also holds the hand-off tool, the only routing path, and the reminder tool,
 // which only schedules a message to the lead itself. None has an outside effect. No built-in
 // pi-durable tool (read, write, edit, bash) is installed.

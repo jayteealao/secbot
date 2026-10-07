@@ -1,8 +1,8 @@
-// The person cell's alarm on the node:sqlite stand-in. AC-17: the alarm equals the earliest stored
+// The person cell's alarm on the node:sqlite stand-in. The alarm equals the earliest stored
 // wake time, a sooner reminder moves it, and the read-only route reports an induced later alarm
-// and a missing one without re-arming. AC-18 (local half): on an idle cell whose harness is not
+// and a missing one without re-arming. Locally: on an idle cell whose harness is not
 // open, the alarm wakes it, the due reminder reaches the lead, and the lead's relay reaches an
-// open session socket. AC-22 (local half): the owner cell's household change is read by the
+// open session socket. Locally: the owner cell's household change is read by the
 // second cell through the household cell. /alarms answers per cell, with the person alias.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
@@ -141,7 +141,7 @@ const idle = async (s: Setup, index = 0) => {
 };
 
 describe("person cell alarm", () => {
-  it("equals the earliest stored wake time, and a sooner reminder moves it (AC-17)", async () => {
+  it("equals the earliest stored wake time, and a sooner reminder moves it", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = setup();
     await status(s, "owner");
@@ -191,7 +191,7 @@ describe("person cell alarm", () => {
     await until(async () => (await alarmRoute(s, "owner")).ok === true);
   });
 
-  it("wakes an idle cell for a due reminder, and the lead's relay reaches the open session (AC-18)", async () => {
+  it("wakes an idle cell for a due reminder, and the lead's relay reaches the open session", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = setup();
     await status(s, "owner");
@@ -236,7 +236,7 @@ describe("person cell alarm", () => {
     );
   });
 
-  it("lets the second cell read the owner cell's household change (AC-22)", async () => {
+  it("lets the second cell read the owner cell's household change", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = setup();
     const owner = s.activate("owner");

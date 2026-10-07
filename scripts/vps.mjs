@@ -210,7 +210,7 @@ export async function checkAlarms({ env, cells = DEFAULT_ALARM_CELLS }) {
 const ROUTINE_PREFIX = "secbot.routine:";
 
 /**
- * The crash case on the test cell (AC-19, AC-21): `before` is the lab state before arming,
+ * The crash case on the test cell: `before` is the lab state before arming,
  * `armed` the arm answer, `after` the state after the SIGKILL and the restart, once idle. Pure.
  */
 export function judgeCrash(before, armed, after) {
@@ -252,7 +252,7 @@ export function judgeCrash(before, armed, after) {
   return results;
 }
 
-/** The late-alarm case (AC-20): the cell was down from `down.downFrom` to `down.upAt`. Pure. */
+/** The late-alarm case: the cell was down from `down.downFrom` to `down.upAt`. Pure. */
 export function judgeLateAlarm(down, after) {
   const overdue = (after.ticks ?? []).filter(
     (tick) => tick.wakeAt <= down.upAt && tick.firedAt >= down.downFrom,

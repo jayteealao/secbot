@@ -1,4 +1,4 @@
-// Reminders (AC-18 proxy in the harness): the lead model's own set_reminder call creates one
+// Reminders in the harness: the lead model's own set_reminder call creates one
 // reminder routine; at its time the reminder reaches the lead once as a follow-up input with a
 // fixed request id, and the lead's relayed answer streams to an open session. The live check with
 // the real lead model and the CLI runs on the test cell.

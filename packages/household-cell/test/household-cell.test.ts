@@ -1,6 +1,6 @@
 // The household cell over RPC-shaped calls: the owner cell's change is read by the second cell
-// (AC-22, local half), a response lost after apply() ran is retried with the same operation id and
-// applies once (AC-24 fault injection), and the cell keeps its alarm at its heartbeat routine.
+// (the local half), a response lost after apply() ran is retried with the same operation id and
+// applies once (fault injection), and the cell keeps its alarm at its heartbeat routine.
 import type { HouseholdApplyResult, HouseholdChange, HouseholdClient } from "@secbot/cell-harness";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
@@ -53,7 +53,7 @@ async function applyWithRetry(client: HouseholdClient, change: HouseholdChange) 
 }
 
 describe("HouseholdCell", () => {
-  it("lets the second cell read an item the owner cell added (AC-22)", async () => {
+  it("lets the second cell read an item the owner cell added", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const { household } = setup();
     const owner = flakyClient(household, "owner");
@@ -84,7 +84,7 @@ describe("HouseholdCell", () => {
     expect(JSON.stringify(applied)).not.toContain("olive");
   });
 
-  it("applies a change once when the answer was lost after apply() ran and the client retried (AC-24)", async () => {
+  it("applies a change once when the answer was lost after apply() ran and the client retried", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const { household } = setup();
     const owner = flakyClient(household, "owner");
