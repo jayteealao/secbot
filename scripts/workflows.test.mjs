@@ -82,6 +82,29 @@ test("the secrets stage is skipped until the secrets cell exists, and the final 
   assert.deepEqual(needsOf(release.jobs["github-release"]), ["build", "verify-all-cells"]);
 });
 
+test("every job after the secrets stage still runs when that stage is skipped", () => {
+  // GitHub skips every job in the chain after a skipped job unless the job's own `if` uses a
+  // status function (docs: "a failure or skip applies to all jobs in the dependency chain from
+  // the point of failure or skip onwards"), so each later job needs !cancelled() and checks its
+  // needs' results itself.
+  const jobs = release.jobs;
+  const after = Object.keys(jobs).filter((name) =>
+    ancestors(jobs, name).has("deploy-secrets-cell"),
+  );
+  assert.ok(after.includes("github-release"));
+  for (const name of after) {
+    const condition = jobs[name].if ?? "";
+    assert.match(condition, /!cancelled\(\)/, `${name} has no !cancelled() in its if`);
+    for (const parent of needsOf(jobs[name])) {
+      assert.match(
+        condition,
+        new RegExp(`needs\\.${parent}\\.result`),
+        `${name} does not check needs.${parent}.result`,
+      );
+    }
+  }
+});
+
 test("the restore drill runs monthly and on dispatch, behind the production approval and the release gate", () => {
   // js-yaml reads the bare key `on` as the string "on" (YAML 1.2 core schema).
   const on = drill.on;

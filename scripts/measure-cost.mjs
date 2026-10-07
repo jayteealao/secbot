@@ -17,6 +17,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DAYS_PER_MONTH = 30;
 
 const usd = (value) => `$${value.toFixed(2)}`;
+// Per-turn and per-day amounts are fractions of a cent apart, so the lines that multiply them
+// print five decimals; otherwise the shown arithmetic would not add up to the shown result.
+const usdFine = (value) => `$${value.toFixed(5)}`;
 
 /** pi-ai's installed OpenRouter catalog: model id to { input, output, cacheRead, cacheWrite }. */
 export async function loadCatalog() {
@@ -114,22 +117,22 @@ export function catalogCost(assumptions, prices) {
       tokenCost(cached, lead.cacheRead) +
       tokenCost(person.leadOutputTokens, lead.output);
     lines.push(
-      `${person.name}: lead turn = ${fresh} x $${lead.input}/M + ${cached} x $${lead.cacheRead}/M (cache read) + ${person.leadOutputTokens} x $${lead.output}/M = ${usd(leadTurn)}`,
+      `${person.name}: lead turn = ${fresh} x $${lead.input}/M + ${cached} x $${lead.cacheRead}/M (cache read) + ${person.leadOutputTokens} x $${lead.output}/M = ${usdFine(leadTurn)}`,
     );
     const specialistTurn =
       tokenCost(person.specialistInputTokens, specialist.input) +
       tokenCost(person.specialistOutputTokens, specialist.output);
     lines.push(
-      `${person.name}: specialist turn = ${person.specialistInputTokens} x $${specialist.input}/M + ${person.specialistOutputTokens} x $${specialist.output}/M = ${usd(specialistTurn)}`,
+      `${person.name}: specialist turn = ${person.specialistInputTokens} x $${specialist.input}/M + ${person.specialistOutputTokens} x $${specialist.output}/M = ${usdFine(specialistTurn)}`,
     );
     const daily =
       person.leadTurnsPerDay * leadTurn +
       person.handoffsPerDay * person.specialistTurnsPerHandoff * specialistTurn;
     lines.push(
-      `${person.name}: a day = ${person.leadTurnsPerDay} x ${usd(leadTurn)} + ${person.handoffsPerDay} x ${person.specialistTurnsPerHandoff} x ${usd(specialistTurn)} = ${usd(daily)}`,
+      `${person.name}: a day = ${person.leadTurnsPerDay} x ${usdFine(leadTurn)} + ${person.handoffsPerDay} x ${person.specialistTurnsPerHandoff} x ${usdFine(specialistTurn)} = ${usdFine(daily)}`,
     );
     const month = daily * DAYS_PER_MONTH;
-    lines.push(`${person.name}: a month = ${usd(daily)} x ${DAYS_PER_MONTH} = ${usd(month)}`);
+    lines.push(`${person.name}: a month = ${usdFine(daily)} x ${DAYS_PER_MONTH} = ${usd(month)}`);
     monthly.set(person.name, month);
   }
   return { lines, monthly };

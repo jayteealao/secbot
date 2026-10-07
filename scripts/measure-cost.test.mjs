@@ -31,10 +31,29 @@ test("the catalog estimate prices each turn with the arithmetic shown", () => {
   // lead turn: 5000 x 4/M + 5000 x 0.2/M + 1000 x 20/M = 0.02 + 0.001 + 0.02 = 0.041
   // specialist turn: 2000 x 1/M + 500 x 5/M = 0.0045; a day: 10 x 0.041 + 2 x 2 x 0.0045 = 0.428
   assert.ok(Math.abs((monthly.get("owner") ?? 0) - 12.84) < 1e-9);
-  assert.equal(lines.at(-1), "owner: a month = $0.43 x 30 = $12.84");
+  assert.equal(lines.at(-1), "owner: a month = $0.42800 x 30 = $12.84");
   assert.throws(
     () => catalogCost({ ...assumptions, leadModel: "nope" }, prices),
     /no catalog price for nope/,
+  );
+});
+
+test("each printed day and month line adds up from the amounts it shows", () => {
+  // A reader must be able to redo the arithmetic from the printed numbers alone.
+  const { lines } = catalogCost(assumptions, prices);
+  const amount = (text) => Number(text.replace("$", ""));
+  const day = lines.find((line) => line.includes(": a day = "));
+  const [, lead, leadCost, handoffs, perHandoff, specialistCost, total] =
+    /a day = (\d+) x (\$[\d.]+) \+ (\d+) x (\d+) x (\$[\d.]+) = (\$[\d.]+)$/.exec(day) ?? [];
+  const recomputed =
+    Number(lead) * amount(leadCost) +
+    Number(handoffs) * Number(perHandoff) * amount(specialistCost);
+  assert.ok(Math.abs(recomputed - amount(total)) < 0.005, `${day} does not add up`);
+  const month = lines.find((line) => line.includes(": a month = "));
+  const [, daily, days, monthly] = /a month = (\$[\d.]+) x (\d+) = (\$[\d.]+)$/.exec(month) ?? [];
+  assert.ok(
+    Math.abs(amount(daily) * Number(days) - amount(monthly)) < 0.005,
+    `${month} does not add up`,
   );
 });
 

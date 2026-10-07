@@ -424,8 +424,11 @@ jobs:
           cmd: mise run check:heartbeats -- --since-deploy
           min-minutes: "0"
 
+  # GitHub skips every job after a skipped one unless its own if uses a status function, so this
+  # job checks its needs itself; otherwise the secrets-stage skip would skip the release too.
   github-release:
     needs: [build, verify-all-cells]
+    if: ${{ !cancelled() && needs.build.result == 'success' && needs.verify-all-cells.result == 'success' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
