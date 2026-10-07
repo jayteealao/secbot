@@ -225,6 +225,36 @@ describe("operator routes", () => {
     expect((await call(s, "POST", "/ops/snapshot?id=bad%20id")).status).toBe(400);
   });
 
+  it("keeps a snapshot write-once: a second snapshot with the same id is refused and changes nothing", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const s = setup();
+    const first = await call(s, "POST", "/ops/snapshot?id=pre-v1.0.0-42");
+    expect(first.status).toBe(200);
+    const before = new Map(s.bucket.objects);
+    expect(before.size).toBe(3);
+
+    // The cells change after the first snapshot (a deploy ran), then the workflow is rerun.
+    await s.household.apply({
+      opId: "owner:3:d",
+      document: "list",
+      fromCell: "owner",
+      kind: "add",
+      text: "eggs",
+    });
+    const again = await call(s, "POST", "/ops/snapshot?id=pre-v1.0.0-42");
+    expect(again.status).toBe(409);
+    expect((await body(again)).error).toBe(
+      "snapshot pre-v1.0.0-42 already exists for cell owner; refusing to overwrite it",
+    );
+    expect(new Map(s.bucket.objects)).toEqual(before);
+
+    // A partial overlap is refused before any object is written.
+    s.bucket.objects.delete("snapshots/pre-v1.0.0-42/household.json");
+    const partial = await call(s, "POST", "/ops/snapshot?id=pre-v1.0.0-42");
+    expect(partial.status).toBe(409);
+    expect(s.bucket.objects.has("snapshots/pre-v1.0.0-42/household.json")).toBe(false);
+  });
+
   it("wipes cells, reports digests and heartbeat state, and accepts person for the second person", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = setup();

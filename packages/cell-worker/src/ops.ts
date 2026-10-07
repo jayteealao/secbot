@@ -140,6 +140,16 @@ export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise
     const id = url.searchParams.get("id") ?? "";
     if (!SNAPSHOT_ID.test(id)) return json({ error: "send id=<snapshot id>" }, 400);
     if (env.SNAPSHOTS === undefined) return json({ error: "no SNAPSHOTS binding" }, 503);
+    // A snapshot is write-once: it is the rollback boundary the deploy ledger names, so a rerun
+    // with the same id must fail here, before any object is touched, never replace it.
+    for (const cell of cells) {
+      if ((await env.SNAPSHOTS.get(snapshotKey(id, cell))) !== null) {
+        return json(
+          { error: `snapshot ${id} already exists for cell ${cell}; refusing to overwrite it` },
+          409,
+        );
+      }
+    }
     const snapshots = [];
     for (const cell of cells) {
       const dump = await stub(cell).snapshot(contractStep());
