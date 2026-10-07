@@ -2,6 +2,8 @@ export {
   ChangeLog,
   type HistoryEntry,
   ITEM_TEXT_LIMIT,
+  isRefusedHouseholdChange,
+  REFUSED_HOUSEHOLD_CHANGE,
   RefusedHouseholdChange,
   validateChange,
 } from "./change-log.ts";

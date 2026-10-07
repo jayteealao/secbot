@@ -119,7 +119,7 @@ async function leadEntries(s: Setup, person: string): Promise<number> {
 
 describe("operator routes", () => {
   it("refuse a request without the operator key, or with a wrong one, and log the refusal", async () => {
-    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
     const s = setup();
     expect((await call(s, "GET", "/ops/digest", null)).status).toBe(401);
     expect((await call(s, "GET", "/ops/digest", "wrong")).status).toBe(401);
@@ -130,6 +130,7 @@ describe("operator routes", () => {
     expect(refused).toHaveLength(4);
     expect(refused[0]).toEqual({
       event: "ops.refused",
+      level: "warn",
       route: "/ops/digest",
       reason: "operator_key",
     });
@@ -189,6 +190,7 @@ describe("operator routes", () => {
     expect(lines.filter((line) => line.event === "ops.snapshot")).toHaveLength(3);
     expect(lines.find((line) => line.event === "cell.restored" && line.cell === "owner")).toEqual({
       event: "cell.restored",
+      level: "info",
       cell: "owner",
       digest: ownerDigest,
       rows: expect.any(Number),

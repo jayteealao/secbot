@@ -13,6 +13,7 @@ const samples = {
   publicAddress: dot(81, 7, 12, 200),
   tailnet: `${["vps", "tail1234"].join(".")}.ts.net`,
   r2Endpoint: `https://${hex32}.r2.cloudflarestorage.com`,
+  r2EndpointEu: `https://${hex32}.eu.r2.cloudflarestorage.com`,
   accountVar: `account_id = "${hex32}"`,
   heartbeat: `https://uptime.${"betterstack"}.com/api/v1/heartbeat/${"Ab12".repeat(5)}`,
   key: `-----BEGIN ${"OPENSSH PRIVATE"} KEY-----`,

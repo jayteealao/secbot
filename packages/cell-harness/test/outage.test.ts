@@ -43,6 +43,29 @@ describe("model outage", () => {
     });
   });
 
+  // The wake-time store reads pi-durable's generation checkpoint (phase "retry", field "until"),
+  // which is not a public API. This pins it to the installed fork: an upgrade that renames the
+  // phase or the field fails here instead of leaving the cell with no alarm for a model retry.
+  it("finds a real generation retry's wake time in the stored checkpoint", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const gateway = createFauxGateway(() =>
+      fauxAssistantMessage([], { stopReason: "error", errorMessage: FAILURES[0] ?? "" }),
+    );
+    test = await openTestCell({ gateway, now: () => Date.now() });
+    await test.cell.submit("What is on today?", "retry-wake-1");
+    let retry: { at: number } | undefined;
+    for (let step = 0; step < 50 && retry === undefined; step++) {
+      await vi.advanceTimersByTimeAsync(100);
+      const { summary } = await test.cell.wakes();
+      retry = summary.wakes.find((wake) => wake.kind === "model-retry");
+    }
+    expect(retry, "a model-retry wake from the generation checkpoint").toBeDefined();
+    expect(retry?.at).toBeGreaterThan(Date.now() - 1);
+    expect(retry?.at).toBeLessThanOrEqual(Date.now() + RETRY_POLICY.maxAgentDelayMs);
+  }, 30_000);
+
   it("keeps the request for 20 minutes of failures, alerts once at 15 minutes, then answers", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const start = Date.now();

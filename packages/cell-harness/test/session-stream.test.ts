@@ -51,7 +51,7 @@ describe("session frames", () => {
       text: "research finding: evidence is mixed.",
     });
     expect(delivered).toHaveLength(3);
-    expect(await test.cell.missed("never-connected")).toHaveLength(3);
+    expect((await test.cell.missed("never-connected")).messages).toHaveLength(3);
   }, 30_000);
 
   it("sends a long answer as several parts that add up to the answer", async () => {

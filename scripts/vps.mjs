@@ -29,6 +29,7 @@
 // vps-access action writes the alias "secbot-vps", which is the default there. The repo never
 // holds the VPS address.
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
@@ -75,6 +76,15 @@ const LOCKING = new Set([
 ]);
 let leaseHolder;
 
+export const SSH_OPTIONS = [
+  "-o",
+  "BatchMode=yes",
+  "-o",
+  "ServerAliveInterval=15",
+  "-o",
+  "ServerAliveCountMax=4",
+];
+
 /** Runs the release tool over SSH; resolves with stdout, streams stderr. */
 export function runRemote(words, { input, target = sshTarget(), echo = true } = {}) {
   const command = remoteCommand(
@@ -83,7 +93,9 @@ export function runRemote(words, { input, target = sshTarget(), echo = true } = 
       : words,
   );
   return new Promise((resolvePromise, reject) => {
-    const child = spawn("ssh", ["-o", "BatchMode=yes", target, command], {
+    // Keepalives end a session on a dropped link within about a minute, instead of holding the
+    // VPS lock until the job's own timeout.
+    const child = spawn("ssh", [...SSH_OPTIONS, target, command], {
       stdio: [input ? "pipe" : "ignore", "pipe", "inherit"],
     });
     let stdout = "";
@@ -129,7 +141,7 @@ const flags = (argv) =>
     allowPositionals: true,
   }).values;
 
-/** Every cell of wave 1, by the cells' own names. */
+/** Every cell, by the cells' own names. */
 export const DEFAULT_CELLS = "owner,second,household";
 export const SECRETS_SKIPPED = "cell secrets skipped: it arrives with the secrets cell";
 
@@ -158,8 +170,36 @@ const runWords = (env = process.env) =>
     ? ["--run-id", env.GITHUB_RUN_ID, "--run-attempt", env.GITHUB_RUN_ATTEMPT ?? "1"]
     : [];
 
+/**
+ * Compares the release tool on the VPS with the copy the bundle was built with. The VPS copy is
+ * installed by host setup only, so a release that changed the tool needs host setup first.
+ */
+export function judgeTool(remoteSha, localSha) {
+  const remote = remoteSha.trim();
+  if (localSha === undefined) return { ok: true, line: "release tool: no local copy to compare" };
+  if (remote === localSha) return { ok: true, line: `release tool ${remote.slice(0, 12)} matches` };
+  return {
+    ok: false,
+    line: `the release tool on the VPS (${remote.slice(0, 12) || "unknown"}) differs from this bundle's (${localSha.slice(0, 12)}); run "mise run host:setup" first`,
+  };
+}
+
+/** SHA-256 of the bundle's copy of the release tool, or undefined when there is none. */
+async function localToolSha() {
+  const file = join(root, "dist", "vps", "secbot-release");
+  const bytes = await readFile(file).catch(() => undefined);
+  return bytes === undefined ? undefined : createHash("sha256").update(bytes).digest("hex");
+}
+
+export async function checkTool() {
+  const verdict = judgeTool(await runRemote(["tool-sha"], { echo: false }), await localToolSha());
+  console.log(verdict.line);
+  if (!verdict.ok) throw new Error(verdict.line);
+}
+
 export async function stage({ version, sha256, file }) {
   if (!version || !sha256 || !file) throw new Error("stage needs --version, --sha256, and --file");
+  await checkTool();
   return runRemote(["stage", "--version", version, "--sha256", sha256], { input: file });
 }
 
@@ -387,7 +427,7 @@ export const printResults = (results, log = console.log) => {
 /**
  * Drives the test cell's durability lab: a SIGKILL with three things in flight, a late alarm after
  * the cell was down, the household round trip, and the induced alarm checks. With --crash-only, it
- * only kills the test cell and waits for it to come back (Charter Scenario step 7).
+ * only kills the test cell and waits for it to come back.
  */
 export async function durability({ env, "crash-only": crashOnly, "down-seconds": downSeconds }) {
   if (env !== "test-cell") throw new Error("durability runs only with --env test-cell");
@@ -581,9 +621,7 @@ export async function restore({ env, cells, snapshot: id }) {
   const verdict = judgeRestore(answer, cell);
   console.log(verdict.line);
   if (!verdict.ok) throw new Error("the restore did not report the loaded digest");
-  console.log(
-    "outbound-effects log: none in this release (no tool has an outside effect before safety-core)",
-  );
+  console.log("outbound-effects log: none in this release (no tool has an outside effect yet)");
 }
 
 export async function drill({ snapshot: id, cells = "owner" }) {
@@ -655,7 +693,7 @@ export async function checkHeartbeats(values, fetcher = fetch) {
 }
 
 /**
- * The induced heartbeat alert (AC-29): the test cell stops for longer than its heartbeat's period
+ * The induced heartbeat alert: the test cell stops for longer than its heartbeat's period
  * and grace, so Better Stack alerts the owner by push and e-mail; then it starts again.
  */
 export async function alertDrill({ env, "down-seconds": seconds = "420" }) {
@@ -736,9 +774,10 @@ export async function integration({ env }) {
       pass:
         household !== undefined &&
         changed !== household.digest &&
-        restored.digest === household.digest &&
-        after === household.digest,
-      detail: `household digest ${short(household?.digest)} at the snapshot, ${short(changed)} after a change, ${short(after)} after the restore; bytes per cell: ${(taken.snapshots ?? []).map((item) => `${item.cell} ${item.bytes}`).join(", ")}`,
+        // The restore's own digest is read back inside its transaction; a digest taken after the
+        // cell reopens can include a routine that ran on open, so it is reported, not compared.
+        restored.digest === household.digest,
+      detail: `household digest ${short(household?.digest)} at the snapshot, ${short(changed)} after a change, ${short(restored.digest)} restored, ${short(after)} after the reopen; bytes per cell: ${(taken.snapshots ?? []).map((item) => `${item.cell} ${item.bytes}`).join(", ")}`,
     });
     const alarms = parseJson(
       await runRemote(["alarms", "--env", env, "--cells", DEFAULT_CELLS], { echo: false }),

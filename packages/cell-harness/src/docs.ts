@@ -47,6 +47,10 @@ export const ModelHealthDoc = defineDoc<{
   since: number | null;
   lastError: string;
   alertedAt: number | null;
+  /** Which alert `alertedAt` claimed; absent in documents written before it existed. */
+  alertedKind?: "outage" | "credit" | null;
+  /** When that alert was sent; null while the send is pending (a crash then leaves it unsent). */
+  sentAt?: number | null;
   /** Sessions show "waiting for the model" while this is true. */
   waiting: boolean;
 }>({

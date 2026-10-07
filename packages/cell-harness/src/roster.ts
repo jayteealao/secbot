@@ -19,6 +19,9 @@ import { LEAD_INSTRUCTIONS, LEAD_ROLE, STARTER_SPECIALISTS } from "./release-def
 
 export const SPECIALIST_NAME = /^[a-z][a-z0-9-]{1,31}$/;
 
+/** A specialist's instruction is its system prompt on every call, so its size is capped. */
+export const INSTRUCTION_LIMIT = 4_000;
+
 /** Writes a role's agent: model from the map, the role's extensions, and its instructions. */
 async function applyAgent(
   parts: CellParts,
@@ -62,8 +65,10 @@ async function createSpecialist(
 
 /**
  * Creates the four starter specialists once and re-applies every role's agent on each open, so
- * a release's new defaults, tools, and instructions reach existing conversations. Idempotent.
- * Returns the number of specialists created.
+ * a release's new defaults, tools, and instructions reach existing conversations: the starters
+ * get the release's instruction, and specialists the owner added keep their own instruction but
+ * get the release's tools and model defaults. Idempotent. Returns the number of specialists
+ * created.
  */
 export async function ensureRoster(parts: CellParts, context: Context): Promise<number> {
   return parts.harness.commit(async (tx) => {
@@ -75,12 +80,11 @@ export async function ensureRoster(parts: CellParts, context: Context): Promise<
       created++;
     }
     await applyAgent(parts, tx, ROOT_CONVERSATION_ID, LEAD_ROLE, LEAD_INSTRUCTIONS);
-    for (const starter of STARTER_SPECIALISTS) {
-      const record = roster.specialists[starter.name];
-      if (record !== undefined) {
-        record.instruction = starter.instruction;
-        await applyAgent(parts, tx, record.conversationId, starter.name, starter.instruction);
-      }
+    const starters = new Map(STARTER_SPECIALISTS.map((starter) => [starter.name, starter]));
+    for (const [name, record] of Object.entries(roster.specialists)) {
+      const starter = record.builtIn ? starters.get(name) : undefined;
+      if (starter !== undefined) record.instruction = starter.instruction;
+      await applyAgent(parts, tx, record.conversationId, name, record.instruction);
     }
     return created;
   }, context);
@@ -105,6 +109,9 @@ export async function addSpecialist(
     refuse(`bad name "${input.name}": use 2-32 lowercase letters, digits, or dashes`);
   }
   if (input.instruction.trim() === "") refuse("an instruction is required");
+  if (input.instruction.length > INSTRUCTION_LIMIT) {
+    refuse(`the instruction is longer than ${INSTRUCTION_LIMIT} characters`);
+  }
   if (input.model !== undefined) {
     try {
       assertResolvable(parts, input.model);

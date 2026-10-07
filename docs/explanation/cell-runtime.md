@@ -51,9 +51,10 @@ earliest time. A crash loses nothing, because the times are in the database.
 
 Every model call goes through one OpenRouter key, with a model per role stored in the cell and
 changed by the CLI. When OpenRouter fails or is slow, the request is kept and retried with a
-capped backoff and no retry ceiling; the job pauses. A credit-limit error is treated the same way.
-After 15 minutes of failures, Better Stack alerts the owner once and the CLI shows
-`waiting for the model`. No turn ends unanswered because of an outage. A model call cut off by a
+capped backoff (2 s, doubling to 60 s) and no retry ceiling; the job pauses. After 15 minutes
+of failures, Better Stack alerts the owner once and the CLI shows `waiting for the model`. A
+credit-limit error is kept and retried the same way, but alerts at once instead of after 15
+minutes. No turn ends unanswered because of an outage. A model call cut off by a
 crash runs again after the restart; the owner accepted one repeated call.
 
 ## Production fleets and staged deploys

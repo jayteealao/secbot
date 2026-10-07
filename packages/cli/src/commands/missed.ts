@@ -7,7 +7,10 @@ type Missed =
   | { kind: "followup"; entryId: number; from: string; text: string };
 
 export async function missed(client: CellClient, io: Io): Promise<number> {
-  const { messages } = await client.request<{ messages: Missed[] }>("GET", "/missed");
+  const { messages, remaining = 0 } = await client.request<{
+    messages: Missed[];
+    remaining?: number;
+  }>("GET", "/missed");
   if (messages.length === 0) {
     io.stdout("no missed messages\n");
     return 0;
@@ -19,5 +22,6 @@ export async function missed(client: CellClient, io: Io): Promise<number> {
         : `[from ${message.from}] ${message.text}\n`,
     );
   }
+  if (remaining > 0) io.stdout(`${remaining} more; run "secbot missed" again\n`);
   return 0;
 }

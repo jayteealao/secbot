@@ -83,4 +83,44 @@ describe("history search", () => {
     expect(hits[0]?.text).toContain("4");
     expect(await searchHistory(test.cell.harness, "   ", 3, BACKGROUND_CONTEXT)).toEqual([]);
   });
+
+  // The lead is one endless conversation kept going by compaction. After a compaction summarizes
+  // the older part, history search still finds a message from before the cut, and the lead and a
+  // hand-off keep working on the compacted conversation.
+  it("still finds a message from before a compaction, and the lead still hands off", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(responder) });
+    const t = test;
+    const filler = "the weekly plan in detail. ".repeat(1_000);
+    const seeds = [
+      `We will cook kale soup on Sunday, and ${filler}`,
+      `Buy oat milk, and ${filler}`,
+      `Clean the shed, and ${filler}`,
+      `Call the plumber, and ${filler}`,
+    ];
+    for (const [index, text] of seeds.entries()) {
+      await (await t.cell.submit(text, `long-${index}`)).wait(BACKGROUND_CONTEXT);
+    }
+    const compaction = await t.cell.root.compact(undefined, BACKGROUND_CONTEXT);
+    const { state } = await t.cell.harness.waitForTask(compaction, BACKGROUND_CONTEXT);
+    expect(state.outcome.status).toBe("completed");
+    if (state.outcome.status === "completed" && state.outcome.result.submissionId !== undefined) {
+      const placed = await t.cell.harness.submission(
+        state.outcome.result.submissionId,
+        BACKGROUND_CONTEXT,
+      );
+      await placed?.wait(BACKGROUND_CONTEXT);
+    }
+    const page = await t.cell.root.entries({}, 200, undefined, BACKGROUND_CONTEXT);
+    expect(page.items.some((entry) => entry.kind === "pi.compaction")).toBe(true);
+
+    const hits = await searchHistory(t.cell.harness, "kale soup", 5, BACKGROUND_CONTEXT);
+    expect(hits.some((hit) => hit.text.includes("We will cook kale soup on Sunday"))).toBe(true);
+
+    await (await t.cell.submit("Hand off the kale question", "ask-after")).wait(BACKGROUND_CONTEXT);
+    const sawResult = () =>
+      t.gateway.requests.find((r) => r.role === "household" && r.last?.role === "toolResult");
+    await until(() => sawResult() !== undefined);
+    expect(sawResult()?.lastText ?? "").toContain("We will cook kale soup on Sunday");
+  }, 30_000);
 });

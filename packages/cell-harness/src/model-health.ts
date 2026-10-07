@@ -12,11 +12,14 @@
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Harness } from "@earendil-works/pi-durable";
-import type { AlertKind, Alerts } from "./alerts.ts";
-import { logEvent } from "./cell-parts.ts";
+import { ALERT_TIMEOUT_MS, type AlertKind, type Alerts } from "./alerts.ts";
+import { logEvent, safeErrorText } from "./cell-parts.ts";
 import { ModelHealthDoc } from "./docs.ts";
 
 export const OUTAGE_ALERT_AFTER_MS = 15 * 60_000;
+
+/** A claimed alert with no recorded send after this long was lost (the cell stopped mid-send). */
+export const ALERT_CLAIM_STALE_MS = 2 * ALERT_TIMEOUT_MS;
 
 export type HealthReport =
   | { readonly kind: "failure"; readonly error: string; readonly credit: boolean }
@@ -73,11 +76,14 @@ export class ModelHealthMonitor {
           since: null,
           lastError: "",
           alertedAt: null,
+          alertedKind: null,
+          sentAt: null,
           waiting: false,
         });
         return undefined;
       }
-      const lastError = report.error.slice(0, 200);
+      // Only the status and provider code are kept: a provider may echo request text back.
+      const lastError = safeErrorText(report.error).slice(0, 200);
       const next = report.credit ? "credit" : health.state === "credit" ? "credit" : "failing";
       if (health.state !== next) {
         if (health.since === null) health.since = at;
@@ -92,23 +98,31 @@ export class ModelHealthMonitor {
       }
       health.lastError = lastError;
       const since = health.since ?? at;
-      if (health.alertedAt !== null) return undefined;
-      if (next === "credit") {
-        Object.assign(health, { alertedAt: at, waiting: true });
-        return "credit";
+      if (health.alertedAt !== null) {
+        // A credit limit reached during an outage that was already alerted still gets its own
+        // alert; a claim that was never sent (the cell stopped between the commit and the call)
+        // is claimed again.
+        const covered = health.alertedKind === "credit" || next !== "credit";
+        const lost =
+          health.sentAt === null &&
+          health.alertedKind != null &&
+          at - health.alertedAt > ALERT_CLAIM_STALE_MS;
+        if (covered && !lost) return undefined;
       }
-      if (at - since >= OUTAGE_ALERT_AFTER_MS) {
-        Object.assign(health, { alertedAt: at, waiting: true });
-        return "outage";
-      }
-      return undefined;
+      const kind: AlertKind | undefined =
+        next === "credit" ? "credit" : at - since >= OUTAGE_ALERT_AFTER_MS ? "outage" : undefined;
+      if (kind === undefined) return undefined;
+      Object.assign(health, { alertedAt: at, alertedKind: kind, sentAt: null, waiting: true });
+      return kind;
     }, BACKGROUND_CONTEXT);
     if (alert === undefined) return;
-    if (!(await this.options.alerts.send(alert))) {
+    const sent = await this.options.alerts.send(alert);
+    await harness.commit(async (tx) => {
+      const health = await tx.doc(ModelHealthDoc);
+      if (health.alertedKind !== alert) return;
       // Not sent: the next failure tries again; the waiting state stays on.
-      await harness.commit(async (tx) => {
-        (await tx.doc(ModelHealthDoc)).alertedAt = null;
-      }, BACKGROUND_CONTEXT);
-    }
+      if (sent) health.sentAt = this.options.now();
+      else Object.assign(health, { alertedAt: null, alertedKind: null, sentAt: null });
+    }, BACKGROUND_CONTEXT);
   }
 }

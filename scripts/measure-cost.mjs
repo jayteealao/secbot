@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The monthly cost estimate per person (AC-33), with every line of arithmetic.
+// The monthly cost estimate per person, with every line of arithmetic.
 //
 //   node scripts/measure-cost.mjs --assumptions <file.json> [--log <cell log> --log-days N] [--out <file.md>]
 //

@@ -7,9 +7,16 @@ export {
   type WakeSource,
 } from "./alarm.ts";
 export { type AlertEnv, type Alerts, createAlerts } from "./alerts.ts";
-export { type CellParts, logEvent, RefusedChange } from "./cell-parts.ts";
+export {
+  type CellParts,
+  errorFields,
+  type LogLevel,
+  logEvent,
+  RefusedChange,
+  safeErrorText,
+} from "./cell-parts.ts";
 export { CREDIT_MARKER, isCreditError, withCreditPause } from "./credit-pause.ts";
-export type { LeadMessage } from "./delivery.ts";
+export type { LeadMessage, MissedPage } from "./delivery.ts";
 export { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 export {
   createHeartbeatRoutine,
@@ -23,6 +30,7 @@ export {
   pingRoutineHeartbeat,
 } from "./heartbeat.ts";
 export {
+  CELL_NAME,
   DEFAULT_HOUSEHOLD_DOCUMENT,
   HOUSEHOLD_DOCUMENT,
   type HouseholdApplyResult,
@@ -30,7 +38,7 @@ export {
   type HouseholdClient,
   type HouseholdDocument,
   type HouseholdItem,
-} from "./household-tools.ts";
+} from "./household-contract.ts";
 export type { RoleModel } from "./model-map.ts";
 export {
   type CellEnv,
@@ -38,6 +46,7 @@ export {
   type CellStatus,
   type OpenCellOptions,
   openCellHarness,
+  reportFields,
 } from "./open-harness.ts";
 export {
   DEFAULT_LEAD_MODEL,
@@ -57,7 +66,7 @@ export {
   RoutinesDoc,
   routineWake,
 } from "./routines.ts";
-export type { Frame, SessionStream } from "./session-stream.ts";
+export { FRAME_TYPES, type Frame, type SessionStream } from "./session-stream.ts";
 export {
   earliestTimer,
   LIVENESS_WAKE_MS,

@@ -75,6 +75,7 @@ describe("HouseholdCell", () => {
     expect(applied).toEqual([
       {
         event: "household.change.applied",
+        level: "info",
         document: "list",
         item_id: "owner:7:call-1",
         kind: "add",
@@ -191,6 +192,7 @@ describe("HouseholdCell", () => {
     );
     expect(lines.find((line) => line.event === "cell.restored")).toEqual({
       event: "cell.restored",
+      level: "info",
       cell: "household",
       digest: dump.digest,
       rows: dump.rows,

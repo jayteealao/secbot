@@ -9,9 +9,11 @@ Run it with `mise run cli -- <command>` from the repo, or `node packages/cli/src
 ## Register this device
 
 1. `secbot device new <name>` makes a device key, saves it to `~/.config/secbot/device.json`
-   (mode 0600; `SECBOT_CONFIG_DIR` moves it), and prints one line: `<name>:<person>:<sha256>`.
-   The key itself is never printed.
-2. Add that line to the `SECBOT_DEVICE_KEYS` value you keep in your shell (comma-separated), then
+   (mode 0600; `SECBOT_CONFIG_DIR` moves it), and prints three lines: where the key was saved, a
+   one-line instruction, and the entry `<name>:owner:<sha256>`. Copy only that last line. The key
+   itself is never printed. Devices register for the owner only for now; the person in the entry
+   is always `owner`.
+2. Add the entry to the `SECBOT_DEVICE_KEYS` value you keep in your shell (comma-separated), then
    run host setup and deploy. The cell stores only the hash.
 3. Point the CLI at your cell: set `SECBOT_CELL_URL`, or put `{"cellUrl": "..."}` in
    `~/.config/secbot/config.json`. The address is a private host name; it never goes in the repo.
@@ -20,7 +22,10 @@ Run it with `mise run cli -- <command>` from the repo, or `node packages/cli/src
    `SECBOT_CELL_URL=http://<private host name>:8788`.
 
 A key registered for one person is refused by every other person's cell, and the cell refuses any
-request that does not arrive on one of the private host names it was deployed with.
+request that does not arrive on one of the private host names it was deployed with. The host-name
+check reads the request's `Host` header, which any caller can set, so it only catches a
+misconfigured client; the network boundary is the private network and the VPS firewall, and the
+device key is what proves the caller.
 
 ## Commands
 
@@ -33,7 +38,11 @@ request that does not arrive on one of the private host names it was deployed wi
 | `secbot specialist add <name> --instruction "..." [--model <id>]` | Adds a specialist. The lead can hand work to it from its next turn. |
 
 If the connection drops, `chat` reconnects and resends every line the cell has not acknowledged,
-under the same request id, so nothing is submitted twice.
+under the same request id, so nothing is submitted twice. When a session opens, what the lead
+said while no session was open on this device is printed first, oldest first. A line over 20000
+characters is not sent. `missed` lists at most 100 messages at a time and says how many are left.
+
+The routes and frames are in the [cell API reference](../reference/cell-api.md).
 
 ## Exit codes
 

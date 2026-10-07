@@ -174,7 +174,9 @@
   loop_control:
     label: "celld@{{ item.name }}"
 
-- name: Record the smoke test pass that the release tool checks
+# A record for the operator only: it notes that the owner confirmed the bucket smoke test on
+# this run. Nothing reads it; the release tool checks only that the unit is running.
+- name: Record that the owner confirmed the bucket smoke test
   ansible.builtin.copy:
     dest: "/var/lib/secbot/smoke-{{ item.name }}.ok"
     content: "celld diagnose and smoke:r2 passed before replication was turned on\n"

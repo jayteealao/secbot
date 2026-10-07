@@ -28,6 +28,20 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+# The VPS runs other software: one fleet's overrun stops that fleet only (systemd restarts it),
+# never its neighbours. Sizes are in roles/celld/defaults/main.yml; raise them with the heap
+# measurement (mise run measure:heap).
+MemoryHigh={{ celld_memory_high }}
+MemoryMax={{ celld_memory_max }}
+TasksMax={{ celld_tasks_max }}
+LimitNOFILE={{ celld_nofile }}
+OOMPolicy=stop
 
 [Install]
 WantedBy=multi-user.target

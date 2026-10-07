@@ -3,6 +3,7 @@
  * request id; the lead's answer streams in; a follow-up that arrives while the session is open is
  * printed with no new command. After a dropped connection the CLI reconnects and resends every
  * line the cell has not acknowledged, under the same request id, so nothing is submitted twice.
+ * Messages the lead sent while no session was open arrive first, as `missed` frames.
  */
 import { randomUUID } from "node:crypto";
 import type { CellClient } from "../client.ts";
@@ -15,7 +16,12 @@ type Frame =
   | { type: "answer"; entryId: number; text: string }
   | { type: "followup"; entryId: number; from: string; text: string }
   | { type: "waiting"; on: boolean }
-  | { type: "error"; message: string };
+  | { type: "missed"; entryId: number; from: string | null; text: string; remaining: number }
+  | { type: "rejected"; requestId: string; message: string }
+  | { type: "error"; message: string; requestId?: string };
+
+/** The longest line the cell accepts, in characters. */
+export const INPUT_LIMIT = 20_000;
 
 export interface ChatOptions {
   /** Milliseconds before a reconnect; doubles up to 30 s. */
@@ -30,6 +36,7 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
   let open = false;
   let closing = false;
   let midAnswer = false;
+  let noted = false;
   let delay = options.reconnectMs ?? 1_000;
   let ready!: () => void;
   let connected = new Promise<void>((resolve) => {
@@ -63,6 +70,20 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
         break;
       case "waiting":
         print(frame.on ? "waiting for the model\n" : "the model is answering again\n");
+        break;
+      case "missed":
+        print(
+          frame.from === null ? `lead: ${frame.text}\n` : `[from ${frame.from}] ${frame.text}\n`,
+        );
+        if (frame.remaining > 0 && !noted) {
+          noted = true;
+          print(`${frame.remaining} more missed message(s); run "secbot missed"\n`);
+        }
+        break;
+      case "rejected":
+        // The cell refused this line; resending it would be refused the same way.
+        pending.delete(frame.requestId);
+        io.stderr(`cell refused a message: ${frame.message}\n`);
         break;
       case "error":
         io.stderr(`cell: ${frame.message}\n`);
@@ -106,10 +127,15 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
   };
 
   connect();
-  await connected;
+  // A close before the first open replaces `connected`, so wait on the current one until open.
+  while (!open) await connected;
   for await (const line of io.lines()) {
     const text = line.trim();
     if (text === "") continue;
+    if (text.length > INPUT_LIMIT) {
+      io.stderr(`not sent: a message is at most ${INPUT_LIMIT} characters\n`);
+      continue;
+    }
     const requestId = `cli-${randomUUID()}`;
     pending.set(requestId, text);
     await connected;

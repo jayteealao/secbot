@@ -21,8 +21,8 @@ import {
   openCelldStorageWithDatabase,
 } from "@secbot/cell-storage";
 import { type AlertEnv, createAlerts } from "./alerts.ts";
-import { type CellParts, logEvent } from "./cell-parts.ts";
-import { type LeadMessage, markDelivered, missedMessages } from "./delivery.ts";
+import { type CellParts, errorFields, logEvent } from "./cell-parts.ts";
+import { type MissedPage, markDelivered, missedPage } from "./delivery.ts";
 import { ModelHealthDoc, RosterDoc } from "./docs.ts";
 import { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 import { createHandoffExtension } from "./handoff.ts";
@@ -67,7 +67,7 @@ export interface OpenCellOptions {
   readonly household?: HouseholdClient;
   /** Called after every commit that changes a wake time (a routine ran, a reminder was set). */
   readonly onWakeChange?: () => void;
-  /** More recurring routines beside the heartbeat (later packets: the morning briefing). */
+  /** More recurring routines beside the heartbeat (for example a morning briefing). */
   readonly routines?: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
 }
 
@@ -135,8 +135,9 @@ export class CellHarness implements CellParts {
     return addSpecialist(this, input, context);
   }
 
-  missed(device: string, context: Context = BACKGROUND_CONTEXT): Promise<LeadMessage[]> {
-    return missedMessages(this.harness, this.root, device, context);
+  /** The oldest messages this device has not seen, and how many newer ones are left. */
+  missed(device: string, context: Context = BACKGROUND_CONTEXT): Promise<MissedPage> {
+    return missedPage(this.harness, this.root, device, context);
   }
 
   markDelivered(device: string, entryId: number, context: Context = BACKGROUND_CONTEXT) {
@@ -162,10 +163,7 @@ export async function openCellHarness(
   const { person, env } = options;
   const now = options.now ?? (() => Date.now());
   const onReport = (error: unknown) =>
-    logEvent("harness.report", {
-      cell: person,
-      error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
-    });
+    logEvent("harness.report", reportFields(person, error), "error");
   const monitor = new ModelHealthMonitor({
     person,
     alerts: createAlerts(env, person, options.fetch),
@@ -209,6 +207,53 @@ export async function openCellHarness(
     context,
   );
   opened = harness;
+  try {
+    return await finishOpen(harness, options, context, {
+      started,
+      now,
+      monitor,
+      extensions,
+      models,
+      database: durable.database,
+      reminders,
+      recurring,
+    });
+  } catch (error) {
+    // A failure after the open (roster, routines, inspect) must not leave this harness running on
+    // the storage while the next event opens a second one.
+    await harness.close(context).catch(() => {});
+    throw error;
+  }
+}
+
+/** `harness.report` fields: the error's class, a safe message, and the head of its stack. */
+export function reportFields(cell: string, error: unknown): Record<string, unknown> {
+  const stack = error instanceof Error && typeof error.stack === "string" ? error.stack : "";
+  const head = stack
+    .split("\n")
+    .slice(1, 3)
+    .map((line) => line.trim())
+    .join(" | ");
+  return { cell, ...errorFields(error), stack_head: head.slice(0, 200) };
+}
+
+async function finishOpen(
+  harness: Harness,
+  options: OpenCellOptions,
+  context: Context,
+  parts: {
+    readonly started: number;
+    readonly now: () => number;
+    readonly monitor: ModelHealthMonitor;
+    readonly extensions: CellParts["extensions"];
+    readonly models: Models;
+    readonly database: CelldSqliteDatabase;
+    readonly reminders: Routine<ReminderPayload>;
+    readonly recurring: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
+  },
+): Promise<CellHarness> {
+  const { person } = options;
+  const { started, now, monitor, extensions, models, reminders, recurring } = parts;
   monitor.attach(harness);
   const root = await harness.root(context);
   const cell = new CellHarness(
@@ -219,7 +264,7 @@ export async function openCellHarness(
     models,
     extensions,
     monitor,
-    durable.database,
+    parts.database,
     reminders,
     now,
   );

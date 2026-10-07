@@ -110,7 +110,7 @@ describe("the OpenRouter gateway", () => {
     try {
       const settled = await (await cell.submit("hello", "wire-1")).wait(BACKGROUND_CONTEXT);
       expect(settled.status).toBe("done");
-      const missed = await cell.missed("laptop");
+      const missed = (await cell.missed("laptop")).messages;
       expect(missed.map((message) => message.text)).toEqual(["Stub answer."]);
     } finally {
       await cell.close();

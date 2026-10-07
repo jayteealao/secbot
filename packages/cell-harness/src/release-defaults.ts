@@ -23,7 +23,7 @@ export interface StarterSpecialist {
 const NO_TOOLS_YET =
   "You have no outside tools yet: no web, shell, mail, or accounts. You can search the lead's history. If you need something you cannot reach, say so in your answer and ask the lead.";
 
-/** The four wave-1 specialists, with short starter instructions (each job packet replaces them). */
+/** The four starter specialists, with short starter instructions (the owner can replace them). */
 export const STARTER_SPECIALISTS: readonly StarterSpecialist[] = [
   {
     name: "household",

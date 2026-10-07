@@ -27,7 +27,7 @@ A restore is a disaster step, not a rollback step. A normal rollback is a redepl
    <n> (snapshot <id> has step <m>)`, and `snapshot digest mismatch`; a refused restore changes nothing.
 7. Confirm that each restored cell reads the outbound-effects log and repeats no sent mail or calendar write.
    Until a tool has an outside effect, the restore prints `outbound-effects log: none in this release`.
-8. Run the Block D checks against the restored cells (`check:cells`, `check:alarms`, `check:heartbeats`).
+8. Run the cell, alarm, and heartbeat checks against the restored cells (`check:cells`, `check:alarms`, `check:heartbeats`).
 
 ## Notes
 

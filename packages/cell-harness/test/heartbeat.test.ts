@@ -53,6 +53,7 @@ describe("heartbeat", () => {
     expect(lines).toEqual([
       {
         event: "heartbeat.ping",
+        level: "info",
         cell: "owner",
         routine: "heartbeat",
         outcome: "ok",
@@ -60,6 +61,7 @@ describe("heartbeat", () => {
       },
       {
         event: "heartbeat.ping",
+        level: "info",
         cell: "household",
         routine: "heartbeat",
         outcome: "failed",
@@ -67,6 +69,7 @@ describe("heartbeat", () => {
       },
       {
         event: "heartbeat.ping",
+        level: "info",
         cell: "owner",
         routine: "briefing",
         outcome: "failed",
@@ -74,6 +77,7 @@ describe("heartbeat", () => {
       },
       {
         event: "heartbeat.ping",
+        level: "info",
         cell: "second",
         routine: "heartbeat",
         outcome: "skipped",

@@ -16,7 +16,7 @@ import type {
   HouseholdClient,
   HouseholdDocument,
 } from "@secbot/cell-harness";
-import { logEvent } from "@secbot/cell-harness";
+import { errorFields, logEvent } from "@secbot/cell-harness";
 import { HOUSEHOLD_CELL_NAME } from "@secbot/household-cell";
 import type { HouseholdNamespaceLike, HouseholdStubLike } from "./person-cell.ts";
 
@@ -54,7 +54,9 @@ export function httpHouseholdClient(
   const base = url.replace(/\/+$/, "");
   const call = async <T>(method: "read" | "apply", body: unknown): Promise<T> => {
     let lastError: unknown;
+    let tried = 0;
     for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+      tried = attempt;
       try {
         const response = await fetcher(`${base}/internal/household/${method}`, {
           method: "POST",
@@ -83,12 +85,19 @@ export function httpHouseholdClient(
       }
       if (attempt < ATTEMPTS) await pause(RETRY_MS * attempt);
     }
-    logEvent("household.call", {
-      transport: "http",
-      method,
-      outcome: "failed",
-      attempts: ATTEMPTS,
-    });
+    const refused = lastError instanceof HouseholdCallError && lastError.status < 500;
+    logEvent(
+      "household.call",
+      {
+        transport: "http",
+        method,
+        outcome: refused ? "refused" : "failed",
+        attempts: tried,
+        status: lastError instanceof HouseholdCallError ? lastError.status : null,
+        ...errorFields(lastError),
+      },
+      refused ? "warn" : "error",
+    );
     throw lastError;
   };
   return {
@@ -105,7 +114,11 @@ export function stubHouseholdClient(stub: HouseholdStubLike): HouseholdClient {
       logEvent("household.call", { transport: "rpc", method, outcome: "ok", attempts: 1 });
       return result;
     } catch (error) {
-      logEvent("household.call", { transport: "rpc", method, outcome: "failed", attempts: 1 });
+      logEvent(
+        "household.call",
+        { transport: "rpc", method, outcome: "failed", attempts: 1, ...errorFields(error) },
+        "error",
+      );
       throw error;
     }
   };

@@ -16,7 +16,7 @@ import {
   hook,
   ROOT_CONVERSATION_ID,
 } from "@earendil-works/pi-durable";
-import { logEvent } from "./cell-parts.ts";
+import { logEvent, safeErrorText } from "./cell-parts.ts";
 import { isCreditError } from "./credit-pause.ts";
 import { RosterDoc } from "./docs.ts";
 import type { ModelHealthMonitor } from "./model-health.ts";
@@ -40,6 +40,8 @@ export function modelCallLine(
   role: string,
   conversationId: ConversationId,
   message: AssistantMessage,
+  /** When the line is written; the duration runs from the message's creation to it. */
+  at: number = Date.now(),
 ) {
   return {
     cell: person,
@@ -54,6 +56,12 @@ export function modelCallLine(
     cache_write_tokens: message.usage.cacheWrite,
     cost_usd: message.usage.cost.total,
     stop_reason: message.stopReason,
+    // A failed attempt's cause as a status and provider code only, never the provider's text.
+    error_code:
+      message.stopReason === "error"
+        ? safeErrorText(message.errorMessage ?? "unknown error")
+        : null,
+    duration_ms: Math.max(0, at - message.timestamp),
     credit: isCreditError(message),
   };
 }

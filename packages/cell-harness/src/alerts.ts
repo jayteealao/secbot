@@ -4,7 +4,10 @@
  * (https://betterstack.com/docs/uptime/api/create-a-new-incident/, read 2026-10-06). The token and
  * the e-mail are cell vars filled on the VPS at deploy time; neither is ever logged.
  */
-import { logEvent } from "./cell-parts.ts";
+import { errorFields, logEvent } from "./cell-parts.ts";
+
+/** An incident call that does not answer in this time counts as failed, like the heartbeat ping. */
+export const ALERT_TIMEOUT_MS = 10_000;
 
 export type AlertKind = "outage" | "credit";
 
@@ -27,9 +30,9 @@ export const ALERT_SUMMARIES: Record<AlertKind, (person: string) => string> = {
 
 const DESCRIPTIONS: Record<AlertKind, string> = {
   outage:
-    "Model calls through OpenRouter have failed for 15 minutes. Requests are kept and retried every minute; nothing is lost. See docs/runbooks/model-outage.md.",
+    "Model calls through OpenRouter have failed for 15 minutes. Requests are kept and retried, at most one minute apart; nothing is lost. See docs/runbooks/model-outage.md.",
   credit:
-    "The OpenRouter key's credit limit is reached. Requests are kept and retried every minute; raise the limit to resume. See docs/runbooks/model-outage.md.",
+    "The OpenRouter key's credit limit is reached. Requests are kept and retried, at most one minute apart; raise the limit to resume. See docs/runbooks/model-outage.md.",
 };
 
 export function createAlerts(
@@ -58,17 +61,27 @@ export function createAlerts(
             push: true,
             email: true,
           }),
+          signal: AbortSignal.timeout(ALERT_TIMEOUT_MS),
         });
         const ok = response.ok;
-        logEvent("model.alert", {
-          cell: person,
-          kind,
-          outcome: ok ? "sent" : "failed",
-          http_status: response.status,
-        });
+        logEvent(
+          "model.alert",
+          {
+            cell: person,
+            kind,
+            outcome: ok ? "sent" : "failed",
+            http_status: response.status,
+          },
+          ok ? "info" : "error",
+        );
         return ok;
-      } catch {
-        logEvent("model.alert", { cell: person, kind, outcome: "failed", http_status: null });
+      } catch (error) {
+        // A timeout, DNS, TLS, or network fault: the class name tells them apart; never the URL.
+        logEvent(
+          "model.alert",
+          { cell: person, kind, outcome: "failed", http_status: null, ...errorFields(error) },
+          "error",
+        );
         return false;
       }
     },

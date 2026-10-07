@@ -100,8 +100,8 @@
 - name: Choose the environments this run sets up
   ansible.builtin.set_fact:
     deploy_users_envs: >-
-      {{ [{'env': 'test-cell', 'group': 'secbot-test', 'heartbeats_env': 'SECBOT_HEARTBEAT_URLS'}]
-         + ([{'env': 'production', 'group': 'secbot-prod', 'heartbeats_env': 'SECBOT_PROD_HEARTBEAT_URLS'}]
+      {{ [{'env': 'test-cell', 'group': 'secbot-test', 'heartbeats_env': 'SECBOT_HEARTBEAT_URLS', 'own': 'SECBOT_TEST_'}]
+         + ([{'env': 'production', 'group': 'secbot-prod', 'heartbeats_env': 'SECBOT_PROD_HEARTBEAT_URLS', 'own': ''}]
             if (celld_production | default(false) | bool) else []) }}
 
 - name: Check the cells' runtime values are in the shell environment
@@ -117,16 +117,19 @@
     - SECBOT_PRIVATE_HOSTS
   no_log: true
 
+# The test cell runs bundles staged by the lower-trust test key. Its model key, incidents token,
+# and device keys can be its own: SECBOT_TEST_OPENROUTER_API_KEY, SECBOT_TEST_BETTERSTACK_INCIDENTS_TOKEN,
+# and SECBOT_TEST_DEVICE_KEYS replace the shared values for the test cell when they are set.
 # Heartbeat URLs per environment: SECBOT_HEARTBEAT_URLS (test cell) and SECBOT_PROD_HEARTBEAT_URLS
 # (production), each "<cell>:<ping URL>,..." from the infra/tofu heartbeat_urls output.
 - name: Write each environment's runtime settings (readable by its deploy users only)
   ansible.builtin.copy:
     dest: "/etc/secbot/{{ item.env }}-runtime.env"
     content: |
-      OPENROUTER_API_KEY={{ lookup('ansible.builtin.env', 'OPENROUTER_API_KEY') }}
-      BETTERSTACK_INCIDENTS_TOKEN={{ lookup('ansible.builtin.env', 'BETTERSTACK_INCIDENTS_TOKEN') }}
+      OPENROUTER_API_KEY={{ lookup('ansible.builtin.env', item.own ~ 'OPENROUTER_API_KEY', default='') or lookup('ansible.builtin.env', 'OPENROUTER_API_KEY') }}
+      BETTERSTACK_INCIDENTS_TOKEN={{ lookup('ansible.builtin.env', item.own ~ 'BETTERSTACK_INCIDENTS_TOKEN', default='') or lookup('ansible.builtin.env', 'BETTERSTACK_INCIDENTS_TOKEN') }}
       BETTERSTACK_REQUESTER_EMAIL={{ lookup('ansible.builtin.env', 'BETTERSTACK_REQUESTER_EMAIL') }}
-      SECBOT_DEVICE_KEYS={{ lookup('ansible.builtin.env', 'SECBOT_DEVICE_KEYS') }}
+      SECBOT_DEVICE_KEYS={{ lookup('ansible.builtin.env', (item.own or 'SECBOT_') ~ 'DEVICE_KEYS', default='') or lookup('ansible.builtin.env', 'SECBOT_DEVICE_KEYS') }}
       SECBOT_PRIVATE_HOSTS={{ lookup('ansible.builtin.env', 'SECBOT_PRIVATE_HOSTS') }}
       SECBOT_HEARTBEAT_URLS={{ lookup('ansible.builtin.env', item.heartbeats_env, default='') }}
       SECBOT_TIME_ZONE={{ lookup('ansible.builtin.env', 'SECBOT_TIME_ZONE', default='') }}

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * secbot: the owner's wave-1 command-line client. It talks to the owner's own cell only (the
+ * secbot: the owner's command-line client. It talks to the owner's own cell only (the
  * person in the device file). It has no option that chooses a specialist: every chat line goes to
  * the lead, and the lead decides on a hand-off.
  *

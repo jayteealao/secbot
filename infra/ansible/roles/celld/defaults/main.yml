@@ -48,6 +48,13 @@ celld_instances:
 # heap measurement goes over it (mise run measure:heap).
 celld_v8_heap_limit_mb: 128
 
+# Each fleet unit's resource limits (systemd). A fleet runs several isolates, each up to the heap
+# limit above, so the unit's memory cap sits well above one isolate's.
+celld_memory_high: 1536M
+celld_memory_max: 2G
+celld_tasks_max: 512
+celld_nofile: 65536
+
 # Replication starts only after the bucket smoke test passed (mise run smoke:r2 and the
 # celld diagnose task). Pass -e celld_replication_confirmed=true on that run; it starts the
 # test fleet.

@@ -19,9 +19,11 @@
 import { BACKGROUND_CONTEXT as cellContext } from "@earendil-works/chord/context";
 import {
   alarmVerdict,
+  CELL_NAME,
   CellAlarm,
   type CellEnv,
   type CellHarness,
+  errorFields,
   type Frame,
   type HeartbeatState,
   type HouseholdApplyResult,
@@ -38,13 +40,7 @@ import {
   type CellDump,
   type CelldAlarmInfo,
   type CelldCellStorage,
-  databaseRunner,
-  digestCell,
-  dumpCell,
-  loadCell,
-  type SnapshotRunner,
-  storageRunner,
-  wipeCell,
+  CellSnapshots,
 } from "@secbot/cell-storage";
 import { HOUSEHOLD_CELL_NAME } from "@secbot/household-cell";
 import { releaseVersion } from "./health.ts";
@@ -104,36 +100,66 @@ export const householdOf = (env: {
 type InputFrame = { readonly type: "input"; readonly text: string; readonly requestId: string };
 
 const REQUEST_ID = /^[A-Za-z0-9._:-]{8,128}$/;
-const PERSON = /^[a-z][a-z0-9-]{0,31}$/;
+const PERSON = CELL_NAME;
 const NAME_TABLE =
   "CREATE TABLE IF NOT EXISTS secbot_cell_name (id INTEGER PRIMARY KEY CHECK (id = 1), name TEXT NOT NULL)";
 
-function parseInput(data: string | ArrayBuffer): InputFrame | undefined {
+/** The longest chat line the cell accepts; the CLI checks the same limit before sending. */
+export const INPUT_LIMIT = 20_000;
+
+/** The largest JSON body the model and specialist routes read. */
+export const BODY_LIMIT = 16 * 1024;
+
+type ParsedInput =
+  | { readonly ok: true; readonly input: InputFrame }
+  | { readonly ok: false; readonly reason: string; readonly requestId?: string };
+
+function parseInput(data: string | ArrayBuffer): ParsedInput {
+  let value: Record<string, unknown>;
   try {
-    const value = JSON.parse(
-      typeof data === "string" ? data : new TextDecoder().decode(data),
-    ) as Record<string, unknown>;
-    if (
-      value.type !== "input" ||
-      typeof value.text !== "string" ||
-      typeof value.requestId !== "string"
-    ) {
-      return undefined;
-    }
-    if (
-      value.text.trim() === "" ||
-      value.text.length > 20_000 ||
-      !REQUEST_ID.test(value.requestId)
-    ) {
-      return undefined;
-    }
-    return { type: "input", text: value.text, requestId: value.requestId };
+    value = JSON.parse(typeof data === "string" ? data : new TextDecoder().decode(data)) as Record<
+      string,
+      unknown
+    >;
   } catch {
-    return undefined;
+    return { ok: false, reason: "not JSON: send {type: input, text, requestId}" };
   }
+  if (typeof value !== "object" || value === null) {
+    return { ok: false, reason: "send {type: input, text, requestId}" };
+  }
+  const requestId =
+    typeof value.requestId === "string" && REQUEST_ID.test(value.requestId)
+      ? value.requestId
+      : undefined;
+  const refuse = (reason: string): ParsedInput =>
+    requestId === undefined ? { ok: false, reason } : { ok: false, reason, requestId };
+  if (value.type !== "input" || typeof value.text !== "string") {
+    return refuse("send {type: input, text, requestId}");
+  }
+  if (requestId === undefined)
+    return refuse("a requestId of 8-128 letters, digits, or ._:- is required");
+  if (value.text.trim() === "") return refuse("the message is empty");
+  if (value.text.length > INPUT_LIMIT) {
+    return refuse(`the message is longer than ${INPUT_LIMIT} characters`);
+  }
+  return { ok: true, input: { type: "input", text: value.text, requestId } };
 }
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
+
+/** Reads a JSON body of at most BODY_LIMIT characters; undefined when it is larger or not JSON. */
+async function readJson(request: Request): Promise<Record<string, unknown> | undefined> {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (declared > BODY_LIMIT) return undefined;
+  const text = await request.text().catch(() => "");
+  if (text.length > BODY_LIMIT) return undefined;
+  try {
+    const value = JSON.parse(text) as unknown;
+    return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
 
 export class PersonCell {
   private opening: Promise<CellHarness> | undefined;
@@ -141,6 +167,9 @@ export class PersonCell {
   private readonly framesSent = new Map<string, number>();
   private alarms: CellAlarm | undefined;
   private knownName: string | undefined;
+  private snapshotOps: CellSnapshots | undefined;
+  /** The devices whose socket took the last answer or follow-up frame. */
+  private lastSentDevices = new Set<string>();
 
   constructor(
     private readonly state: PersonCellState,
@@ -191,21 +220,51 @@ export class PersonCell {
    * Opens the harness once per activation; a failed open is retried by the next event. After the
    * open the alarm is set again from the stored timers.
    */
+  /** Snapshot, restore, wipe, and digest, shared with the household cell. */
+  private snapshots(): CellSnapshots {
+    this.snapshotOps ??= new CellSnapshots(
+      this.state.storage,
+      {
+        openDatabase: async () => {
+          const opening = this.opening;
+          return opening === undefined ? undefined : (await opening).database;
+        },
+        close: () => this.closeHarness(),
+      },
+      this.options.now ?? Date.now,
+    );
+    return this.snapshotOps;
+  }
+
   private cell(person: string): Promise<CellHarness> {
     if (this.opening === undefined) {
       this.rememberName(person);
       const household = householdClientOf(this.env);
-      this.opening = this.open(this.state.storage, person, {
-        ...(household === undefined ? {} : { household }),
-        onWakeChange: () => this.rearmSoon(person),
-      }).then(async (cell) => {
-        await this.alarmFor(person).rearm(cell);
-        // Work the open resumed (or the roster just created) settles; re-arm once it has.
-        this.keepBusy(cell);
-        return cell;
-      });
-      this.opening.catch(() => {
-        this.opening = undefined;
+      // A restore or wipe in progress finishes first, so the harness opens on the new database.
+      this.opening = this.snapshots()
+        .idle()
+        .then(() =>
+          this.open(this.state.storage, person, {
+            ...(household === undefined ? {} : { household }),
+            onWakeChange: () => this.rearmSoon(person),
+          }),
+        )
+        .then(async (cell) => {
+          try {
+            await this.alarmFor(person).rearm(cell);
+          } catch (error) {
+            // An opened harness must not stay running while the next event opens another one.
+            await cell.close().catch(() => {});
+            throw error;
+          }
+          // Work the open resumed (or the roster just created) settles; re-arm once it has.
+          this.keepBusy(cell);
+          return cell;
+        });
+      const opening = this.opening;
+      opening.catch((error: unknown) => {
+        if (this.opening === opening) this.opening = undefined;
+        logEvent("cell.open_failed", { cell: person, ...errorFields(error) }, "error");
       });
     }
     return this.opening;
@@ -214,7 +273,12 @@ export class PersonCell {
   private rearmSoon(person: string): void {
     const opening = this.opening;
     if (opening === undefined) return;
-    const work = opening.then((cell) => this.alarmFor(person).rearm(cell)).catch(() => {});
+    const work = opening
+      .then((cell) => this.alarmFor(person).rearm(cell))
+      .catch((error: unknown) => {
+        // The wake path: a cell with no alarm sleeps through its timers, so the failure is logged.
+        logEvent("alarm.rearm_failed", { cell: person, ...errorFields(error) }, "error");
+      });
     this.state.waitUntil?.(work);
   }
 
@@ -227,31 +291,41 @@ export class PersonCell {
     return { device, person };
   }
 
-  private broadcast(frame: Frame): void {
+  /** Sends a frame to every open socket; returns the devices whose socket took it. */
+  private broadcast(frame: Frame): Set<string> {
     const text = JSON.stringify(frame);
+    const sent = new Set<string>();
     for (const socket of this.sockets()) {
+      const { device } = this.tagsOf(socket);
       try {
         socket.send(text);
-        const { device } = this.tagsOf(socket);
+        sent.add(device);
         this.framesSent.set(device, (this.framesSent.get(device) ?? 0) + 1);
       } catch {
-        // A closed socket; its client reconnects and reads `missed`.
+        // A closed socket; its client reconnects and gets the message as a missed frame.
       }
     }
+    if (frame.type === "answer" || frame.type === "followup") this.lastSentDevices = sent;
+    return sent;
   }
 
   /** One watch of the lead per activation, fanned out to every open socket. */
   private ensureStream(cell: CellHarness): Promise<SessionStream> {
     if (this.streaming === undefined) {
       this.streaming = cell.session(
-        (frame) => this.broadcast(frame),
+        (frame) => {
+          this.broadcast(frame);
+        },
         async (entryId) => {
-          const devices = new Set(this.sockets().map((socket) => this.tagsOf(socket).device));
-          for (const device of devices) await cell.markDelivered(device, entryId);
+          // Only devices whose socket took the frame count it as delivered; a send that failed on
+          // a closing socket leaves the message in that device's missed list.
+          for (const device of this.lastSentDevices) await cell.markDelivered(device, entryId);
         },
       );
-      this.streaming.catch(() => {
-        this.streaming = undefined;
+      const streaming = this.streaming;
+      streaming.catch((error: unknown) => {
+        if (this.streaming === streaming) this.streaming = undefined;
+        logEvent("cli.stream_failed", { cell: cell.person, ...errorFields(error) }, "error");
       });
     }
     return this.streaming;
@@ -265,7 +339,10 @@ export class PersonCell {
   private keepBusy(cell: CellHarness): void {
     const alarms = this.alarmFor(cell.person);
     if (alarms.isSettling) return;
-    const work = alarms.settle(cell).catch(() => {});
+    const work = alarms.settle(cell).catch((error: unknown) => {
+      // Due routines and hand-offs may be left unrun; the next event or alarm settles again.
+      logEvent("cell.settle_failed", { cell: cell.person, ...errorFields(error) }, "error");
+    });
     if (this.state.waitUntil === undefined) return;
     this.state.waitUntil(work);
   }
@@ -323,19 +400,21 @@ export class PersonCell {
       if (request.method === "GET" && route === "/session")
         return this.openSession(cell, person, device);
       if (request.method === "GET" && route === "/missed") {
-        return json({ messages: await cell.missed(device) });
+        return json(await cell.missed(device));
       }
       if (request.method === "GET" && route === "/models") {
         return json({ roles: await cell.listRoleModels() });
       }
       const modelRoute = /^\/models\/([a-z][a-z0-9-]{0,31})$/.exec(route);
       if (request.method === "PUT" && modelRoute !== null) {
-        const body = (await request.json().catch(() => ({}))) as { model?: unknown };
+        const body = await readJson(request);
+        if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
         if (typeof body.model !== "string") return json({ error: 'send {"model": "<id>"}' }, 400);
         return json(await cell.setRoleModel(modelRoute[1] ?? "", body.model));
       }
       if (request.method === "POST" && route === "/specialists") {
-        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+        const body = await readJson(request);
+        if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
         if (typeof body.name !== "string" || typeof body.instruction !== "string") {
           return json({ error: "send name and instruction" }, 400);
         }
@@ -363,46 +442,94 @@ export class PersonCell {
     const pair = new Pair();
     this.state.acceptWebSocket(pair[1], [device, person]);
     pair[1].send(JSON.stringify({ type: "connected", lead: person } satisfies Frame));
-    this.framesSent.set(device, 1);
+    let framesSent = 1;
+    // What the lead said while this device had no open socket comes first, oldest first, so an
+    // answer that committed during a reconnect is shown before the next live answer moves the
+    // device's cursor past it.
+    const { messages, remaining } = await cell.missed(device);
+    for (const message of messages) {
+      pair[1].send(
+        JSON.stringify({
+          type: "missed",
+          entryId: message.entryId,
+          from: message.kind === "followup" ? message.from : null,
+          text: message.text,
+          remaining,
+        } satisfies Frame),
+      );
+      framesSent++;
+    }
+    this.framesSent.set(device, framesSent);
     await this.ensureStream(cell);
-    console.log(
-      JSON.stringify({ event: "cli.session", cell: person, device, phase: "open", frames_sent: 1 }),
-    );
+    logEvent("cli.session", {
+      cell: person,
+      device,
+      phase: "open",
+      frames_sent: framesSent,
+      missed_delivered: messages.length,
+    });
     const init: ResponseInit & { webSocket: SocketLike } = { status: 101, webSocket: pair[0] };
     return new Response(null, init);
   }
 
   /** One chat line from a socket: submitted to the lead unchanged, acknowledged by request id. */
   async webSocketMessage(socket: SocketLike, data: string | ArrayBuffer): Promise<void> {
-    const { person } = this.tagsOf(socket);
-    const input = parseInput(data);
-    if (input === undefined) {
+    const { person, device } = this.tagsOf(socket);
+    const parsed = parseInput(data);
+    if (!parsed.ok) {
+      logEvent(
+        "input.rejected",
+        { cell: person, device, request_id: parsed.requestId ?? null, reason: parsed.reason },
+        "warn",
+      );
+      // A frame keyed by request id tells the client to stop resending that line.
+      const frame: Frame =
+        parsed.requestId === undefined
+          ? { type: "error", message: parsed.reason }
+          : { type: "rejected", requestId: parsed.requestId, message: parsed.reason };
+      socket.send(JSON.stringify(frame));
+      return;
+    }
+    const { input } = parsed;
+    try {
+      const cell = await this.cell(person);
+      await this.ensureStream(cell);
+      const { submissionId } = await this.submitInput(person, input.text, input.requestId);
+      logEvent("input.submitted", {
+        cell: person,
+        device,
+        request_id: input.requestId,
+        submission_id: submissionId,
+        chars: input.text.length,
+      });
+    } catch (error) {
+      logEvent(
+        "input.failed",
+        { cell: person, device, request_id: input.requestId, ...errorFields(error) },
+        "error",
+      );
+      // Not acknowledged: the client keeps the line and resends it after a reconnect.
       socket.send(
         JSON.stringify({
           type: "error",
-          message: "send {type: input, text, requestId}",
+          requestId: input.requestId,
+          message: "the cell could not take this message now; it is sent again on reconnect",
         } satisfies Frame),
       );
       return;
     }
-    const cell = await this.cell(person);
-    await this.ensureStream(cell);
-    await this.submitInput(person, input.text, input.requestId);
     socket.send(JSON.stringify({ type: "accepted", requestId: input.requestId } satisfies Frame));
   }
 
   async webSocketClose(socket: SocketLike, code: number): Promise<void> {
     const { device, person } = this.tagsOf(socket);
-    console.log(
-      JSON.stringify({
-        event: "cli.session",
-        cell: person,
-        device,
-        phase: "close",
-        code,
-        frames_sent: this.framesSent.get(device) ?? 0,
-      }),
-    );
+    logEvent("cli.session", {
+      cell: person,
+      device,
+      phase: "close",
+      code,
+      frames_sent: this.framesSent.get(device) ?? 0,
+    });
     try {
       socket.close(1000, "closed");
     } catch {
@@ -410,7 +537,7 @@ export class PersonCell {
     }
   }
 
-  /** RPC for other cells and later packets (mail): submit into the lead, unchanged. */
+  /** RPC for other cells and later inputs (such as mail): submit into the lead, unchanged. */
   async submitInput(
     person: string,
     text: string,
@@ -436,14 +563,6 @@ export class PersonCell {
     return household.apply({ ...change, fromCell: person });
   }
 
-  /** The open storage driver's queue when the harness is open, else the storage itself. */
-  private async runner(): Promise<SnapshotRunner> {
-    const opening = this.opening;
-    return opening === undefined
-      ? storageRunner(this.state.storage)
-      : databaseRunner((await opening).database);
-  }
-
   /** Closes the harness of this activation; the next event opens it again. */
   private async closeHarness(): Promise<void> {
     const opening = this.opening;
@@ -455,7 +574,7 @@ export class PersonCell {
 
   /** RPC: the whole database as one dump, taken in one transaction. */
   async snapshot(contractStep: number): Promise<CellDump> {
-    const dump = await dumpCell(await this.runner(), { contractStep });
+    const dump = await this.snapshots().snapshot(contractStep);
     logEvent("cell.snapshot", {
       cell: this.storedName() ?? null,
       digest: dump.digest,
@@ -470,8 +589,7 @@ export class PersonCell {
    */
   async restore(dump: CellDump, person: string): Promise<{ digest: string; rows: number }> {
     if (!PERSON.test(person)) throw new Error(`bad cell name "${person}"`);
-    await this.closeHarness();
-    const result = await loadCell(storageRunner(this.state.storage), dump);
+    const result = await this.snapshots().restore(dump);
     this.knownName = undefined;
     await this.cell(person);
     logEvent("cell.restored", { cell: person, digest: result.digest, rows: result.rows });
@@ -481,16 +599,14 @@ export class PersonCell {
   /** RPC: drops every table and the alarm (the test cell after a restore drill). */
   async wipe(): Promise<void> {
     const person = this.storedName() ?? null;
-    await this.closeHarness();
-    await wipeCell(storageRunner(this.state.storage));
-    await this.state.storage.deleteAlarm();
+    await this.snapshots().wipe();
     this.knownName = undefined;
     logEvent("cell.wiped", { cell: person });
   }
 
   /** RPC: the database digest and row count as they are now. */
   async digest(): Promise<{ digest: string; rows: number }> {
-    return digestCell(await this.runner());
+    return this.snapshots().digest();
   }
 
   /** RPC: the heartbeat routine's last run, read by waking the cell (check:heartbeats). */

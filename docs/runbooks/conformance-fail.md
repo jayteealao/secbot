@@ -8,7 +8,7 @@ CI logs that match any of these patterns (case-insensitive) trigger this runbook
 - `storage conformance suite`
 - `adapter.*(mismatch|violat)`
 
-`mise run test:conformance` prints exactly these lines:
+`mise run test:conformance` prints these lines:
 
 | Line | Meaning |
 |---|---|
@@ -16,6 +16,9 @@ CI logs that match any of these patterns (case-insensitive) trigger this runbook
 | `conformance case fail: <case>: <message>` | One pi-durable conformance case failed inside the cell. |
 | `adapter mismatch: <name> ran, expected CelldSqliteDatabase` | The suite did not run on the celld storage driver. |
 | `conformance case fail: long transaction: ...` | With `--long-transaction`: no timeout was reported, or a write from the timed-out transaction is visible. |
+| `long transaction: timedOut=<bool> durationMs=<n> markerRowsVisible=<n>` | With `--long-transaction`: the summary of the timed-out transaction. |
+| `storage conformance suite: FAIL, no case ran` | The cell answered, but no conformance case ran. |
+| `storage conformance suite: FAIL (<n> problem(s))` | The final line when any case failed or the driver did not match. |
 | `storage conformance suite: FAIL: <reason>` | The run could not start or reach the cell (SSH, lock, deploy, celld). |
 | `storage conformance suite: PASS` | Every case passed on `CelldSqliteDatabase`. |
 

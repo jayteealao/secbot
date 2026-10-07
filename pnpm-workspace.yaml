@@ -1,5 +1,5 @@
 # Created by wf ship-plan build — plan v1, 2026-10-05
-# Server and pi-durable extension packages live under packages/ (from wave 1).
+# Server and pi-durable extension packages live under packages/.
 # The Compose Multiplatform app under app/ is a Gradle project, not a workspace package.
 packages:
   - "packages/*"
@@ -18,8 +18,9 @@ allowBuilds:
 # pnpm's one-day minimumReleaseAge has no older match for these exact versions:
 # the pi fork at v1.0.3-secbot.1 needs chord, pi-ai, and pi-telemetry 1.0.3, and
 # @commitlint 21.2.3 needs conventional-commits-parser 7.1.3. Remove each entry once it is a day old.
+# Each entry carries a remove-by date; past it, the entry is stale and goes in the next change.
 minimumReleaseAgeExclude:
-  - '@earendil-works/chord@1.0.3'
-  - '@earendil-works/pi-ai@1.0.3'
-  - '@earendil-works/pi-telemetry@1.0.3'
-  - conventional-commits-parser@7.1.3
+  - '@earendil-works/chord@1.0.3' # remove by 2026-10-12
+  - '@earendil-works/pi-ai@1.0.3' # remove by 2026-10-12
+  - '@earendil-works/pi-telemetry@1.0.3' # remove by 2026-10-12
+  - conventional-commits-parser@7.1.3 # remove by 2026-10-12

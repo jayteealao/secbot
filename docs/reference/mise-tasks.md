@@ -1,6 +1,6 @@
 # Reference: mise cell tasks
 
-Every task that builds, deploys, checks, snapshots, restores, or measures the cells. Run each one
+Every task that sets up, builds, deploys, checks, snapshots, restores, or measures the cells. Run each one
 with `mise run <task> -- <flags>`. The tasks that reach the VPS run the release tool over SSH:
 `SECBOT_VPS_SSH` names the SSH config alias of the VPS (in GitHub Actions the alias is
 `secbot-vps`). The repo never holds the VPS address.
@@ -32,9 +32,9 @@ with `mise run <task> -- <flags>`. The tasks that reach the VPS run the release 
 | --- | --- | --- |
 | `build` | none | Builds `dist/`: the worker, the test-cell worker, the release tool, `manifest.json`. |
 | `deploy:dry-run` | none (no credentials) | `dry-run: bundle <version>, contract step <n>` and one line per file. |
-| `stage` | `--version V --sha256 S --file F` | `staged <V> (<S>)`. Refuses `SHA-256 mismatch: received …, expected …`. |
-| `deploy` | `--env test-cell\|production --version V [--sha256 S] [--cells C]` | Per fleet: `manifest diff against the deployed bundle of <fleet>:` or `first deploy to <fleet>`, then `deployed <V> to <fleet> (<cells>)`. On the test cell after a drill: `drill data wiped: <cells>`. Refuses `refusing a downgrade past contract step <n> (bundle <V> has step <m>)`, `version <V> is not staged`, `SHA-256 mismatch for <V>: requested …, staged …`, `celld@<fleet> is not running; …`. In CI, a production deploy also writes a `deploy` record with the run id and attempt to the ledger. |
-| `test:conformance` | `[--target test-cell\|local] [--long-transaction]` | `storage conformance suite: PASS` or `storage conformance suite: FAIL …`, `conformance case fail: <case>: <error>`, `adapter mismatch: …`. Heavy: run it only under the campaign lock. |
+| `stage` | `--version V --sha256 S --file F` | Checks first that the release tool on the VPS is the bundle's copy: `release tool <12 hex> matches`, or the refusal `the release tool on the VPS (…) differs from this bundle's (…); run "mise run host:setup" first`. Then `staged <V> (<S>)`, or `staged <V> (<S>), already present` for a second stage of the same bundle. Refuses `SHA-256 mismatch: received …, expected …`, `version <V> was staged with SHA-256 …; a version is never restaged with other content`, and `the bundle is over 209715200 bytes`. |
+| `deploy` | `--env test-cell\|production --version V [--sha256 S] [--cells C]` | Per fleet: `manifest diff against the deployed bundle of <fleet>:` or `first deploy to <fleet>`, then `deployed <V> to <fleet> (<cells>)`. On the test cell after a drill: `drill data wiped: <cells>`. Refuses `refusing a downgrade past contract step <n> (bundle <V> has step <m>)`, `version <V> is not staged`, `SHA-256 mismatch for <V>: requested …, staged …`, `celld@<fleet> is not running; …`. A production deploy without `--sha256` (a rollback) uses the hash the ledger recorded for the version's last production deploy, and refuses `a production deploy of <V> needs --sha256 …` when there is none. In CI, a production deploy also writes a `deploy` record with the run id and attempt to the ledger. |
+| `test:conformance` | `[--target test-cell\|local] [--long-transaction]` | `storage conformance suite: PASS` or `storage conformance suite: FAIL …`, `conformance case fail: <case>: <error>`, `adapter mismatch: …`. Heavy: it takes the VPS lock (see Conventions). |
 
 ## Checks
 
@@ -54,7 +54,7 @@ with `mise run <task> -- <flags>`. The tasks that reach the VPS run the release 
 | `ledger:record` | `--kind release\|rollback\|restore [--version V] [--cells C] [--snapshot-id ID] [--run-id R --run-attempt A]` | `ledger: recorded <kind> <V> run <R> attempt <A>`. Only the production user may write the ledger; the tool also copies it to the production bucket. |
 | `ledger:verify` | `--kind K --run-id R --run-attempt A [--version V]` | `ledger ok: <kind> run <R> attempt <A> is the newest`, or a refusal: `ledger: the newest record is <kind> from …, not this …`, `ledger: a newer deploy of <V> from … came after this <kind>`, `ledger: no approved release, rollback, or restore is recorded`. |
 | `restore` | `--env E --cells CELL --snapshot ID` | `restore <cell> ok digest <12 hex> rows <n>`, then `outbound-effects log: none in this release (…)`. Refuses `the secrets cell is never restored: …`, `restore takes exactly one cell`, `snapshot <id> not found for cell <cell>`, `refusing a snapshot past contract step <n> (snapshot <id> has step <m>)`, `snapshot digest mismatch: …`. The cell closes its harness, loads the dump in one transaction, checks the digest, reopens, and sets its alarm from the restored timers. |
-| `restore:drill` | `[--snapshot ID] [--cells owner\|person\|household]` | `drill <id>: restore <cell> ok digest … rows …`, then `drill: the test cell holds real data until its next deploy wipes it`. Production user only. Without `--snapshot`, it uses the newest release snapshot in the ledger. |
+| `restore:drill` | `[--snapshot ID] [--cells owner\|person\|household]` | `drill <id>: restore <cell> ok digest … rows …`, then `drill: the test cell holds real data until its next deploy wipes it`. The copy of the snapshot in the test bucket is deleted right after the restore; a drill that stops early leaves it for the next test deploy, which deletes it before it wipes the cells. Production user only. Without `--snapshot`, it uses the newest release snapshot in the ledger. |
 
 ## Measurements and drills
 
@@ -64,7 +64,19 @@ with `mise run <task> -- <flags>`. The tasks that reach the VPS run the release 
 | `measure:write-delay` | `--env test-cell [--writes 200]` | `write-delay: <n> committed single-row writes (after 10 warm-up writes)` and `write-delay median <ms> ms, p95 <ms> ms, min …, max …`. |
 | `measure:cost` | `--assumptions <json> [--log <cell log> --log-days N] [--out <md>]` | The monthly model and fixed cost per person, one arithmetic line per step. Without `--log` it is a catalog estimate from the installed model prices. |
 | `drill:heartbeat-alert` | none | Stops the test cell for 420 s (past the heartbeat's 300 s period and 60 s grace), then starts it: `alert drill: the test cell was down from … to …; confirm the push and the e-mail, then run check:heartbeats`. |
-| `vps:lease` | `acquire\|release --holder H [--seconds N]` | `lease acquired by <H> for <N> s`, `lease released by <H>`, `lease: <H> holds no lease`. |
+| `vps:lease` | `acquire\|release --holder H [--seconds N]` (60 to 14400 s; at most 3600 s with the test-cell key) | `lease acquired by <H> for <N> s`, `lease released by <H>`, `lease: <H> holds no lease`. |
+
+## Setup and infrastructure
+
+| Task | Flags | Prints |
+| --- | --- | --- |
+| `smoke:r2` | none; reads `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | `smoke:r2: PASS` when the bucket refuses a second create of the same key with 412, else the failure. Run it before replication is turned on. |
+| `host:setup` | Ansible extra vars: `-e celld_replication_confirmed=true` (start the test fleet), `-e celld_production=true -e celld_production_confirmed=true` (set up and start the production fleets) | The Ansible diff and recap. A second run reports `changed=0`. Fails with `set <NAME> in your shell before host setup …` for a missing value. |
+| `probe:ports` | none | Checks from your machine that every celld port refuses a connection from outside the private network. |
+| `infra:check` | none | `tofu fmt` and `validate`, `ansible-lint`, and the playbook syntax check. |
+| `infra:plan` / `infra:apply` | `TF_VAR_*` in your shell | The OpenTofu plan of the buckets, their tokens, and the heartbeats; apply runs the reviewed plan. Owner only. |
+| `check:identifiers` | `[--staged]` | Fails on an IP address, a private-network host name, an account id, a ping URL, or a private key in a tracked file. |
+| `cli` | `-- <command>` | Runs the `secbot` command line (see [the CLI how-to](../how-to/cli.md)). |
 
 ## Related
 

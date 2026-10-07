@@ -16,7 +16,7 @@ import { DeliveryDoc } from "./docs.ts";
 import { HANDOFF_REPORT_PREFIX, textOf } from "./handoff.ts";
 import { messageText } from "./history-search.ts";
 
-/** At most this many messages are listed at once (the newest ones). */
+/** At most this many messages are listed at once (the oldest ones not yet delivered). */
 export const MISSED_LIMIT = 100;
 
 export type LeadMessage =
@@ -70,28 +70,50 @@ export async function markDelivered(
   }, context);
 }
 
-export async function missedMessages(
+export interface MissedPage {
+  /** The oldest missed messages, oldest first, at most `MISSED_LIMIT`. */
+  readonly messages: LeadMessage[];
+  /** Newer missed messages left for the next call; the cursor stops before them. */
+  readonly remaining: number;
+}
+
+/**
+ * The oldest messages after the device's cursor, and how many newer ones are left. The cursor
+ * moves only past the messages returned, so a long absence is read page by page, never skipped.
+ */
+export async function missedPage(
   harness: Harness,
   lead: Conversation,
   device: string,
   context: Context,
-): Promise<LeadMessage[]> {
+  limit: number = MISSED_LIMIT,
+): Promise<MissedPage> {
   const cursorId = (await harness.snapshot(DeliveryDoc, context))?.devices[device];
   const after = cursorId === undefined ? -1 : Number(cursorId);
-  const found: LeadMessage[] = [];
+  // History pages newest first, so every message after the cursor is read and the oldest are kept.
+  const newestFirst: LeadMessage[] = [];
   let cursor: Cursor | undefined;
   scan: do {
     const page = await lead.entries({}, 200, cursor, context);
     for (const entry of page.items) {
       if (Number(entry.id) <= after) break scan;
       const message = leadMessageOf(entry);
-      if (message !== undefined) found.push(message);
-      if (found.length >= MISSED_LIMIT) break scan;
+      if (message !== undefined) newestFirst.push(message);
     }
     cursor = page.next;
   } while (cursor !== undefined);
-  found.reverse();
-  const newest = found.at(-1);
+  const oldestFirst = newestFirst.reverse();
+  const messages = oldestFirst.slice(0, limit);
+  const newest = messages.at(-1);
   if (newest !== undefined) await markDelivered(harness, device, newest.entryId, context);
-  return found;
+  return { messages, remaining: oldestFirst.length - messages.length };
+}
+
+export async function missedMessages(
+  harness: Harness,
+  lead: Conversation,
+  device: string,
+  context: Context,
+): Promise<LeadMessage[]> {
+  return (await missedPage(harness, lead, device, context)).messages;
 }

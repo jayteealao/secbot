@@ -31,8 +31,19 @@ const ISO_WITH_OFFSET = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,3})?)?(Z|[
 
 export type ReminderPayload = JsonObject & { text: string };
 
-/** `secbot.reminders`: the reminder task each `set_reminder` call created, by tool task and call. */
-export const RemindersDoc = defineDoc<{ byCall: Record<string, TaskId> }>({
+/** At most this many reminders wait at once in one cell; each is a live task and a timer. */
+export const REMINDER_LIVE_LIMIT = 200;
+/** A reminder's idempotency record is kept this long after its time, for a rerun after a crash. */
+const KEEP_AFTER_MS = 24 * 60 * 60_000;
+
+/**
+ * `secbot.reminders`: the reminder task each `set_reminder` call created, by tool task and call,
+ * and its wake time (absent on records written before wake times were kept).
+ */
+export const RemindersDoc = defineDoc<{
+  byCall: Record<string, TaskId>;
+  wakeAt?: Record<string, number>;
+}>({
   kind: "secbot.reminders",
   version: 1,
   scope: "session",
@@ -88,12 +99,35 @@ export async function createReminder(
   key: string,
   wakeAt: number,
   text: string,
-): Promise<{ readonly taskId: TaskId; readonly created: boolean }> {
+  now: number = Date.now(),
+): Promise<
+  | { readonly taskId: TaskId; readonly created: boolean; readonly refused?: undefined }
+  | { readonly refused: string; readonly taskId?: undefined; readonly created: false }
+> {
   const doc = await tx.doc(RemindersDoc);
   const existing = Object.hasOwn(doc.byCall, key) ? doc.byCall[key] : undefined;
   if (existing !== undefined) return { taskId: existing, created: false };
+  doc.wakeAt ??= {};
+  // Records whose time passed a day ago are no longer needed for a rerun; dropping them keeps the
+  // doc from growing with every reminder ever set.
+  let live = 0;
+  for (const [call, at] of Object.entries(doc.wakeAt)) {
+    if (at < now - KEEP_AFTER_MS) {
+      delete doc.wakeAt[call];
+      delete doc.byCall[call];
+    } else if (at >= now) {
+      live++;
+    }
+  }
+  if (live >= REMINDER_LIVE_LIMIT) {
+    return {
+      refused: `${REMINDER_LIVE_LIMIT} reminders are already waiting; one must pass before another is set`,
+      created: false,
+    };
+  }
   const taskId = await createRoutineTask(tx, routine, wakeAt, { text });
   doc.byCall[key] = taskId;
+  doc.wakeAt[key] = wakeAt;
   return { taskId, created: true };
 }
 
@@ -106,8 +140,12 @@ export async function scheduleReminder(
   text: string,
   context: Context,
 ): Promise<TaskId> {
-  return (await harness.commit((tx) => createReminder(tx, routine, key, wakeAt, text), context))
-    .taskId;
+  const result = await harness.commit(
+    (tx) => createReminder(tx, routine, key, wakeAt, text),
+    context,
+  );
+  if (result.refused !== undefined) throw new Error(result.refused);
+  return result.taskId;
 }
 
 /** Formats `at` for the person in `timeZone` (IANA); UTC when the zone is unknown. */
@@ -150,10 +188,23 @@ export function createReminderExtension(
         return { content: [{ type: "text", text: `Not set: ${problem}.` }], isError: true };
       }
       const wakeAt = Date.parse(args.at);
-      const { taskId, created } = await api.commit(
-        (tx) => createReminder(tx, routine, `${api.taskId}:${api.callId}`, wakeAt, args.text),
+      const result = await api.commit(
+        (tx) =>
+          createReminder(
+            tx,
+            routine,
+            `${api.taskId}:${api.callId}`,
+            wakeAt,
+            args.text,
+            hooks.now(),
+          ),
         context,
       );
+      if (result.refused !== undefined) {
+        logEvent("reminder.refused", { cell: hooks.cell, reason: "live_limit" }, "warn");
+        return { content: [{ type: "text", text: `Not set: ${result.refused}.` }], isError: true };
+      }
+      const { taskId, created } = result;
       if (created) {
         logEvent("reminder.set", {
           cell: hooks.cell,

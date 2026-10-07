@@ -104,14 +104,23 @@ const APP_OBJECTS = `SELECT type, name, tbl_name, sql FROM sqlite_master
 
 const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
 
+/** Bytes per `String.fromCharCode` call: well under the engine's argument limit. */
+const BASE64_CHUNK = 0x8000;
+
 const toBase64 = (bytes: Uint8Array): string => {
-  let text = "";
-  for (const byte of bytes) text += String.fromCharCode(byte);
-  return btoa(text);
+  const parts: string[] = [];
+  for (let start = 0; start < bytes.length; start += BASE64_CHUNK) {
+    parts.push(String.fromCharCode(...bytes.subarray(start, start + BASE64_CHUNK)));
+  }
+  return btoa(parts.join(""));
 };
 
-const fromBase64 = (text: string): Uint8Array =>
-  Uint8Array.from(atob(text), (c) => c.charCodeAt(0));
+const fromBase64 = (text: string): Uint8Array => {
+  const binary = atob(text);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+};
 
 function encodeValue(value: unknown): DumpValue {
   if (value === null || value === undefined) return null;
@@ -139,7 +148,10 @@ export function digestTables(tables: Readonly<Record<string, DumpTable>>): Promi
     const table = tables[name];
     if (table === undefined) continue;
     lines.push(JSON.stringify(["table", name, table.columns]));
-    lines.push(...table.rows.map((row) => JSON.stringify(row)).sort());
+    // One push per row: spreading a large table into push() passes every row as an argument,
+    // which throws a RangeError past the engine's argument limit (about 100k rows).
+    const rows = table.rows.map((row) => JSON.stringify(row)).sort();
+    for (const row of rows) lines.push(row);
   }
   return sha256Hex(lines.join("\n"));
 }

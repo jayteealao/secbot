@@ -23,6 +23,7 @@
 #   lab           --env test-cell --route R [--at T]  call the test cell's durability lab
 #   crash         --env test-cell                  SIGKILL celld@test, wait until it answers again
 #   down          --env test-cell --seconds N      stop celld@test for N seconds, start it, wait for it
+#   tool-sha                                       this tool's SHA-256, so a client sees a stale copy
 #
 # Fleets: celld runs one application per fleet (celld v0.6.1 README, "A fleet runs one
 # application"), so each rollout stage is its own fleet. The test cell is one fleet (celld@test)
@@ -55,9 +56,12 @@ LOCK="$STATE/deploy.lock"
 LEASE="$STATE/lease"
 LEDGER="$STATE/ledger.jsonl"
 DRILL_DIRTY="$STATE/drill-dirty"
+DRILL_OBJECTS="$STATE/drill-objects"
 SNAPSHOT_BUCKET=secbot-snapshots
+KNOWN="$RELEASES/known-sha256"
 KEEP=5
 WAIT_SECONDS=1800
+MAX_BUNDLE_BYTES=209715200
 
 die() { echo "secbot-release: $*" >&2; exit 1; }
 
@@ -68,7 +72,7 @@ case "$caller" in
 esac
 
 read -r -a argv <<<"${SSH_ORIGINAL_COMMAND:-}"
-[ "${#argv[@]}" -gt 0 ] || die "no command; expected stage, deploy, conformance, manifest, health, alarms, heartbeats, snapshot, restore, digest, drill, ledger-record, ledger-read, lease, state, write-delay, lab, crash, or down"
+[ "${#argv[@]}" -gt 0 ] || die "no command; expected tool-sha, stage, deploy, conformance, manifest, health, alarms, heartbeats, snapshot, restore, digest, drill, ledger-record, ledger-read, lease, state, write-delay, lab, crash, or down"
 command="${argv[0]}"
 action=""
 i=1
@@ -213,8 +217,10 @@ do_lease() {
   [ -n "$holder" ] || die "lease needs --holder"
   case "$action" in
     acquire)
-      local ttl="${seconds:-3600}"
-      [ "$ttl" -ge 60 ] && [ "$ttl" -le 14400 ] || die "lease --seconds must be 60-14400"
+      local ttl="${seconds:-3600}" max=14400
+      # The test-cell key holds the lock at most an hour, so it cannot keep a rollback waiting.
+      [ "$caller" = deploy ] || max=3600
+      [ "$ttl" -ge 60 ] && [ "$ttl" -le "$max" ] || die "lease --seconds must be 60-$max"
       with_lock
       echo "$holder $(( $(date +%s) + ttl ))" >"$LEASE"
       echo "lease acquired by $holder for $ttl s"
@@ -345,11 +351,30 @@ staged_bundle() {
 
 contract_step() { grep -o '"contractStep": *[0-9]*' "$1" | grep -o '[0-9]*$' || echo 0; }
 
+# The SHA-256 a version was first staged with, kept after its bundle is pruned.
+known_sha() { [ -f "$KNOWN" ] && awk -v v="$1" '$1 == v { print $2; exit }' "$KNOWN" || true; }
+
 do_stage() {
   [ -n "$version" ] && [ -n "$sha256" ] || die "stage needs --version and --sha256"
   with_lock
+  # A version is staged once: a second stage of it must carry the same bundle. Without this, the
+  # test-cell key could replace a bundle that a production deploy or rollback later trusts.
+  local known
+  known="$(known_sha "$version")"
+  if [ -n "$known" ] && [ "$known" != "$sha256" ]; then
+    die "version $version was staged with SHA-256 $known; a version is never restaged with other content"
+  fi
+  if [ -n "$known" ] && [ -f "$RELEASES/$version.tar.gz" ]; then
+    echo "staged $version ($sha256), already present"
+    return 0
+  fi
   local partial="$RELEASES/.$version.partial"
-  cat >"$partial"
+  # One byte over the cap shows the upload was cut off.
+  head -c "$((MAX_BUNDLE_BYTES + 1))" >"$partial"
+  if [ "$(stat -c %s "$partial")" -gt "$MAX_BUNDLE_BYTES" ]; then
+    rm -f "$partial"
+    die "the bundle is over $MAX_BUNDLE_BYTES bytes"
+  fi
   local actual
   actual="$(sha256sum "$partial" | cut -d' ' -f1)"
   if [ "$actual" != "$sha256" ]; then
@@ -358,6 +383,7 @@ do_stage() {
   fi
   mv -f "$partial" "$RELEASES/$version.tar.gz"
   echo "$sha256" >"$RELEASES/$version.sha256"
+  [ -n "$known" ] || echo "$version $sha256" >>"$KNOWN"
   # Keep the newest $KEEP bundles; a deployed version is never removed.
   local deployed
   deployed="$(readlink -f "$DEPLOYS"/*/current 2>/dev/null | xargs -r -n1 basename || true)"
@@ -369,8 +395,22 @@ do_stage() {
   echo "staged $version ($sha256)"
 }
 
+# Deletes the production snapshot copies a drill put in the test bucket (celld v0.6.1 `r2 delete`).
+delete_drill_objects() {
+  [ -s "$DRILL_OBJECTS" ] || return 0
+  local keys
+  keys="$(sort -u "$DRILL_OBJECTS" | tr '\n' ' ')"
+  # shellcheck disable=SC2086 # keys are checked snapshot paths, one word each
+  ( fleet_file test
+    celld r2 delete "$SNAPSHOT_BUCKET" $keys \
+      --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto >/dev/null ) ||
+    { echo "secbot-release: could not delete the drill's snapshot copies from the test bucket" >&2; return 1; }
+  rm -f "$DRILL_OBJECTS"
+}
+
 # Wipes the test cell's cells that a restore drill filled with real data, before a test deploy.
 wipe_drill_data() {
+  delete_drill_objects || die "the drill's snapshot copies are still in the test bucket"
   [ -s "$DRILL_DIRTY" ] || return 0
   local dirty
   dirty="$(sort -u "$DRILL_DIRTY" | paste -sd, -)"
@@ -437,6 +477,13 @@ mirror_ledger() {
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# The SHA-256 of the newest production deploy of a version in the ledger, or nothing.
+ledger_sha() {
+  [ -f "$LEDGER" ] || return 0
+  grep -F "\"kind\":\"deploy\",\"version\":\"$1\",\"sha256\":\"" "$LEDGER" | tail -n 1 |
+    grep -o '"sha256":"[0-9a-f]\{64\}"' | grep -o '[0-9a-f]\{64\}' || true
+}
+
 do_deploy() {
   [ -n "$env" ] && [ -n "$version" ] || die "deploy needs --env and --version"
   local named=""
@@ -445,12 +492,18 @@ do_deploy() {
     [ -n "$named" ] || { echo "deploy: no cell to deploy"; return 0; }
   fi
   with_lock
+  if [ "$env" = production ] && [ -z "$sha256" ]; then
+    # A rollback names no hash: it trusts only the hash the production ledger recorded when this
+    # version was last deployed to production, never the store the test-cell key can write.
+    sha256="$(ledger_sha "$version")"
+    [ -n "$sha256" ] || die "a production deploy of $version needs --sha256 (the ledger has no deploy of it with a hash)"
+  fi
   local bundle fleets fleet
   bundle="$(staged_bundle "$version")"
   fleets="$(fleets_for "$env" "${named// /,}")"
   for fleet in $fleets; do deploy_fleet "$fleet" "$bundle"; done
   if [ "$env" = production ]; then
-    ledger_append "{\"kind\":\"deploy\",\"version\":\"$version\",\"cells\":\"${named// /,}\",\"fleets\":\"${fleets// /,}\",\"runId\":\"$run_id\",\"runAttempt\":\"$run_attempt\",\"at\":\"$(now_iso)\"}"
+    ledger_append "{\"kind\":\"deploy\",\"version\":\"$version\",\"sha256\":\"$sha256\",\"cells\":\"${named// /,}\",\"fleets\":\"${fleets// /,}\",\"runId\":\"$run_id\",\"runAttempt\":\"$run_attempt\",\"at\":\"$(now_iso)\"}"
   fi
 }
 
@@ -599,14 +652,18 @@ do_drill() {
       celld r2 get "$SNAPSHOT_BUCKET" "snapshots/$snapshot_id/$cell.json" \
         --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto >"$copy" ) ||
       { rm -f "$copy"; die "snapshot $snapshot_id not found for cell $cell"; }
+    # Marked before the copy and the restore, so a failed drill is still cleaned by the next test
+    # deploy: the copy is deleted from the test bucket and the cell is wiped.
+    echo "snapshots/$snapshot_id/$cell.json" >>"$DRILL_OBJECTS"
+    echo "$cell" >>"$DRILL_DIRTY"
     ( fleet_file test
       celld r2 put "$SNAPSHOT_BUCKET" "snapshots/$snapshot_id/$cell.json" --path "$copy" \
         --content-type application/json \
         --bucket "$CELLD_BUCKET" --endpoint "$CELLD_ENDPOINT" --region auto >/dev/null )
     rm -f "$copy"
-    # Marked before the restore, so a failed restore is still wiped by the next test deploy.
-    echo "$cell" >>"$DRILL_DIRTY"
     restored="$(ops_call test POST "/ops/restore?id=$snapshot_id&cell=$cell")" || die "the drill restore of $cell failed"
+    # The cell holds the data now; the production copy leaves the test bucket at once.
+    delete_drill_objects || die "the drill's snapshot copy of $cell is still in the test bucket"
     [ "$first" = 1 ] || printf ','
     printf '%s' "$(tr -d '\n' <<<"$restored")"
     first=0
@@ -743,5 +800,6 @@ case "$command" in
   lab) do_lab ;;
   crash) do_crash ;;
   down) do_down ;;
-  *) die "unknown command '$command'; expected stage, deploy, conformance, manifest, health, alarms, heartbeats, snapshot, restore, digest, drill, ledger-record, ledger-read, lease, state, write-delay, lab, crash, or down" ;;
+  tool-sha) sha256sum "$0" | cut -d' ' -f1 ;;
+  *) die "unknown command '$command'; expected tool-sha, stage, deploy, conformance, manifest, health, alarms, heartbeats, snapshot, restore, digest, drill, ledger-record, ledger-read, lease, state, write-delay, lab, crash, or down" ;;
 esac

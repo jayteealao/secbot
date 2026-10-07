@@ -52,7 +52,7 @@ export const RULES = [
   {
     id: "cloudflare-account-id",
     pattern:
-      /\b[0-9a-f]{32}\.r2\.cloudflarestorage\.com\b|\baccount[\w-]*["'\s:=]+[0-9a-f]{32}\b/gi,
+      /\b[0-9a-f]{32}(?:\.(?:eu|fedramp))?\.r2\.cloudflarestorage\.com\b|\baccount[\w-]*["'\s:=]+[0-9a-f]{32}\b/gi,
     describe: () => "Cloudflare account id",
   },
   {

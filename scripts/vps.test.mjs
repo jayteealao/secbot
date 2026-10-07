@@ -13,12 +13,14 @@ import {
   judgeLateAlarm,
   judgeLedger,
   judgeRestore,
+  judgeTool,
   normalizeCells,
   printResults,
   reportAlarms,
   reportCells,
   reportHeartbeats,
   SECRETS_SKIPPED,
+  SSH_OPTIONS,
   summarizeDelays,
 } from "./vps.mjs";
 
@@ -381,4 +383,24 @@ test("heap: the peak per isolate of the test fleet against the limit, and the VP
   assert.equal(verdict.vpsRss, 400 * MIB);
   assert.equal(judgeHeap([sample(HEAP_LIMIT_BYTES, 1)]).ok, false);
   assert.equal(judgeHeap([]).ok, false);
+});
+
+test("the release tool on the VPS must be the bundle's copy", () => {
+  const sha = "a".repeat(64);
+  assert.equal(judgeTool(`${sha}\n`, sha).ok, true);
+  const stale = judgeTool("b".repeat(64), sha);
+  assert.equal(stale.ok, false);
+  assert.match(stale.line, /run "mise run host:setup" first/);
+  assert.equal(judgeTool("", undefined).ok, true);
+});
+
+test("ssh ends a session on a dropped link instead of holding the VPS lock", () => {
+  assert.deepEqual(SSH_OPTIONS, [
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=4",
+  ]);
 });

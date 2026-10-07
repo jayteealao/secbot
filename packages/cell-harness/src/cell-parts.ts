@@ -22,7 +22,44 @@ export class RefusedChange extends Error {
   }
 }
 
-/** One structured log line (celld captures console output as worker logs). */
-export function logEvent(event: string, fields: Record<string, unknown>): void {
-  console.log(JSON.stringify({ event, ...fields }));
+export type LogLevel = "debug" | "info" | "warn" | "error";
+
+/**
+ * One structured log line (celld captures console output as worker logs). Every line carries a
+ * `level` field, so an operator can filter failures and refusals; warn and error lines also go to
+ * the console's warn and error streams.
+ */
+export function logEvent(
+  event: string,
+  fields: Record<string, unknown>,
+  level: LogLevel = "info",
+): void {
+  const line = JSON.stringify({ event, level, ...fields });
+  if (level === "error") console.error(line);
+  else if (level === "warn") console.warn(line);
+  else console.log(line);
+}
+
+/**
+ * A provider or runtime error reduced to what is safe to log or store: the leading HTTP status
+ * and the provider's error code when the text has them, otherwise the short text before any JSON
+ * body. Request text that a provider echoes back (for example a moderation excerpt in `metadata`)
+ * is dropped.
+ */
+export function safeErrorText(text: string): string {
+  const status = /^\s*(\d{3})\b/.exec(text)?.[1];
+  const code = /"code"\s*:\s*"?([A-Za-z0-9_.-]{1,40})"?/.exec(text)?.[1];
+  if (status !== undefined) {
+    return code !== undefined && code !== status ? `${status} code=${code}` : status;
+  }
+  const head = (text.split(/[{\n]/)[0] ?? "").trim().slice(0, 120);
+  return head === "" ? "error" : head;
+}
+
+/** Log fields for a caught error: its class name and a safe, short message. */
+export function errorFields(error: unknown): { error_name: string; error: string } {
+  if (error instanceof Error) {
+    return { error_name: error.name, error: safeErrorText(error.message) };
+  }
+  return { error_name: typeof error, error: safeErrorText(String(error)) };
 }

@@ -10,14 +10,14 @@
  *   POST /ops/wipe?cells=                drop every table of the cells (test cell, after a drill)
  *   GET  /ops/digest?cells=              each cell's digest and row count
  *   GET  /ops/heartbeats?cells=          each cell's heartbeat routine state
- *   POST /ops/write                      one committed single-row write (test cell; AC-32)
+ *   POST /ops/write                      one committed single-row write (test cell only)
  *
  * The SNAPSHOTS binding is an `r2_buckets` entry: celld serves it from the fleet bucket under
  * `r2/secbot-snapshots/`, so a snapshot lives at the bucket provider, not on the VPS (celld v0.6.1
  * docs/README.md:477-481; `put(key, value, options)` and `get(key)` in
  * crates/celld/js/harness.js:1132-1190).
  */
-import type { HeartbeatState } from "@secbot/cell-harness";
+import { type HeartbeatState, logEvent } from "@secbot/cell-harness";
 import type { CellDump } from "@secbot/cell-storage";
 import { sameHex, sha256Hex } from "./device-auth.ts";
 import { contractStep } from "./health.ts";
@@ -61,7 +61,7 @@ const SNAPSHOT_ID = /^[A-Za-z0-9._-]{1,100}$/;
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 
 const refuse = (route: string, reason: string, status: number) => {
-  console.log(JSON.stringify({ event: "ops.refused", route, reason }));
+  logEvent("ops.refused", { route, reason }, "warn");
   return json({ error: `refused: ${reason}` }, status);
 };
 
@@ -151,7 +151,7 @@ export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise
           contractStep: String(dump.contractStep),
         },
       });
-      console.log(JSON.stringify({ event: "ops.snapshot", id, cell, bytes: body.length }));
+      logEvent("ops.snapshot", { id, cell, bytes: body.length });
       snapshots.push({ cell, digest: dump.digest, rows: dump.rows, bytes: body.length });
     }
     return json({ id, contractStep: contractStep(), snapshots });

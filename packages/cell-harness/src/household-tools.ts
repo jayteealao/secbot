@@ -8,56 +8,12 @@
  */
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type Extension } from "@earendil-works/pi-durable";
-
-export const HOUSEHOLD_DOCUMENT = /^[a-z][a-z0-9-]{0,31}$/;
-export const DEFAULT_HOUSEHOLD_DOCUMENT = "list";
-
-export interface HouseholdItem {
-  readonly itemId: string;
-  readonly text: string;
-  readonly done: boolean;
-  readonly version: number;
-  /** The change-log position of the change that last wrote the item. */
-  readonly updatedSeq: number;
-}
-
-export interface HouseholdDocument {
-  readonly document: string;
-  readonly items: readonly HouseholdItem[];
-}
-
-interface ChangeBase {
-  readonly opId: string;
-  readonly document: string;
-  readonly fromCell: string;
-}
-
-export type HouseholdChange =
-  | (ChangeBase & { readonly kind: "add"; readonly text: string })
-  | (ChangeBase & {
-      readonly kind: "edit";
-      readonly itemId: string;
-      readonly text?: string;
-      readonly done?: boolean;
-    })
-  | (ChangeBase & { readonly kind: "remove"; readonly itemId: string });
-
-export interface HouseholdApplyResult {
-  /** `missing`: an edit or remove of an item that does not exist (or was removed). */
-  readonly outcome: "applied" | "missing";
-  readonly kind: HouseholdChange["kind"];
-  readonly itemId: string;
-  /** The change's position in the household cell's ordered log. */
-  readonly seq: number;
-  /** True when this operation id was applied before; nothing changed this time. */
-  readonly duplicate: boolean;
-}
-
-/** What a person cell uses to reach the household cell. */
-export interface HouseholdClient {
-  read(document: string): Promise<HouseholdDocument>;
-  apply(change: HouseholdChange): Promise<HouseholdApplyResult>;
-}
+import {
+  DEFAULT_HOUSEHOLD_DOCUMENT,
+  HOUSEHOLD_DOCUMENT,
+  type HouseholdChange,
+  type HouseholdClient,
+} from "./household-contract.ts";
 
 const UNREACHABLE = "The household cell is not reachable from here.";
 
@@ -158,3 +114,11 @@ export function createHouseholdExtension(
   });
   return defineExtension({ name: "secbot-household", tools: [read, change] });
 }
+
+export type {
+  HouseholdApplyResult,
+  HouseholdChange,
+  HouseholdClient,
+  HouseholdDocument,
+  HouseholdItem,
+} from "./household-contract.ts";

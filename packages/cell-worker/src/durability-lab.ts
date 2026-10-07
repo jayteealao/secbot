@@ -16,7 +16,7 @@
  *   GET  /lab/alarm-report         the check:alarms verdict for the lab cell (read-only)
  *   POST /lab/household-roundtrip  the owner cell adds an item, the second cell reads it, a retry
  *                                  with the same operation id applies once
- *   POST /lab/load                 the heap load (AC-31): the lead briefs all four specialists at
+ *   POST /lab/load                 the heap load: the lead briefs all four specialists at
  *                                  once on a slow scripted model; one of them is a long job
  *   GET  /lab/load                 how many tasks are live, and the calls so far
  *

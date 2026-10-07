@@ -14,6 +14,7 @@
  */
 import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import {
+  CELL_NAME,
   HOUSEHOLD_DOCUMENT,
   type HouseholdApplyResult,
   type HouseholdChange,
@@ -23,7 +24,6 @@ import {
 
 export const ITEM_TEXT_LIMIT = 500;
 const OP_ID = /^[A-Za-z0-9._:-]{1,200}$/;
-const CELL = /^[a-z][a-z0-9-]{0,31}$/;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS household_items (
@@ -51,12 +51,23 @@ CREATE TABLE IF NOT EXISTS household_changes (
 CREATE INDEX IF NOT EXISTS household_changes_item ON household_changes (document, item_id, seq);
 `;
 
+/** The error name a refused change carries across RPC and HTTP. */
+export const REFUSED_HOUSEHOLD_CHANGE = "RefusedHouseholdChange";
+
 /** A change the household cell refuses; the message names the field, never a value. */
 export class RefusedHouseholdChange extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "RefusedHouseholdChange";
+    this.name = REFUSED_HOUSEHOLD_CHANGE;
   }
+}
+
+/**
+ * True for a refused change, also one that crossed RPC (where only the name survives), so a caller
+ * answers it as a bad request instead of a failure to retry.
+ */
+export function isRefusedHouseholdChange(error: unknown): boolean {
+  return error instanceof Error && error.name === REFUSED_HOUSEHOLD_CHANGE;
 }
 
 export interface HistoryEntry {
@@ -97,7 +108,7 @@ export function validateChange(change: unknown): HouseholdChange {
   if (typeof document !== "string" || !HOUSEHOLD_DOCUMENT.test(document)) {
     throw new RefusedHouseholdChange("bad document name");
   }
-  if (typeof fromCell !== "string" || !CELL.test(fromCell)) {
+  if (typeof fromCell !== "string" || !CELL_NAME.test(fromCell)) {
     throw new RefusedHouseholdChange("bad cell name");
   }
   const goodText = (text: unknown): text is string =>

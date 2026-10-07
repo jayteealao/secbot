@@ -22,7 +22,33 @@ export type Frame =
       readonly text: string;
     }
   | { readonly type: "waiting"; readonly on: boolean }
-  | { readonly type: "error"; readonly message: string };
+  /**
+   * A lead message that reached no open session for this device, sent when the session opens,
+   * oldest first, before any live frame. `remaining` counts newer ones left for `missed`.
+   */
+  | {
+      readonly type: "missed";
+      readonly entryId: number;
+      readonly from: string | null;
+      readonly text: string;
+      readonly remaining: number;
+    }
+  /** An input line the cell refused; the client stops resending it. */
+  | { readonly type: "rejected"; readonly requestId: string; readonly message: string }
+  | { readonly type: "error"; readonly message: string; readonly requestId?: string };
+
+/** Every frame type, for checks that the documented protocol matches this union. */
+export const FRAME_TYPES = [
+  "connected",
+  "accepted",
+  "delta",
+  "answer",
+  "followup",
+  "waiting",
+  "missed",
+  "rejected",
+  "error",
+] as const satisfies readonly Frame["type"][];
 
 export interface SessionStream {
   stop(): Promise<void>;

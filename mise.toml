@@ -186,12 +186,12 @@ run = "node scripts/vps.mjs lease"
 
 [tasks."check:app-builds"]
 description = "Check the processing state in Play internal testing and TestFlight"
-run = "node -e \"console.error('check:app-builds arrives with the access-and-app packet'); process.exit(1)\""
+run = "node -e \"console.error('check:app-builds is not built yet'); process.exit(1)\""
 
 [tasks."app:build-ios"]
 description = "Build an unsigned iOS archive"
-run = "node -e \"console.error('app:build-ios arrives with the access-and-app packet'); process.exit(1)\""
+run = "node -e \"console.error('app:build-ios is not built yet'); process.exit(1)\""
 
 [tasks."app:sign"]
 description = "Sign the Android bundle and export the signed iOS build"
-run = "node -e \"console.error('app:sign arrives with the access-and-app packet'); process.exit(1)\""
+run = "node -e \"console.error('app:sign is not built yet'); process.exit(1)\""

@@ -24,6 +24,7 @@ import {
   CellAlarm,
   createHeartbeatRoutine,
   ensureRoutines,
+  errorFields,
   type HeartbeatEnv,
   type HeartbeatState,
   type HouseholdApplyResult,
@@ -33,6 +34,7 @@ import {
   logEvent,
   type NextWake,
   nextWake,
+  reportFields,
   type WakeSummary,
   wakesOf,
 } from "@secbot/cell-harness";
@@ -41,14 +43,8 @@ import {
   type CelldAlarmInfo,
   type CelldCellStorage,
   type CelldSqliteDatabase,
-  databaseRunner,
-  digestCell,
-  dumpCell,
-  loadCell,
+  CellSnapshots,
   openCelldStorageWithDatabase,
-  type SnapshotRunner,
-  storageRunner,
-  wipeCell,
 } from "@secbot/cell-storage";
 import { ChangeLog, type HistoryEntry } from "./change-log.ts";
 
@@ -86,6 +82,8 @@ export class HouseholdCell {
   private opening: Promise<Opened> | undefined;
   private readonly alarms: CellAlarm;
   private readonly now: () => number;
+  /** Snapshot, restore, wipe, and digest, shared with the person cells. */
+  private readonly snapshots: CellSnapshots;
 
   constructor(
     private readonly state: HouseholdCellState,
@@ -97,13 +95,27 @@ export class HouseholdCell {
       now: this.now,
       ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
     });
+    this.snapshots = new CellSnapshots(
+      state.storage,
+      {
+        openDatabase: async () => {
+          const opening = this.opening;
+          return opening === undefined ? undefined : (await opening).database;
+        },
+        close: () => this.close(),
+      },
+      this.now,
+    );
   }
 
   private open(): Promise<Opened> {
     if (this.opening === undefined) {
-      this.opening = this.openNow();
-      this.opening.catch(() => {
-        this.opening = undefined;
+      // A restore or wipe in progress finishes first, so the harness opens on the new database.
+      const opening = this.snapshots.idle().then(() => this.openNow());
+      this.opening = opening;
+      opening.catch((error: unknown) => {
+        if (this.opening === opening) this.opening = undefined;
+        logEvent("cell.open_failed", { cell: HOUSEHOLD_CELL_NAME, ...errorFields(error) }, "error");
       });
     }
     return this.opening;
@@ -123,33 +135,45 @@ export class HouseholdCell {
         registry,
         now: this.now,
         onReport: (error) =>
-          logEvent("harness.report", {
-            cell: HOUSEHOLD_CELL_NAME,
-            error: (error instanceof Error ? error.message : String(error)).slice(0, 200),
-          }),
+          logEvent("harness.report", reportFields(HOUSEHOLD_CELL_NAME, error), "error"),
       },
       context,
     );
-    await harness.root(context);
-    await ensureRoutines(harness, [{ routine: heartbeat }], this.now(), context);
-    harness.resume();
-    const opened: Opened = {
-      log,
-      harness,
-      database,
-      wakes: async () => {
-        const summary = wakesOf(await harness.inspect(context));
-        return { summary, next: nextWake(summary, this.now()) };
-      },
-    };
-    await this.alarms.rearm(opened);
-    return opened;
+    try {
+      await harness.root(context);
+      await ensureRoutines(harness, [{ routine: heartbeat }], this.now(), context);
+      harness.resume();
+      const opened: Opened = {
+        log,
+        harness,
+        database,
+        wakes: async () => {
+          const summary = wakesOf(await harness.inspect(context));
+          return { summary, next: nextWake(summary, this.now()) };
+        },
+      };
+      await this.alarms.rearm(opened);
+      return opened;
+    } catch (error) {
+      // An opened harness must not stay running while the next event opens another one.
+      await harness.close(context).catch(() => {});
+      throw error;
+    }
   }
 
   private rearmSoon(): void {
     const opening = this.opening;
     if (opening === undefined) return;
-    const work = opening.then((opened) => this.alarms.rearm(opened)).catch(() => {});
+    const work = opening
+      .then((opened) => this.alarms.rearm(opened))
+      .catch((error: unknown) => {
+        // The wake path: a cell with no alarm sleeps through its heartbeat, so the failure is logged.
+        logEvent(
+          "alarm.rearm_failed",
+          { cell: HOUSEHOLD_CELL_NAME, ...errorFields(error) },
+          "error",
+        );
+      });
     this.state.waitUntil?.(work);
   }
 
@@ -194,17 +218,9 @@ export class HouseholdCell {
     return alarmVerdict(HOUSEHOLD_CELL_NAME, alarm, summary);
   }
 
-  /** The open storage driver's queue when the cell is open, else the storage itself. */
-  private async runner(): Promise<SnapshotRunner> {
-    const opening = this.opening;
-    return opening === undefined
-      ? storageRunner(this.state.storage)
-      : databaseRunner((await opening).database);
-  }
-
   /** RPC: the whole database as one dump, taken in one transaction. */
   async snapshot(contractStep: number): Promise<CellDump> {
-    const dump = await dumpCell(await this.runner(), { contractStep, now: this.now });
+    const dump = await this.snapshots.snapshot(contractStep);
     logEvent("cell.snapshot", { cell: HOUSEHOLD_CELL_NAME, digest: dump.digest, rows: dump.rows });
     return dump;
   }
@@ -215,8 +231,7 @@ export class HouseholdCell {
    * restored checkpoints.
    */
   async restore(dump: CellDump): Promise<{ digest: string; rows: number }> {
-    await this.close();
-    const result = await loadCell(storageRunner(this.state.storage), dump);
+    const result = await this.snapshots.restore(dump);
     await this.open();
     logEvent("cell.restored", {
       cell: HOUSEHOLD_CELL_NAME,
@@ -228,15 +243,13 @@ export class HouseholdCell {
 
   /** RPC: drops every table and the alarm (the test cell after a restore drill). */
   async wipe(): Promise<void> {
-    await this.close();
-    await wipeCell(storageRunner(this.state.storage));
-    await this.state.storage.deleteAlarm();
+    await this.snapshots.wipe();
     logEvent("cell.wiped", { cell: HOUSEHOLD_CELL_NAME });
   }
 
   /** RPC: the database digest and row count as they are now. */
   async digest(): Promise<{ digest: string; rows: number }> {
-    return digestCell(await this.runner());
+    return this.snapshots.digest();
   }
 
   /** RPC: the heartbeat routine's last run (check:heartbeats). */
@@ -263,6 +276,6 @@ export class HouseholdCell {
   async close(context: Context = BACKGROUND_CONTEXT): Promise<void> {
     const opening = this.opening;
     this.opening = undefined;
-    if (opening !== undefined) await (await opening).harness.close(context);
+    if (opening !== undefined) await (await opening.catch(() => undefined))?.harness.close(context);
   }
 }

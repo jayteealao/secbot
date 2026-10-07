@@ -1,7 +1,7 @@
 // The household client over HTTP, against the worker's /internal/household route in process (the
 // path the owner cell uses across fleets, and the test cell uses against itself): the owner cell
-// adds an item and the second cell reads it (AC-22 over HTTP); an answer lost after apply() ran is
-// retried with the same operation id and applies once (AC-24 over HTTP); a refusal is not retried.
+// adds an item and the second cell reads it over HTTP; an answer lost after apply() ran is
+// retried with the same operation id and applies once over HTTP; a refusal is not retried.
 import { FakeCelldStorage, loggedEvents } from "@secbot/cell-harness/testing";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -86,18 +86,28 @@ describe("household client over HTTP", () => {
     expect(calls).toEqual([
       {
         event: "household.call",
+        level: "info",
         transport: "http",
         method: "apply",
         outcome: "retried",
         attempts: 2,
       },
-      { event: "household.call", transport: "http", method: "read", outcome: "ok", attempts: 1 },
+      {
+        event: "household.call",
+        level: "info",
+        transport: "http",
+        method: "read",
+        outcome: "ok",
+        attempts: 1,
+      },
     ]);
     expect(JSON.stringify(calls)).not.toContain("tomatoes");
   });
 
   it("does not retry a refusal, and fails after three network errors", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const fleet = householdFleet();
     const wrongKey = httpHouseholdClient(URL_BASE, "wrong", fleet.fetcher);
     await expect(wrongKey.read("list")).rejects.toThrow("refused: operator_key");
@@ -110,6 +120,32 @@ describe("household client over HTTP", () => {
     });
     await expect(down.read("list")).rejects.toThrow("fetch failed");
     expect(attempts).toBe(3);
+
+    // Each failure names its cause: the status of a refusal, the error of a failed call.
+    const refused = loggedEvents(warn.mock.calls).filter((line) => line.event === "household.call");
+    expect(refused).toEqual([
+      expect.objectContaining({
+        level: "warn",
+        method: "read",
+        outcome: "refused",
+        attempts: 1,
+        status: 401,
+        error: "refused: operator_key",
+      }),
+    ]);
+    const failed = loggedEvents(error.mock.calls).filter((line) => line.event === "household.call");
+    expect(failed).toEqual([
+      expect.objectContaining({
+        level: "error",
+        method: "read",
+        outcome: "failed",
+        attempts: 3,
+        status: null,
+        error_name: "TypeError",
+      }),
+    ]);
+    // The household side logs the refusal of the wrong key as well.
+    expect(loggedEvents(warn.mock.calls).some((line) => line.event === "ops.refused")).toBe(true);
   });
 
   it("uses the binding when no URL is set, and has no client with neither", async () => {

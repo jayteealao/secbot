@@ -6,12 +6,18 @@
 // Production runs the owner cell in one fleet and the second person and household cells in
 // another, so each rollout stage deploys its own fleet (celld runs one application per fleet).
 // Cell names follow the release workflows: `person` is the second person's cell.
-import type { AlarmReport, HouseholdChange } from "@secbot/cell-harness";
+import {
+  type AlarmReport,
+  errorFields,
+  type HouseholdChange,
+  logEvent,
+} from "@secbot/cell-harness";
 import {
   HOUSEHOLD_CELL_NAME,
   HouseholdCell as HouseholdCellBase,
   type HouseholdCellEnv,
   type HouseholdCellState,
+  isRefusedHouseholdChange,
 } from "@secbot/household-cell";
 import { checkDevice, type DeviceEnv } from "./device-auth.ts";
 import { type CellHealth, health, releaseVersion } from "./health.ts";
@@ -34,11 +40,11 @@ export class HouseholdCell extends HouseholdCellBase {
   }
 }
 
-/** The person cells of wave 1. */
+/** The person cells. */
 export const PERSONS: readonly string[] = ["owner", "second"];
 /** The household cell's name, the same one the household cell package uses. */
 export const HOUSEHOLD = HOUSEHOLD_CELL_NAME;
-/** Every cell of wave 1 (the secrets cell arrives with safety-core). */
+/** Every cell (a secrets cell is not built yet). */
 export const ALL_CELLS: readonly string[] = [...PERSONS, HOUSEHOLD];
 
 /** The release workflows' name for the second person's cell. */
@@ -178,9 +184,7 @@ function snapshotStubOf(env: WorkerEnv, cell: string): SnapshotStub | undefined 
 async function internalHousehold(request: Request, env: WorkerEnv): Promise<Response> {
   const url = new URL(request.url);
   if (!(await hasOperatorKey(request, env))) {
-    console.log(
-      JSON.stringify({ event: "ops.refused", route: url.pathname, reason: "operator_key" }),
-    );
+    logEvent("ops.refused", { route: url.pathname, reason: "operator_key" }, "warn");
     return Response.json({ error: "refused: operator_key" }, { status: 401 });
   }
   if (!fleetCells(env).includes(HOUSEHOLD)) {
@@ -192,9 +196,14 @@ async function internalHousehold(request: Request, env: WorkerEnv): Promise<Resp
   }
   const method = url.pathname.slice("/internal/household/".length);
   const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  const fromCell = typeof body.fromCell === "string" ? body.fromCell : null;
+  const document = typeof body.document === "string" ? body.document : null;
   try {
-    if (request.method === "POST" && method === "read" && typeof body.document === "string") {
-      return Response.json(await household.read(body.document));
+    if (request.method === "POST" && method === "read") {
+      if (document === null) {
+        return Response.json({ error: "send {document}" }, { status: 400 });
+      }
+      return Response.json(await household.read(document));
     }
     if (request.method === "POST" && method === "apply") {
       return Response.json(await household.apply(body as unknown as HouseholdChange));
@@ -205,8 +214,14 @@ async function internalHousehold(request: Request, env: WorkerEnv): Promise<Resp
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // A refused change is the caller's error; anything else is the cell's.
-    const refused = error instanceof Error && error.name === "RefusedHouseholdChange";
-    return Response.json({ error: message }, { status: refused ? 400 : 500 });
+    const refused = isRefusedHouseholdChange(error);
+    const status = refused ? 400 : 500;
+    logEvent(
+      refused ? "household.refused" : "household.error",
+      { method, from_cell: fromCell, document, status, ...errorFields(error) },
+      refused ? "warn" : "error",
+    );
+    return Response.json({ error: message }, { status });
   }
   return Response.json({ error: "not found" }, { status: 404 });
 }

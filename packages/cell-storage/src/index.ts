@@ -2,6 +2,7 @@ import { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import { CelldSqliteDatabase, type CelldSqliteDatabaseOptions } from "./celld-sqlite-database.ts";
 import type { CelldStorage } from "./celld-types.ts";
 
+export { CellSnapshots, type SnapshotHost } from "./cell-snapshots.ts";
 export {
   ADAPTER_NAME,
   CELLD_TRANSACTION_LIMIT_MS,
