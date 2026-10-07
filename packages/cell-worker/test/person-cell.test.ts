@@ -201,6 +201,120 @@ describe("PersonCell", () => {
     ]);
   });
 
+  describe("opening a session while the lead commits an answer", () => {
+    interface Opening {
+      readonly s: Setup;
+      readonly cell: PersonCell;
+      readonly harness: CellHarness;
+      readonly server: FakeSocket;
+      /** Whether the held frames of the opening device include an answer or follow-up. */
+      readonly held: () => boolean;
+    }
+
+    async function opening(): Promise<Opening> {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const s = await setup();
+      s.sockets.splice(0);
+      const server = new FakeSocket();
+      vi.stubGlobal(
+        "WebSocketPair",
+        class {
+          0 = new FakeSocket();
+          1 = server;
+          constructor() {
+            s.sockets.push(server);
+          }
+        },
+      );
+      await call(s, "GET", "/v1/cells/owner/status");
+      const cell = s.cells.get("owner");
+      const harness = s.opened[0];
+      if (cell === undefined || harness === undefined) throw new Error("setup failed");
+      const handoffs = (cell as unknown as { handoffs: Map<string, { type: string }[]> }).handoffs;
+      const held = () =>
+        (handoffs.get("laptop") ?? []).some(
+          (frame) => frame.type === "answer" || frame.type === "followup",
+        );
+      return { s, cell, harness, server, held };
+    }
+
+    // Node refuses a 101 Response, so the opening settles as a rejection after the work is done.
+    const open = (s: Setup) => call(s, "GET", "/v1/cells/owner/session").catch(() => undefined);
+
+    const gate = () => {
+      let release: () => void = () => {};
+      const promise = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return { promise, release };
+    };
+
+    const texts = (server: FakeSocket) =>
+      server.sent
+        .filter((frame) => ["answer", "followup", "missed"].includes(String(frame.type)))
+        .map((frame) => String(frame.text));
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("sends an answer that commits after the missed scan read the history, once, and keeps the cursor behind it", async () => {
+      const { s, cell, harness, server, held } = await opening();
+      const original = harness.missed.bind(harness);
+      const scanned = gate();
+      const pending = gate();
+      vi.spyOn(harness, "missed").mockImplementation(async (device) => {
+        const page = await original(device);
+        scanned.release();
+        await pending.promise;
+        return page;
+      });
+      const session = open(s);
+      await scanned.promise;
+      await cell.submitInput("owner", "during the scan", "req-00000003");
+      await harness.harness.waitForIdle(BACKGROUND_CONTEXT);
+      await until(held);
+      pending.release();
+      await session;
+      expect(texts(server)).toEqual(["lead says: during the scan"]);
+      // A later live answer must not move the cursor past anything the client was not sent.
+      await cell.submitInput("owner", "after the scan", "req-00000004");
+      await until(() => texts(server).length === 2);
+      expect(texts(server)).toEqual(["lead says: during the scan", "lead says: after the scan"]);
+      await until(async () => {
+        const page = (await (await call(s, "GET", "/v1/cells/owner/missed")).json()) as {
+          messages: unknown[];
+        };
+        return page.messages.length === 0;
+      });
+      expect(texts(server)).toHaveLength(2);
+    });
+
+    it("sends an answer once when both the missed page and the live watch carry it", async () => {
+      const { s, cell, harness, server, held } = await opening();
+      const original = harness.missed.bind(harness);
+      const reached = gate();
+      const pending = gate();
+      vi.spyOn(harness, "missed").mockImplementation(async (device) => {
+        reached.release();
+        await pending.promise;
+        return original(device);
+      });
+      const session = open(s);
+      await reached.promise;
+      await cell.submitInput("owner", "during the scan", "req-00000005");
+      await harness.harness.waitForIdle(BACKGROUND_CONTEXT);
+      await until(held);
+      pending.release();
+      await session;
+      expect(texts(server)).toEqual(["lead says: during the scan"]);
+      expect(server.sent.filter((frame) => frame.type === "answer")).toHaveLength(0);
+      await cell.submitInput("owner", "after the scan", "req-00000006");
+      await until(() => texts(server).length === 2);
+      expect(texts(server)).toEqual(["lead says: during the scan", "lead says: after the scan"]);
+    });
+  });
+
   it("answers a malformed chat frame with an error frame and refuses a session without WebSocket support", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = await setup();

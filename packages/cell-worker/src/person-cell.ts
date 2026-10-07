@@ -165,6 +165,12 @@ export class PersonCell {
   private opening: Promise<CellHarness> | undefined;
   private streaming: Promise<SessionStream> | undefined;
   private readonly framesSent = new Map<string, number>();
+  /**
+   * Frames held back for a device whose session is still opening: its missed page goes first, then
+   * these, so a live frame never overtakes the missed scan and never advances the device's cursor
+   * before the client was sent what lies behind it.
+   */
+  private readonly handoffs = new Map<string, Frame[]>();
   private alarms: CellAlarm | undefined;
   private knownName: string | undefined;
   private snapshotOps: CellSnapshots | undefined;
@@ -297,6 +303,12 @@ export class PersonCell {
     const sent = new Set<string>();
     for (const socket of this.sockets()) {
       const { device } = this.tagsOf(socket);
+      const held = this.handoffs.get(device);
+      if (held !== undefined) {
+        // Not sent yet, so not counted as delivered: the session open sends it after the missed page.
+        held.push(frame);
+        continue;
+      }
       try {
         socket.send(text);
         sent.add(device);
@@ -439,34 +451,69 @@ export class PersonCell {
     if (Pair === undefined || this.state.acceptWebSocket === undefined) {
       return json({ error: "this runtime has no WebSocket support" }, 501);
     }
+    // The live watch is registered before the missed scan, and frames for this device are held until
+    // the missed page is sent: an event that commits while the scan runs is then in the page, in the
+    // held frames, or both (sent once), never in neither.
+    const held: Frame[] = [];
+    this.handoffs.set(device, held);
     const pair = new Pair();
-    this.state.acceptWebSocket(pair[1], [device, person]);
-    pair[1].send(JSON.stringify({ type: "connected", lead: person } satisfies Frame));
-    let framesSent = 1;
-    // What the lead said while this device had no open socket comes first, oldest first, so an
-    // answer that committed during a reconnect is shown before the next live answer moves the
-    // device's cursor past it.
-    const { messages, remaining } = await cell.missed(device);
-    for (const message of messages) {
-      pair[1].send(
-        JSON.stringify({
+    let framesSent = 0;
+    const deliver = (frame: Frame) => {
+      pair[1].send(JSON.stringify(frame));
+      framesSent++;
+    };
+    let delivered = 0;
+    try {
+      this.state.acceptWebSocket(pair[1], [device, person]);
+      deliver({ type: "connected", lead: person });
+      await this.ensureStream(cell);
+      // What the lead said while this device had no open socket comes first, oldest first, so an
+      // answer that committed during a reconnect is shown before the next live answer moves the
+      // device's cursor past it.
+      const { messages, remaining } = await cell.missed(device);
+      for (const message of messages) {
+        deliver({
           type: "missed",
           entryId: message.entryId,
           from: message.kind === "followup" ? message.from : null,
           text: message.text,
           remaining,
-        } satisfies Frame),
-      );
-      framesSent++;
+        });
+      }
+      delivered = messages.length;
+      // Held frames follow, minus what the missed page carried. While older messages are still left
+      // for `missed`, a held answer stays there too: sending it would move the cursor past them.
+      // This runs without an await, so nothing is added to `held` meanwhile.
+      const inPage = messages.at(-1)?.entryId ?? -1;
+      let deltas: Frame[] = [];
+      let newest: number | undefined;
+      for (const frame of held) {
+        if (frame.type === "delta") {
+          deltas.push(frame);
+        } else if (frame.type === "answer" || frame.type === "followup") {
+          if (frame.entryId > inPage && remaining === 0) {
+            for (const delta of deltas) deliver(delta);
+            deliver(frame);
+            newest = frame.entryId;
+          }
+          deltas = [];
+        } else {
+          deliver(frame);
+        }
+      }
+      for (const delta of deltas) deliver(delta);
+      this.framesSent.set(device, framesSent);
+      this.handoffs.delete(device);
+      if (newest !== undefined) await cell.markDelivered(device, newest);
+    } finally {
+      if (this.handoffs.get(device) === held) this.handoffs.delete(device);
     }
-    this.framesSent.set(device, framesSent);
-    await this.ensureStream(cell);
     logEvent("cli.session", {
       cell: person,
       device,
       phase: "open",
       frames_sent: framesSent,
-      missed_delivered: messages.length,
+      missed_delivered: delivered,
     });
     const init: ResponseInit & { webSocket: SocketLike } = { status: 101, webSocket: pair[0] };
     return new Response(null, init);
