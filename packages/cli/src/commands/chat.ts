@@ -115,6 +115,9 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
       open = false;
       if (closing) return;
       print(`connection lost; reconnecting in ${Math.round(delay / 1000)} s\n`);
+      // Wake anyone still awaiting the promise being replaced; they re-check `open` and then wait
+      // on the new one. Without this, an early close strands the startup wait on a dead promise.
+      ready();
       connected = new Promise<void>((resolve) => {
         ready = resolve;
       });
