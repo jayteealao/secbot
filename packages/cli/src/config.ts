@@ -18,12 +18,13 @@ export interface Device {
 }
 
 export class CliError extends Error {
-  constructor(
-    message: string,
-    readonly exitCode = 1,
-  ) {
+  // A plain field, not a parameter property: Node's type stripping accepts erasable syntax only.
+  readonly exitCode: number;
+
+  constructor(message: string, exitCode = 1) {
     super(message);
     this.name = "CliError";
+    this.exitCode = exitCode;
   }
 }
 
