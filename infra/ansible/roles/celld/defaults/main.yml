@@ -65,3 +65,24 @@ celld_replication_confirmed: false
 # passed against the production bucket.
 celld_production: false
 celld_production_confirmed: false
+
+# celld's own log filter, set as RUST_LOG in the celld@ unit only (never in celld.env.j2: the
+# release tool sources the fleet copy of that file before it runs celld CLI commands).
+# source: celld v0.6.1 crates/celld/main.rs:3397-3406 reads RUST_LOG through EnvFilter (default
+# info), and crates/celld/js.rs:9777-9782 writes every console line of a cell as target
+# cell_console at INFO. So "warn" drops celld's per-round replication and node-log INFO lines,
+# and "cell_console=info" keeps every cell event (model.call, handoff.*, alarm.*, heartbeat.ping).
+# To debug celld itself, set it to "info" for one host setup, then set it back.
+celld_log_filter: "warn,cell_console=info"
+
+# The cells log to their own journal namespace, apart from the VPS's system journal, with their
+# own retention. Read with: sudo journalctl --namespace=secbot -u celld@<fleet>.
+# source: systemd.exec(5) LogNamespace= (systemd 245 or later) and journald.conf(5) for the
+# per-namespace file /etc/systemd/journald@<namespace>.conf.
+celld_log_namespace: secbot
+# Disk cap, space to keep free, the age limit (enough for a monthly cost estimate), and the
+# span of one journal file.
+celld_journal_max_use: 1G
+celld_journal_keep_free: 2G
+celld_journal_retention: 90day
+celld_journal_max_file: 1week

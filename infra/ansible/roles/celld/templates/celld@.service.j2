@@ -14,6 +14,12 @@ EnvironmentFile=/etc/secbot/celld-%i.env
 StateDirectory=celld/%i
 WorkingDirectory=/var/lib/celld/%i
 Environment=CELLD_WATCH=/var/lib/celld/%i
+# celld's own lines at warn and above, every cell line (target cell_console) at info; the filter
+# is set here, not in the env file, so the release tool's celld commands keep their output.
+Environment=RUST_LOG={{ celld_log_filter }}
+# The cells log to their own journal, kept apart from the system journal:
+# sudo journalctl --namespace={{ celld_log_namespace }} -u celld@%i
+LogNamespace={{ celld_log_namespace }}
 # The worker listens on the private-network address only; the internal listener stays on loopback.
 ExecStart=/usr/local/bin/celld \
   --bucket ${CELLD_BUCKET} \

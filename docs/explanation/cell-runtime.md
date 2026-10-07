@@ -106,3 +106,5 @@ crashed run's lease frees itself.
   `measure:write-delay` records the median and the 95th percentile.
 - **Cost.** `measure:cost` turns the cell's `model.call` log (or, before live use, the model
   catalog prices) and the usage assumptions into a monthly cost per person, with the arithmetic.
+  The cells' `model.call` lines are kept in the cells' own journal for 90 days, so a logged
+  estimate can cover a month.

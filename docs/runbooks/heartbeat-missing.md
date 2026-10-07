@@ -17,7 +17,8 @@ the cell did not answer), or `down in Better Stack`.
 1. Run `mise run check:cells -- --env <test-cell|production> --cells <cell>`. A cell that is down
    cannot ping; follow [cell-adopt-fail](cell-adopt-fail.md) first.
 2. Read the cell's `heartbeat.ping` lines on the VPS:
-   `journalctl -u celld@<fleet> | grep heartbeat.ping`. `outcome` and `http_status` say whether
+   `sudo journalctl --namespace=secbot -u celld@<fleet> | grep heartbeat.ping` (the cells log to
+   their own journal namespace, not the system journal). `outcome` and `http_status` say whether
    the ping reached Better Stack; `skipped` means the cell has no ping URL.
 3. Run `mise run check:alarms -- --env <test-cell|production> --cells <cell>`. The heartbeat is a
    routine with a timer; a lost alarm stops it. Follow [alarm-lost](alarm-lost.md) if it fails.

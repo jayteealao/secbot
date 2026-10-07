@@ -2,6 +2,13 @@
   ansible.builtin.systemd_service:
     daemon_reload: true
 
+# Listed before the cells' restart: handlers run in file order, so the cells reconnect to the
+# restarted journal.
+- name: Restart the cell journal
+  ansible.builtin.systemd_service:
+    name: "systemd-journald@{{ celld_log_namespace }}.service"
+    state: restarted
+
 - name: Restart celld instances
   ansible.builtin.systemd_service:
     name: "celld@{{ item.name }}"

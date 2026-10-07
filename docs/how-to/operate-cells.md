@@ -166,4 +166,28 @@ lease, up to 30 minutes. A lease that expires frees itself.
   `infra/ansible/roles/celld/defaults/main.yml` and move developer work into its own cell.
 - `mise run measure:write-delay -- --env test-cell --writes 200`: the median and the 95th
   percentile of committed single-row writes.
-- `mise run measure:cost -- --assumptions <file.json>`: the monthly cost per person.
+- `mise run measure:cost -- --assumptions <file.json>`: the monthly cost per person. Add
+  `--log <file> --log-days N` to price the logged `model.call` lines (see
+  [Read the cell log](#read-the-cell-log)).
+
+## Read the cell log
+
+The cells log to their own journal namespace, `secbot`, apart from the VPS's system journal. It
+keeps 90 days of lines, up to 1 GB, and leaves 2 GB of the disk free (`celld_journal_*` in
+`infra/ansible/roles/celld/defaults/main.yml`). systemd's own start and stop lines for a fleet
+stay in the system journal (`journalctl -u celld@<fleet>`).
+
+- Read one fleet: `sudo journalctl --namespace=secbot -u celld@<fleet>`. Add `-f` to follow it,
+  or `--since '-1h'` for the last hour.
+- Export the model calls for `measure:cost`:
+
+  ```sh
+  sudo journalctl --namespace=secbot -u celld@<fleet> --since <date> -o cat \n    | grep '"model.call"' > model-calls.log
+  mise run measure:cost -- --assumptions <file.json> --log model-calls.log --log-days <days since date>
+  ```
+
+- The journal keeps every line a cell writes (`model.call`, `handoff.*`, `alarm.*`,
+  `heartbeat.ping`) and celld's own warnings and errors. celld's own info lines (each replication
+  round and node-log cycle) are dropped by the filter `celld_log_filter` (`warn,cell_console=info`).
+  To debug celld itself, set `celld_log_filter` to `info` for one host setup, read the journal,
+  then set it back and run host setup again.

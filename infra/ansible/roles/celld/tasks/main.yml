@@ -139,6 +139,30 @@
     path: /etc/secbot/test-cell.env
     state: absent
 
+# LogNamespace= needs systemd 245 or later (systemd NEWS, "CHANGES WITH 245"); stop before the
+# unit changes on an older system.
+- name: Read the systemd version
+  ansible.builtin.command: systemctl --version
+  register: celld_systemd_version
+  changed_when: false
+
+- name: Check that systemd supports a log namespace
+  ansible.builtin.assert:
+    that: (celld_systemd_version.stdout_lines[0].split()[1] | regex_replace('[^0-9].*$', '') | int) >= 245
+    fail_msg: "celld log namespace needs systemd 245 or later ({{ celld_systemd_version.stdout_lines[0] }})."
+    quiet: true
+
+- name: Write the cell journal's retention (used only by the celld@ units)
+  ansible.builtin.template:
+    src: journald-namespace.conf.j2
+    dest: "/etc/systemd/journald@{{ celld_log_namespace }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Restart the cell journal
+    - Restart celld instances
+
 - name: Install the celld unit template
   ansible.builtin.template:
     src: celld@.service.j2
