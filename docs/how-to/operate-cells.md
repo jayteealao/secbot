@@ -182,7 +182,8 @@ stay in the system journal (`journalctl -u celld@<fleet>`).
 - Export the model calls for `measure:cost`:
 
   ```sh
-  sudo journalctl --namespace=secbot -u celld@<fleet> --since <date> -o cat \n    | grep '"model.call"' > model-calls.log
+  sudo journalctl --namespace=secbot -u celld@<fleet> --since <date> -o cat \
+    | grep '"model.call"' > model-calls.log
   mise run measure:cost -- --assumptions <file.json> --log model-calls.log --log-days <days since date>
   ```
 
