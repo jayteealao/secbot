@@ -109,7 +109,8 @@
     dest: /etc/sudoers.d/secbot-test-cell
     content: |
       # The test cell's crash and downtime checks; nothing else, and never the production unit.
-      deploy-test,deploy ALL=(root) NOPASSWD: /usr/bin/systemctl kill -s KILL celld@test, /usr/bin/systemctl stop celld@test, /usr/bin/systemctl start celld@test
+      deploy-test,deploy ALL=(root) NOPASSWD: /usr/bin/systemctl kill -s KILL celld@test, \
+        /usr/bin/systemctl stop celld@test, /usr/bin/systemctl start celld@test
     owner: root
     group: root
     mode: "0440"
