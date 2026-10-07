@@ -185,7 +185,9 @@ cells_in_fleet() {
 
 # ---- the VPS lock and the lease ----------------------------------------------------------------
 
-lease_read() { [ -f "$LEASE" ] && cat "$LEASE" || true; }
+lease_read() {
+  if [ -f "$LEASE" ]; then cat "$LEASE" || true; fi
+}
 
 # True when no other holder's lease is live.
 lease_free() {
@@ -220,7 +222,7 @@ do_lease() {
       local ttl="${seconds:-3600}" max=14400
       # The test-cell key holds the lock at most an hour, so it cannot keep a rollback waiting.
       [ "$caller" = deploy ] || max=3600
-      [ "$ttl" -ge 60 ] && [ "$ttl" -le "$max" ] || die "lease --seconds must be 60-$max"
+      if ! { [ "$ttl" -ge 60 ] && [ "$ttl" -le "$max" ]; }; then die "lease --seconds must be 60-$max"; fi
       with_lock
       echo "$holder $(( $(date +%s) + ttl ))" >"$LEASE"
       echo "lease acquired by $holder for $ttl s"
@@ -242,8 +244,11 @@ do_lease() {
 fleet_file() {
   local file="/etc/secbot/fleet-$1.env"
   [ -r "$file" ] || die "fleet '$1' is not set up on this host ($file is missing)"
-  # shellcheck disable=SC1090 # written by Ansible from the owner's environment
-  set -a; . "$file"; set +a
+  set -a
+  # The fleet's settings file, written by Ansible from the owner's environment; its path is a variable.
+  # shellcheck source=/dev/null
+  . "$file"
+  set +a
   : "${CELLD_BUCKET:?}" "${CELLD_ENDPOINT:?}" "${CELLD_LISTEN:?}" "${CELLD_INTERNAL_PORT:?}"
 }
 
@@ -274,7 +279,10 @@ ops_call() {
   cat "$body"
   rm -f "$body"
   echo
-  [ "$status" -ge 200 ] && [ "$status" -lt 300 ] || { echo "secbot-release: $method $path on $fleet answered $status" >&2; return 1; }
+  if ! { [ "$status" -ge 200 ] && [ "$status" -lt 300 ]; }; then
+    echo "secbot-release: $method $path on $fleet answered $status" >&2
+    return 1
+  fi
 }
 
 # Runtime vars the worker config declares with empty values; each must be set for a deploy.
@@ -300,14 +308,15 @@ render_app() {
   cp -a "$app/." "$copy/"
   if ! (
     set -a
-    # shellcheck disable=SC1090 # written by Ansible from the owner's environment
+    # The runtime settings file, written by Ansible from the owner's environment; its path is a variable.
+    # shellcheck source=/dev/null
     . "$file"
     set +a
-    SECBOT_OPERATOR_KEY="$(cat "$key_file")"
-    SECBOT_FLEET_CELLS="$fleet_cells_value"
-    SECBOT_HOUSEHOLD_URL="$household_url"
+    # fill NAME required|optional VALUE: sets NAME's value in the config copy. The computed settings
+    # are passed as values, not as shell variables, so the operator key never enters the environment
+    # of the commands this subshell starts.
     fill() {
-      local name="$1" required="$2" value="${!1:-}"
+      local name="$1" required="$2" value="${3:-}"
       if [ -z "$value" ]; then
         [ "$required" = required ] && { echo "secbot-release: runtime setting $name is empty in $file" >&2; return 1; }
         return 0
@@ -323,10 +332,11 @@ render_app() {
       fi
       sed -i "s|\"$name\": \"\"|\"$name\": \"$value\"|" "$copy/wrangler.jsonc"
     }
-    for name in $RUNTIME_VARS; do fill "$name" required || exit 1; done
-    for name in $OPTIONAL_RUNTIME_VARS SECBOT_OPERATOR_KEY SECBOT_FLEET_CELLS SECBOT_HOUSEHOLD_URL; do
-      fill "$name" optional || exit 1
-    done
+    for name in $RUNTIME_VARS; do fill "$name" required "${!name:-}" || exit 1; done
+    for name in $OPTIONAL_RUNTIME_VARS; do fill "$name" optional "${!name:-}" || exit 1; done
+    fill SECBOT_OPERATOR_KEY optional "$(cat "$key_file")" || exit 1
+    fill SECBOT_FLEET_CELLS optional "$fleet_cells_value" || exit 1
+    fill SECBOT_HOUSEHOLD_URL optional "$household_url" || exit 1
   ); then
     rm -rf "$copy"
     exit 1
@@ -352,10 +362,12 @@ staged_bundle() {
 contract_step() { grep -o '"contractStep": *[0-9]*' "$1" | grep -o '[0-9]*$' || echo 0; }
 
 # The SHA-256 a version was first staged with, kept after its bundle is pruned.
-known_sha() { [ -f "$KNOWN" ] && awk -v v="$1" '$1 == v { print $2; exit }' "$KNOWN" || true; }
+known_sha() {
+  if [ -f "$KNOWN" ]; then awk -v v="$1" '$1 == v { print $2; exit }' "$KNOWN" || true; fi
+}
 
 do_stage() {
-  [ -n "$version" ] && [ -n "$sha256" ] || die "stage needs --version and --sha256"
+  if ! { [ -n "$version" ] && [ -n "$sha256" ]; }; then die "stage needs --version and --sha256"; fi
   with_lock
   # A version is staged once: a second stage of it must carry the same bundle. Without this, the
   # test-cell key could replace a bundle that a production deploy or rollback later trusts.
@@ -387,7 +399,9 @@ do_stage() {
   # Keep the newest $KEEP bundles; a deployed version is never removed.
   local deployed
   deployed="$(readlink -f "$DEPLOYS"/*/current 2>/dev/null | xargs -r -n1 basename || true)"
-  ls -1t "$RELEASES"/*.tar.gz | tail -n +$((KEEP + 1)) | while read -r old; do
+  # Newest first by modification time (ties by name, as ls -t does); find prints the time with the path.
+  find "$RELEASES" -maxdepth 1 -name '*.tar.gz' ! -name '.*' -printf '%T@ %p\n' |
+    sort -t ' ' -k1,1nr -k2 | cut -d ' ' -f2- | tail -n +$((KEEP + 1)) | while IFS= read -r old; do
     local name
     name="$(basename "$old" .tar.gz)"
     grep -qx "$name" <<<"$deployed" || rm -f "$old" "$RELEASES/$name.sha256"
@@ -485,7 +499,7 @@ ledger_sha() {
 }
 
 do_deploy() {
-  [ -n "$env" ] && [ -n "$version" ] || die "deploy needs --env and --version"
+  if ! { [ -n "$env" ] && [ -n "$version" ]; }; then die "deploy needs --env and --version"; fi
   local named=""
   if [ -n "$cells" ]; then
     named="$(normalized_cells "$cells")"
@@ -597,7 +611,7 @@ do_heartbeats() {
 }
 
 do_snapshot() {
-  [ -n "$env" ] && [ -n "$snapshot_id" ] || die "snapshot needs --env and --snapshot-id"
+  if ! { [ -n "$env" ] && [ -n "$snapshot_id" ]; }; then die "snapshot needs --env and --snapshot-id"; fi
   with_lock
   local fleet first=1 answer contract=""
   printf '{"id":"%s","snapshots":[' "$snapshot_id"
@@ -612,7 +626,9 @@ do_snapshot() {
 }
 
 do_restore() {
-  [ -n "$env" ] && [ -n "$cells" ] && [ -n "$snapshot_id" ] || die "restore needs --env, --cells, and --snapshot"
+  if ! { [ -n "$env" ] && [ -n "$cells" ] && [ -n "$snapshot_id" ]; }; then
+    die "restore needs --env, --cells, and --snapshot"
+  fi
   [[ ",$cells," == *",secrets,"* ]] && die "the secrets cell is never restored: rebuild it and rotate its credentials"
   local cell fleet
   cell="$(normalized_cells "$cells")"
@@ -702,7 +718,7 @@ do_state() {
 do_write_delay() {
   test_cell_only
   local count="${writes:-200}" warmup=10 n first=1 ms
-  [ "$count" -ge 1 ] && [ "$count" -le 2000 ] || die "write-delay needs --writes 1-2000"
+  if ! { [ "$count" -ge 1 ] && [ "$count" -le 2000 ]; }; then die "write-delay needs --writes 1-2000"; fi
   with_lock
   local header base
   header="$(operator_header test-cell)"
@@ -768,7 +784,7 @@ do_crash() {
 
 do_down() {
   test_cell_only
-  [ -n "$seconds" ] && [ "$seconds" -ge 1 ] && [ "$seconds" -le 600 ] || die "down needs --seconds 1-600"
+  if ! { [ -n "$seconds" ] && [ "$seconds" -ge 1 ] && [ "$seconds" -le 600 ]; }; then die "down needs --seconds 1-600"; fi
   with_lock
   local from up
   from="$(date +%s%3N)"
