@@ -16,6 +16,21 @@ export {
 } from "./alarm.ts";
 export { type AlertEnv, type Alerts, createAlerts } from "./alerts.ts";
 export {
+  AlwaysNotOffered,
+  type AlwaysOffer,
+  type AnswerChoice,
+  type Answered,
+  HeldCallAnswered,
+  HeldCallLapsed,
+  type HeldCallView,
+  type HeldStatus,
+  LAPSED_TEXT,
+  NoHeldCall,
+  type ReasonSource,
+  type SetTimer,
+  USED_TEXT,
+} from "./approvals.ts";
+export {
   type CellParts,
   errorFields,
   type LogLevel,
@@ -31,8 +46,8 @@ export {
   GUARD_FAILED,
   type GuardCall,
   type GuardLayer,
+  type GuardOptions,
   type GuardStage,
-  HOLD_UNAVAILABLE,
   ruleStage,
   runStages,
   type StageResult,
@@ -63,6 +78,7 @@ export {
   type CellEnv,
   CellHarness,
   type CellStatus,
+  type MissedWithHeld,
   type OpenCellOptions,
   openCellHarness,
   reportFields,
@@ -71,6 +87,7 @@ export { ARGUMENTS_LIMIT, isSecretKey, REDACTED, redact, redactText } from "./re
 export {
   DEFAULT_LEAD_MODEL,
   DEFAULT_SPECIALIST_MODEL,
+  HOLD_MS,
   LEAD_ROLE,
   STARTER_SPECIALISTS,
 } from "./release-defaults.ts";

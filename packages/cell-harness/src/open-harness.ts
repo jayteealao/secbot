@@ -23,11 +23,18 @@ import {
 } from "@secbot/cell-storage";
 import { type ActivityPage, type ActivityQuery, listActivity } from "./activity.ts";
 import { type AlertEnv, createAlerts } from "./alerts.ts";
+import {
+  type AnswerChoice,
+  type Answered,
+  answerHeld,
+  type HeldCallView,
+  listHeld,
+} from "./approvals.ts";
 import { type CellParts, errorFields, logEvent } from "./cell-parts.ts";
 import { type MissedPage, markDelivered, missedPage } from "./delivery.ts";
-import { ModelHealthDoc, RosterDoc } from "./docs.ts";
+import { ApprovalsDoc, ModelHealthDoc, RosterDoc } from "./docs.ts";
 import { createGatewayModels, type GatewayEnv } from "./gateway.ts";
-import { createGuardExtension } from "./guard.ts";
+import { createGuardExtension, type GuardOptions } from "./guard.ts";
 import { createHandoffExtension } from "./handoff.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import { createHistoryExtension } from "./history-search.ts";
@@ -76,6 +83,13 @@ export interface OpenCellOptions {
   readonly routines?: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
   /** Tests: more extensions for every role, after the release ones (the guard stays first). */
   readonly extensions?: readonly Extension[];
+  /** Tests and later inputs: the held-call request id, the hold length, and the lapse timer. */
+  readonly guard?: Pick<GuardOptions, "requestIdOf" | "holdMs" | "setTimer">;
+}
+
+/** Missed messages, and the held calls waiting for an answer (listed first). */
+export interface MissedWithHeld extends MissedPage {
+  readonly held: readonly HeldCallView[];
 }
 
 export interface CellStatus {
@@ -175,9 +189,38 @@ export class CellHarness implements CellParts {
     return addSpecialist(this, input, context);
   }
 
-  /** The oldest messages this device has not seen, and how many newer ones are left. */
-  missed(device: string, context: Context = BACKGROUND_CONTEXT): Promise<MissedPage> {
-    return missedPage(this.harness, this.root, device, context);
+  /**
+   * The held calls waiting for an answer (oldest first), then the oldest messages this device has
+   * not seen, and how many newer ones are left.
+   */
+  async missed(device: string, context: Context = BACKGROUND_CONTEXT): Promise<MissedWithHeld> {
+    const held = await this.heldCalls(context);
+    return { held, ...(await missedPage(this.harness, this.root, device, context)) };
+  }
+
+  /** The held calls waiting for an answer, oldest first; an expired one is lapsed and left out. */
+  heldCalls(context: Context = BACKGROUND_CONTEXT): Promise<HeldCallView[]> {
+    return listHeld(this, this.now(), context);
+  }
+
+  /**
+   * Answers held call `number`: allow once, allow always (adds a person rule), or deny. Refusals:
+   * NoHeldCall, HeldCallLapsed, HeldCallAnswered, AlwaysNotOffered, RefusedChange.
+   */
+  answer(
+    number: number,
+    choice: AnswerChoice,
+    by: { readonly device: string },
+    context: Context = BACKGROUND_CONTEXT,
+  ): Promise<Answered> {
+    return answerHeld(
+      this,
+      number,
+      choice,
+      { person: this.person, device: by.device },
+      this.now(),
+      context,
+    );
   }
 
   markDelivered(device: string, entryId: number, context: Context = BACKGROUND_CONTEXT) {
@@ -185,7 +228,7 @@ export class CellHarness implements CellParts {
   }
 
   session(send: (frame: Frame) => void, delivered?: (entryId: number) => void | Promise<void>) {
-    return openSessionStream(this.harness, send, delivered) as Promise<SessionStream>;
+    return openSessionStream(this.harness, send, delivered, this.now) as Promise<SessionStream>;
   }
 
   async close(context: Context = BACKGROUND_CONTEXT): Promise<void> {
@@ -235,7 +278,7 @@ export async function openCellHarness(
   const telemetry = createTelemetryExtension(person, monitor);
   // The guard is first in every role's list and in the default list, so every role (and a
   // specialist added after start) runs it before any tool call.
-  const guard = createGuardExtension(person, current, { now, timeZone });
+  const guard = createGuardExtension(person, current, { now, timeZone, ...options.guard });
   const extra = options.extensions ?? [];
   const extensions = {
     lead: [guard, lead, handoff, history, household, reminder, routines, telemetry, ...extra],
@@ -321,6 +364,8 @@ async function finishOpen(
   const created = await ensureRoster(cell, context);
   await harness.commit(async (tx) => {
     await tx.doc(ModelHealthDoc);
+    // Sessions watch the held-call list from the start.
+    await tx.doc(ApprovalsDoc);
     // The release owner rule and the default person rules, once per cell (existing cells too).
     await seedRules(tx, now());
   }, context);

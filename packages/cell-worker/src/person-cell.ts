@@ -18,6 +18,7 @@
  */
 import { BACKGROUND_CONTEXT as cellContext } from "@earendil-works/chord/context";
 import {
+  AlwaysNotOffered,
   alarmVerdict,
   CELL_NAME,
   CellAlarm,
@@ -26,6 +27,8 @@ import {
   errorFields,
   type Frame,
   type HeartbeatState,
+  HeldCallAnswered,
+  HeldCallLapsed,
   type HouseholdApplyResult,
   type HouseholdChange,
   type HouseholdClient,
@@ -33,6 +36,7 @@ import {
   heartbeatState,
   logEvent,
   MONTH,
+  NoHeldCall,
   openCellHarness,
   RefusedChange,
   type Rule,
@@ -489,6 +493,13 @@ export class PersonCell {
         return json({ name: body.name, status: "added" }, 201);
       }
       if (route === "/rules") return this.rulesRoute(request, cell, "person");
+      if (request.method === "GET" && route === "/approvals") {
+        return json({ held: await cell.heldCalls() });
+      }
+      const approvalRoute = /^\/approvals\/([1-9][0-9]{0,8})$/.exec(route);
+      if (request.method === "POST" && approvalRoute !== null) {
+        return this.answerRoute(request, cell, Number(approvalRoute[1]), device);
+      }
       if (request.method === "GET" && route === "/activity") {
         const query = activityQuery(url.searchParams);
         if ("error" in query) return json({ error: query.error }, 400);
@@ -520,6 +531,49 @@ export class PersonCell {
     return answerJson(await guardAnswer(() => cell.removeRule(level, body)), 200, (removed) => ({
       removed,
     }));
+  }
+
+  /**
+   * One answer to a held call, from a device of this person: `{"answer": "allow" | "always" |
+   * "deny"}`. The same route serves the command line now and the app later.
+   */
+  private async answerRoute(
+    request: Request,
+    cell: CellHarness,
+    number: number,
+    device: string,
+  ): Promise<Response> {
+    const body = await readJson(request);
+    if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+    const choice = body.answer;
+    if (choice !== "allow" && choice !== "always" && choice !== "deny") {
+      return json({ error: 'send {"answer": "allow" | "always" | "deny"}' }, 400);
+    }
+    try {
+      const answered = await cell.answer(number, choice, { device });
+      // The waiting call continues in this activation; keep the cell up while it runs.
+      this.keepBusy(cell);
+      this.rearmSoon(cell.person);
+      return json({
+        number,
+        status: answered.call.status,
+        answer: choice,
+        agent: answered.call.agent,
+        tool: answered.call.tool,
+        summary: answered.call.summary,
+        answeredBy: answered.answeredBy,
+        rule: answered.rule,
+      });
+    } catch (error) {
+      if (error instanceof NoHeldCall) return json({ error: error.message }, 404);
+      if (error instanceof HeldCallLapsed) return json({ error: "lapsed" }, 409);
+      if (error instanceof HeldCallAnswered) return json({ error: "answered" }, 409);
+      if (error instanceof AlwaysNotOffered) {
+        return json({ error: `refused: ${error.message}` }, 400);
+      }
+      if (error instanceof RefusedChange) return json({ error: `refused: ${error.message}` }, 400);
+      throw error;
+    }
   }
 
   /** RPC (operator routes): both levels of a person's rules. */
@@ -576,10 +630,12 @@ export class PersonCell {
       this.state.acceptWebSocket(pair[1], [device, person]);
       deliver({ type: "connected", lead: person });
       await this.ensureStream(cell);
-      // What the lead said while this device had no open socket comes first, oldest first, so an
-      // answer that committed during a reconnect is shown before the next live answer moves the
-      // device's cursor past it.
-      const { messages, remaining } = await cell.missed(device);
+      // Calls waiting for the person come first, then what the lead said while this device had no
+      // open socket, oldest first, so an answer that committed during a reconnect is shown before
+      // the next live answer moves the device's cursor past it.
+      const { held: waiting, messages, remaining } = await cell.missed(device);
+      const shown = new Set(waiting.map((call) => call.number));
+      for (const call of waiting) deliver({ type: "held", call, count: waiting.length });
       for (const message of messages) {
         deliver({
           type: "missed",
@@ -606,6 +662,8 @@ export class PersonCell {
             newest = frame.entryId;
           }
           deltas = [];
+        } else if (frame.type === "held" && shown.has(frame.call.number)) {
+          // Already sent above with the waiting calls.
         } else {
           deliver(frame);
         }

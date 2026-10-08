@@ -4,7 +4,7 @@
  * person in the device file). It has no option that chooses a specialist: every chat line goes to
  * the lead, and the lead decides on a hand-off.
  *
- *   secbot chat
+ *   secbot chat                             (answer a held call: /allow N, /always N, /deny N)
  *   secbot missed
  *   secbot model list
  *   secbot model set <role> <model-id>
@@ -41,6 +41,7 @@ import { WIDTH, wrap } from "./text.ts";
 
 const USAGE = `usage:
   secbot chat
+      in chat, answer a held call: /allow N, /always N, or /deny N
   secbot missed
   secbot model list
   secbot model set <role> <model-id>

@@ -7,8 +7,9 @@
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type Harness, ROOT_CONVERSATION_ID, watchEvents } from "@earendil-works/pi-durable";
+import { type HeldCallView, readHeld, viewOf } from "./approvals.ts";
 import { leadMessageOf } from "./delivery.ts";
-import { ModelHealthDoc } from "./docs.ts";
+import { ApprovalsDoc, ModelHealthDoc } from "./docs.ts";
 
 export type Frame =
   | { readonly type: "connected"; readonly lead: string }
@@ -35,7 +36,12 @@ export type Frame =
     }
   /** An input line the cell refused; the client stops resending it. */
   | { readonly type: "rejected"; readonly requestId: string; readonly message: string }
-  | { readonly type: "error"; readonly message: string; readonly requestId?: string };
+  | { readonly type: "error"; readonly message: string; readonly requestId?: string }
+  /**
+   * A call held for the person: sent once when it is held, and for every waiting call when a
+   * session opens (before missed messages). `count` is how many calls wait in all.
+   */
+  | { readonly type: "held"; readonly call: HeldCallView; readonly count: number };
 
 /** Every frame type, for checks that the documented protocol matches this union. */
 export const FRAME_TYPES = [
@@ -48,6 +54,7 @@ export const FRAME_TYPES = [
   "missed",
   "rejected",
   "error",
+  "held",
 ] as const satisfies readonly Frame["type"][];
 
 export interface SessionStream {
@@ -62,6 +69,7 @@ export async function openSessionStream(
   harness: Harness,
   send: (frame: Frame) => void,
   delivered: (entryId: number) => void | Promise<void> = () => {},
+  now: () => number = Date.now,
 ): Promise<SessionStream> {
   const context = BACKGROUND_CONTEXT;
   const events = await watchEvents(harness, ROOT_CONVERSATION_ID, context);
@@ -145,10 +153,29 @@ export async function openSessionStream(
       send({ type: "waiting", on: next });
     }
   });
+  // Held calls: each newly held number is sent once per stream. Calls already waiting when the
+  // stream starts are sent by each session as it opens.
+  const approvals = await harness.watchDoc(ApprovalsDoc, context);
+  const announced = new Set<number>(approvals?.value?.pending ?? []);
+  const announce = async (pending: readonly number[]) => {
+    for (const number of pending) {
+      if (announced.has(number)) continue;
+      announced.add(number);
+      const call = await readHeld(harness, number, context);
+      if (call?.status === "pending") {
+        send({ type: "held", call: viewOf(call, now()), count: pending.length });
+      }
+    }
+  };
+  // The cell creates the document when it opens (open-harness.ts), so the watch exists.
+  approvals?.start(async (value) => {
+    await announce(value?.pending ?? []);
+  });
   return {
     async stop() {
       await events.stop();
       await health?.stop();
+      await approvals?.stop();
     },
   };
 }

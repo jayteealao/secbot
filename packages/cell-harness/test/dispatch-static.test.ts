@@ -12,9 +12,17 @@ const DISPATCH_DIRS = [join(packages, "cli", "src"), join(packages, "cell-worker
 /**
  * Not dispatch code: the storage conformance run on the test cell compares assertion errors and
  * carries no messages; the test cell's durability lab holds a scripted model that stands in for
- * the lead's decision, like the tests' responders, and is never deployed to a person cell.
+ * the lead's decision, like the tests' responders, and is never deployed to a person cell. The
+ * held-call answer parser (the CLI's `held.ts`) sends an exact `/allow N`, `/always N`, or
+ * `/deny N` line to the cell's approval route, never to any agent, and leaves every other line to
+ * go to the lead unchanged; `held-chat.test.ts` proves both halves.
  */
-const NOT_DISPATCH = new Set(["cell-assertions.ts", "conformance-cell.ts", "durability-lab.ts"]);
+const NOT_DISPATCH = new Set([
+  "cell-assertions.ts",
+  "conformance-cell.ts",
+  "durability-lab.ts",
+  "held.ts",
+]);
 
 const names = STARTER_SPECIALISTS.map((specialist) => specialist.name).join("|");
 const MESSAGE = "text|message|content|line|input|prompt|brief";

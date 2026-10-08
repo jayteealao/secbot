@@ -32,7 +32,7 @@ device key is what proves the caller.
 | Command | What it does |
 | --- | --- |
 | `secbot chat` | A session with your lead. Answers stream in; a specialist's answer arrives later as `[from <name>] ...` while the session is open. `waiting for the model` means the model gateway is failing and your message is kept. |
-| `secbot missed` | Lead messages this device has not seen yet, oldest first. |
+| `secbot missed` | Calls waiting for your answer first, under `HELD CALLS`, then lead messages this device has not seen yet, oldest first. |
 | `secbot model list` | Each role's model and whether it is the release default or your change. |
 | `secbot model set <role> <model-id>` | Changes a role's model from its next turn. An unknown role or model is refused (exit 1) and nothing changes. |
 | `secbot specialist add <name> --instruction "..." [--model <id>]` | Adds a specialist. The lead can hand work to it from its next turn. |
@@ -47,6 +47,49 @@ each followed by `<argument>=<value>`, for example
 `secbot rules add lead handoff permit --exact specialist=research`. The agent is `all`, `lead`, or
 a specialist's name; the tool is a tool name, `pay` (every pay tool), or `*` (any tool). Inside
 your rules the most specific one decides; between the owner's rules and yours the stricter wins.
+
+### Answer a held call
+
+When an ask-first rule matches, the agent's call waits for you instead of running. In
+`secbot chat` it prints between the lead's output, for example:
+
+```
+[ HELD #1 ] the lead wants to run a tool                   lapses in 23 h 58 m
+  agent      lead
+  tool       handoff
+  arguments  specialist = research
+             brief = "Find direct trains to Leeds on Friday 10 Oct."
+             api_key = [redacted]
+  why held   your rule: lead handoff (any) -> ask first
+  answer     /allow 1     allow once
+             /always 1    allow always; adds: lead handoff
+                          (specialist = research) -> permit
+             /deny 1      deny
+```
+
+Answer with the call's number:
+
+- `/allow 1` runs the call once.
+- `/always 1` runs it and adds the rule shown, so the next matching call is not held. It is not
+  offered when an owner rule asks first for the match; the line then says so.
+- `/deny 1` refuses it; the agent is told `denied by <you>`.
+
+Only an exact `/allow N`, `/always N`, or `/deny N` is an answer. Any other line goes to the lead
+unchanged, and a line that starts like an answer but is not exact (`/allow one`) is not sent:
+`not sent: answer with /allow N, /always N, or /deny N`. A call with no answer in 24 hours lapses
+as a refusal; a late answer prints `[ lapsed ] #1 this request lapsed; nobody answered in 24 h`.
+While the lead waits on its own held call, your chat lines are kept and reach it after the answer;
+specialists, routines, and reminders keep running.
+
+A call held while no session is open is listed first by `secbot missed`, with the answers to type
+in `secbot chat`, and the next `secbot chat` shows it before missed messages:
+
+```
+HELD CALLS
+------------------------------------------------------------------------------
+#1  lead  handoff -> research  your rule: ask first        lapses in 21 h 10 m
+answer in secbot chat: /allow 1, /always 1, /deny 1
+```
 
 ### The owner's views of another person
 

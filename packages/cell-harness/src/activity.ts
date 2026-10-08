@@ -3,8 +3,8 @@
  * pages of a document family. An append is one small document change; a month lists without
  * reading older months; snapshots and restores carry the pages like every other document.
  *
- * Later work adds record kinds (held, answered, lapsed, job) and fields (cost, mode) to the same
- * record shape without a migration.
+ * Held calls add the record kinds held, answered, and lapsed; later work adds jobs and fields
+ * (cost, mode) to the same record shape without a migration.
  */
 import type { Context, JsonValue } from "@earendil-works/chord";
 import type { DocumentReader, Tx } from "@earendil-works/pi-durable";
@@ -15,14 +15,22 @@ export const ACTIVITY_PAGE_SIZE = 200;
 /** How many of the newest record keys the rerun check remembers. */
 export const RECENT_KEYS = 64;
 
-export type ActivityVerdict = "allowed" | "refused";
-export type ActivityLayer = "rule" | "guard";
+export type ActivityVerdict = "allowed" | "refused" | "held" | "denied" | "lapsed";
+export type ActivityLayer = "rule" | "guard" | "person";
+/**
+ * `verdict`: the guard decided a call. `held`: a call waits for the person (key `<task id>:<call
+ * id>`). `answered` and `lapsed`: what became of a held call (keys `approval:<n>:answer` and
+ * `approval:<n>:lapse`, written only in the commit that changes the held call, so each exists once).
+ */
+export type ActivityKind = "verdict" | "held" | "answered" | "lapsed";
 
 export type ActivityRecord = {
   /** `<task id>:<call id>`: the same on a rerun of the same call. */
   key: string;
   at: number;
-  kind: "verdict";
+  kind: ActivityKind;
+  /** The held call's number, on held, answered, and lapsed records. */
+  number?: number;
   /** The calling role: lead, a specialist name, or "other". */
   agent: string;
   tool: string;

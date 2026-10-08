@@ -148,7 +148,7 @@ async function agentsOf(parts: CellParts, context: Context): Promise<Set<string>
 }
 
 function changed(
-  parts: CellParts,
+  parts: Pick<CellParts, "person">,
   level: RuleLevel,
   action: "add" | "remove",
   outcome: "done" | "refused",
@@ -218,6 +218,43 @@ export async function addRule(
     if (error instanceof RefusedChange) changed(parts, level, "add", "refused", given);
     throw error;
   }
+}
+
+/**
+ * Adds the person rule of an "allow always" answer inside the answer's own transaction, with the
+ * checks of addRule: the limit, a duplicate, and a rule looser than an owner rule (RefusedChange,
+ * which aborts the answer, so the call stays held). The rule comes from a real call, so its agent
+ * and tool are known. Returns the stored rule, or undefined when the same rule already exists (a
+ * person added it while the call waited). The caller logs `rules.changed` after the commit.
+ */
+export async function addAllowAlways(
+  tx: Tx,
+  input: RuleInput,
+  now: number,
+): Promise<Rule | undefined> {
+  const rules = await tx.doc(RulesDoc);
+  const existing = rules.person.find((rule) => sameKey(rule, input));
+  if (existing !== undefined) {
+    if (existing.verdict === input.verdict) return undefined;
+    throw new RefusedChange(`this rule already exists: ${ruleText(existing)}`);
+  }
+  if (rules.person.length >= RULES_LIMIT) {
+    throw new RefusedChange(`there are already ${RULES_LIMIT} rules; remove one first`);
+  }
+  const owner = looserThan(input, rules.owner);
+  if (owner !== undefined) {
+    throw new RefusedChange(
+      `this rule is looser than an owner rule:\n  ${ruleText(owner)}\n  Your rules can be stricter than the owner's rules, never looser.`,
+    );
+  }
+  const stored: Rule = { ...input, id: rules.nextId++, source: "allow-always", addedAt: now };
+  rules.person.push(stored);
+  return JSON.parse(JSON.stringify(stored)) as Rule;
+}
+
+/** Logs `rules.changed` for an allow-always rule that a committed answer added. */
+export function allowAlwaysAdded(person: string, rule: Rule): void {
+  changed({ person }, "person", "add", "done", rule);
 }
 
 /** Removes the rule with this agent, tool, and match; the release rule cannot be removed. */

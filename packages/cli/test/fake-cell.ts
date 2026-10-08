@@ -75,6 +75,10 @@ export interface FakeCell {
   /** Called with each new input; answer through the socket. */
   onInput: (input: { text: string; requestId: string }, socket: ServerSocket) => void;
   missed: unknown[];
+  /** Held calls listed first by `/missed` and by `GET /approvals`. */
+  held: unknown[];
+  /** The answer route: number -> [status, body]; an unknown number answers 404. */
+  answers: Record<number, [number, unknown]>;
   /** The guard routes: both rule levels, the activity answer, and a refusal for the next add. */
   rules: { owner: Record<string, unknown>[]; person: Record<string, unknown>[]; timeZone: string };
   activity: Record<string, unknown>;
@@ -92,6 +96,8 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     calls: [],
     onInput: () => {},
     missed: [],
+    held: [],
+    answers: {},
     rules: { owner: [], person: [], timeZone: "UTC" },
     activity: { person, month: "2026-10", timeZone: "UTC", total: 0, records: [], next: null },
     refuseNextAdd: undefined,
@@ -164,7 +170,15 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       if (route === "/missed") {
         const messages = cell.missed;
         cell.missed = [];
-        return reply(200, { messages });
+        return reply(200, { held: cell.held, messages, remaining: 0 });
+      }
+      if (route === "/approvals" && request.method === "GET")
+        return reply(200, { held: cell.held });
+      const answer = /^\/approvals\/(\d+)$/.exec(route);
+      if (answer !== null && request.method === "POST") {
+        const number = Number(answer[1]);
+        const [status, value] = cell.answers[number] ?? [404, { error: `no held call #${number}` }];
+        return reply(status, value);
       }
       if (route === "/models" && request.method === "GET") {
         return reply(200, {

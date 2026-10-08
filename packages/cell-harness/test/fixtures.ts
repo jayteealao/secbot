@@ -134,6 +134,7 @@ export async function openTestCell(
     readonly routines?: OpenCellOptions["routines"];
     readonly storage?: FakeCelldStorage;
     readonly extensions?: OpenCellOptions["extensions"];
+    readonly guard?: OpenCellOptions["guard"];
   } = {},
 ): Promise<TestCell> {
   const storage = options.storage ?? new FakeCelldStorage();
@@ -150,6 +151,7 @@ export async function openTestCell(
       ...(options.onWakeChange === undefined ? {} : { onWakeChange: options.onWakeChange }),
       ...(options.routines === undefined ? {} : { routines: options.routines }),
       ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
+      ...(options.guard === undefined ? {} : { guard: options.guard }),
     });
   const test: TestCell = {
     storage,

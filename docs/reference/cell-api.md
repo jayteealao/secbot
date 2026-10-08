@@ -17,7 +17,7 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | --- | --- | --- | --- | --- |
 | GET | `/status` | none; `?tasks=1` adds the task list | `{version, roles, …}` | 200 |
 | GET | `/alarm` | none | the stored alarm against the earliest stored timer; never re-arms | 200 |
-| GET | `/missed` | none | `{messages: [{kind: "answer", entryId, text} \| {kind: "followup", entryId, from, text}], remaining}`; the oldest 100 after this device's cursor, which moves past them only | 200 |
+| GET | `/missed` | none | `{held: [HeldCall], messages: [{kind: "answer", entryId, text} \| {kind: "followup", entryId, from, text}], remaining}`; `held` lists every call waiting for an answer, oldest first; `messages` are the oldest 100 after this device's cursor, which moves past them only | 200 |
 | GET | `/models` | none | `{roles: [{role, model, source}]}` | 200 |
 | PUT | `/models/{role}` | `{"model": "<id>"}` (at most 16 KiB) | the role's new model | 200, 400 (unknown role or model, bad body), 413 |
 | POST | `/specialists` | `{"name", "instruction", "model"?}` (at most 16 KiB; instruction at most 4000 characters) | `{name, status: "added"}` | 201, 400, 413 |
@@ -26,6 +26,39 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | POST | `/rules` | one rule without an id: `{agent, tool, verdict, match?}` (at most 16 KiB) | `{rule: Rule}` | 201, 400 (`refused: …`), 413 |
 | DELETE | `/rules` | the rule's `{agent, tool, match?}` as it was added | `{removed: Rule}` | 200, 400 (`refused: …`), 404 (no such rule), 413 |
 | GET | `/activity?month=YYYY-MM&before=<n>&limit=<1-200>` | none; `month` defaults to the current month in the cell's time zone, `limit` to 50 | `{person, month, timeZone, total, records: [ActivityRecord], next}`, newest first; pass `next` as `before` for the next older page (`null` when none is left) | 200, 400 (a bad parameter) |
+| GET | `/approvals` | none | `{held: [HeldCall]}`: the calls waiting for an answer, oldest first | 200 |
+| POST | `/approvals/{n}` | `{"answer": "allow" \| "always" \| "deny"}` (at most 16 KiB) | `{number, status, answer, agent, tool, summary, answeredBy, rule}` (`rule` is the person rule allow always added, or `null`) | 200, 400 (a bad body, or `refused: …`), 404 (`no held call #n`), 409 (`{"error": "lapsed"}` or `{"error": "answered"}`), 413 |
+
+### Held calls
+
+A call that an ask-first rule matches waits for the person instead of running. A `HeldCall` is
+`{number, requestId, agent, tool, summary, arguments, reason, reasonSource, always, heldAt,
+expiresAt, remainingMs, status}`:
+
+- `number`: grows per cell and is never reused, so `/allow 1` and the app name the same call, and a
+  late answer reaches the call it names.
+- `requestId`: the request the answer is bound to: `<conversation id>:<tool call id>` for a model's
+  tool call. An answer applies to that request id with the same arguments (compared after the same
+  normalization as rules); a retry under the same request id is not asked again, and other
+  arguments are held again.
+- `arguments`: redacted as in activity records; the fields the rule matched are kept whole.
+- `reason` and `reasonSource`: the rule in its command-line form, and where it came from:
+  `your-rule`, `owner-rule` (later releases add `reviewer` and `reviewer-unavailable`).
+- `always`: `{offered, rule, note}`. Allow always adds `rule`, a person permit rule for the agent,
+  the tool, and an exact match on the matched field (or the tool's key field). It is not offered
+  when the rules with that rule added would still ask first, for example under an owner ask-first
+  rule; `note` then says why, for example `allow always is not offered: an owner rule asks first
+  here`.
+- `heldAt`, `expiresAt`: milliseconds since 1970 by the cell's clock; `remainingMs` is what is left
+  when the answer was made. A call lapses 24 hours after it was held: the agent gets the refusal
+  `this request lapsed; nobody answered in 24 h`, and a later answer is refused with 409.
+- `status`: `pending`, `allowed`, `always`, `denied`, or `lapsed`.
+
+An answer is applied once: allow runs the call once (a second call cannot use the same allow-once
+answer: `this approval was already used`), deny gives the agent `denied by <person>`, and an
+answer never lets a call run that a rule now prohibits. A held call survives a restart; it is not
+asked again after one. While the lead waits on its own held call, chat lines are accepted and
+queued for it; specialists, routines, and reminders keep running.
 
 ### Rules
 
@@ -61,12 +94,22 @@ is part of the release: agents never pay`).
 
 ### Activity records
 
-An `ActivityRecord` is `{key, at, kind: "verdict", agent, tool, verdict, layer, reason, ruleId,
-ruleLevel, arguments, cost}`: one per tool call the guard decided, written before the call runs.
-`verdict` is `allowed` or `refused`; `layer` is `rule` (or `guard` when the guard itself failed and
-refused the call); `arguments` are the call's arguments with secret-looking fields and values
-replaced by `[redacted]` and capped at 2 KiB (the fields a rule matched are kept). Records are kept
-forever. Later releases add record kinds and fields; a client ignores what it does not know.
+An `ActivityRecord` is `{key, at, kind, number?, agent, tool, verdict, layer, reason, ruleId,
+ruleLevel, arguments, cost}`, written before the call runs:
+
+- `kind: "verdict"`: the guard decided a call. `verdict` is `allowed` or `refused`; `layer` is
+  `rule`, `person` (a later call under an earlier answer), or `guard` (the guard itself failed and
+  refused the call).
+- `kind: "held"`: a call waits for the person; `verdict` `held`, `layer` `rule`, `number` the held
+  call's number.
+- `kind: "answered"`: the person answered; `verdict` `allowed` or `denied`, `layer` `person`,
+  `reason` `allowed once by <person>`, `allowed always by <person>`, or `denied by <person>`.
+- `kind: "lapsed"`: nobody answered in 24 hours (`no answer in 24 h; refused`) or the agent's job
+  was aborted (`the agent's job was aborted; refused`); `verdict` `lapsed`, `layer` `person`.
+
+`arguments` are the call's arguments with secret-looking fields and values replaced by
+`[redacted]` and capped at 2 KiB (the fields a rule matched are kept). Records are kept forever.
+Later releases add record kinds and fields; a client ignores what it does not know.
 
 ## The session frames
 
@@ -89,9 +132,11 @@ The cell sends these, as JSON text frames:
 | `followup` | `entryId`, `from`, `text` | A specialist's report relayed by the lead. |
 | `waiting` | `on` | `true` while the model gateway is failing and inputs are kept; `false` when it answers again. |
 | `error` | `message`, `requestId`? | A frame the cell could not read (no `requestId`), or an input it could not take now (with `requestId`; the client resends it after a reconnect). |
+| `held` | `call` (a `HeldCall`), `count` | A call waiting for the person: every waiting call right after `connected`, oldest first, and each new one once when it is held. `count` is how many calls wait. The client answers through `POST /approvals/{n}`; a chat line is never an answer. |
 
-Ordering and reconnects: `connected`, then every `missed` frame, then live frames. An input with
-no `accepted` or `rejected` frame is resent on the next connection under the same `requestId`.
+Ordering and reconnects: `connected`, then a `held` frame for every waiting call, then every
+`missed` frame, then live frames. An input with no `accepted` or `rejected` frame is resent on the
+next connection under the same `requestId`.
 
 ## Host routes
 

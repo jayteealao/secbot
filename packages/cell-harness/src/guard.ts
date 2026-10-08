@@ -2,22 +2,28 @@
  * The guard: one `beforeTool` hook on every role (the first extension of the lead's list, the
  * specialists' list, and the harness default), in front of every tool call. It runs an ordered
  * list of stages; the first stage that refuses or holds decides. This release has one stage, the
- * rule stage; later stages (approvals, the decision model, the reviewer) join the same list in
- * the guard's fixed precedence, after the rules, so no model can loosen a rule.
+ * rule stage; later stages (the decision model, the reviewer) join the same list in the guard's
+ * fixed precedence, after the rules, so no model can loosen a rule.
  *
  * The record exists before the call runs: after the stages decide, the guard commits one activity
  * record, logs one `guard.verdict` event, and then lets the call run or blocks it. Hooks run with
  * no transaction open, before the call's intent commit, and a block settles the call with
  * `Tool call blocked: <reason>` without running it (installed pi-durable 1.0.3,
  * node_modules/.pnpm/@earendil-works+pi-durable@_39a2d184757a80d838824f8a34b421a0/node_modules/
- * @earendil-works/pi-durable/dist/harness/tool.js:35-54). A hook waiting at a crash runs again
- * from the start with the same task and call ids (the crash test in test/crash.test.ts), so the
- * record is keyed by both and a rerun writes none.
+ * @earendil-works/pi-durable/dist/harness/tool.js:35-54). No other hook runs after the guard's, so
+ * the arguments it checks are the arguments that run.
+ *
+ * A hold waits for the person (approvals.ts): the held-call record is committed before the wait,
+ * and the hook's first act is a lookup by request id, because a hook waiting at a crash runs again
+ * from the start with the same task and call ids (the crash test in test/crash.test.ts). An answer
+ * never clears a prohibit: when a held call is allowed, the rule stage runs again before it runs.
  *
  * Fail closed: any error inside the guard blocks the call with "the guard failed; the call was not
- * run" and logs `guard.error`.
+ * run" and logs `guard.error`. An abort (the job was aborted, or the harness is closing) is passed
+ * on, so pi-durable's abort path settles the call; an aborted job lapses its held call first.
  */
 import type { Context, JsonValue } from "@earendil-works/chord";
+import { withoutAbortSignal } from "@earendil-works/chord/context";
 import {
   defineExtension,
   type Extension,
@@ -27,9 +33,28 @@ import {
   ToolTask,
 } from "@earendil-works/pi-durable";
 import { type ActivityRecord, appendRecord, recordOf } from "./activity.ts";
+import {
+  type AlwaysOffer,
+  alwaysOffer,
+  argumentDigest,
+  consumeHeld,
+  defaultSetTimer,
+  findHeld,
+  type HeldCall,
+  heldEvent,
+  holdCall,
+  LAPSED_TEXT,
+  lapseHeld,
+  type ReasonSource,
+  readHeld,
+  type SetTimer,
+  USED_TEXT,
+  waitForAnswer,
+} from "./approvals.ts";
 import { errorFields, logEvent } from "./cell-parts.ts";
-import { RulesDoc } from "./docs.ts";
+import { RosterDoc, RulesDoc } from "./docs.ts";
 import { redactText } from "./redact.ts";
+import { HOLD_MS, LEAD_ROLE } from "./release-defaults.ts";
 import { decide, ruleText } from "./rules.ts";
 import { roleOf } from "./telemetry.ts";
 
@@ -63,6 +88,8 @@ export type StageResult =
       readonly ruleId?: number;
       readonly ruleLevel?: "owner" | "person";
       readonly matched?: readonly string[];
+      /** Who held the call; from the rule level when absent. */
+      readonly reasonSource?: ReasonSource;
     };
 
 /** One step of the guard. A stage reads committed documents only (the hook has no transaction). */
@@ -73,10 +100,6 @@ export type GuardStage = (
 ) => Promise<StageResult>;
 
 export const GUARD_FAILED = "the guard failed; the call was not run";
-
-/** Appended to a held call's reason while held calls cannot be answered yet. */
-export const HOLD_UNAVAILABLE =
-  "this call needs your approval, and approvals are not available in this version yet";
 
 /** The rule stage: deterministic, always first. */
 export const ruleStage: GuardStage = async (call, api, context) => {
@@ -103,6 +126,15 @@ export interface GuardOptions {
   readonly timeZone: string;
   /** The stages in precedence order; the rule stage alone by default. */
   readonly stages?: readonly GuardStage[];
+  /**
+   * The request id a held call is bound to. Default `<conversation id>:<tool call id>`: one model
+   * tool call, the same across a crash rerun. Later inputs (a mail or push id) replace it.
+   */
+  readonly requestIdOf?: (call: GuardCall, api: Pick<HookApi, "conversationId">) => string;
+  /** How long a held call waits; HOLD_MS (24 h) by default. */
+  readonly holdMs?: number;
+  /** Tests: a controlled timer for the lapse. */
+  readonly setTimer?: SetTimer;
 }
 
 /** Runs the stages: the first refuse or hold decides; otherwise the last pass explains. */
@@ -122,6 +154,8 @@ export async function runStages(
   return result;
 }
 
+type Block = { block: string } | undefined;
+
 /** The `secbot-guard` extension for one person's cell. `harness()` returns the open harness. */
 export function createGuardExtension(
   person: string,
@@ -129,6 +163,177 @@ export function createGuardExtension(
   options: GuardOptions,
 ): Extension {
   const stages = options.stages ?? [ruleStage];
+  const holdMs = options.holdMs ?? HOLD_MS;
+  const setTimer = options.setTimer ?? defaultSetTimer;
+  const parts = () => ({ harness: harness(), person, timeZone: options.timeZone });
+
+  /** Commits one verdict record (skipped on a rerun of the same key) and logs `guard.verdict`. */
+  async function verdict(
+    call: GuardCall,
+    key: string,
+    fields: {
+      readonly verdict: "allowed" | "refused";
+      readonly layer: GuardLayer;
+      readonly reason: string;
+      readonly ruleId: number | null;
+      readonly ruleLevel: "owner" | "person" | null;
+      readonly matched: readonly string[];
+    },
+    started: number,
+    context: Context,
+  ): Promise<Block> {
+    await harness().commit(
+      (tx) =>
+        appendRecord(
+          tx,
+          recordOf({
+            key,
+            at: options.now(),
+            kind: "verdict",
+            agent: call.role,
+            tool: call.tool,
+            verdict: fields.verdict,
+            layer: fields.layer,
+            reason: fields.reason,
+            ruleId: fields.ruleId,
+            ruleLevel: fields.ruleLevel,
+            arguments: call.arguments,
+            keep: fields.matched,
+            cost: 0,
+          }),
+          options.timeZone,
+        ),
+      context,
+    );
+    logEvent("guard.verdict", {
+      cell: person,
+      role: call.role,
+      tool: call.tool,
+      verdict: fields.verdict,
+      layer: fields.layer,
+      rule_id: fields.ruleId,
+      reason: redactText(fields.reason),
+      task_id: call.taskId,
+      call_id: call.callId,
+      duration_ms: Date.now() - started,
+    });
+    return fields.verdict === "allowed" ? undefined : { block: fields.reason };
+  }
+
+  /** The allow-always offer for a call the rule stage holds. */
+  async function offerFor(
+    call: GuardCall,
+    matched: readonly string[],
+    api: Pick<HookApi, "snapshot">,
+    context: Context,
+  ): Promise<AlwaysOffer> {
+    const rules = await api.snapshot(RulesDoc, context);
+    const roster = await api.snapshot(RosterDoc, context);
+    const agents = new Set([LEAD_ROLE, ...Object.keys(roster?.specialists ?? {})]);
+    return alwaysOffer(
+      { owner: rules?.owner ?? [], person: rules?.person ?? [] },
+      call,
+      matched,
+      agents,
+    );
+  }
+
+  /** Lapses the held call when the abort came from an aborted job (not from the harness closing). */
+  async function lapseIfJobAborted(held: HeldCall, call: GuardCall, context: Context) {
+    const quiet = withoutAbortSignal(context);
+    try {
+      const { tasks } = await harness().inspect(quiet);
+      const task = tasks.find(({ record }) => String(record.id) === call.taskId)?.record;
+      if (task?.abortRequested === true) {
+        await lapseHeld(parts(), held.number, "aborted", options.now(), quiet);
+      }
+    } catch {
+      // The harness is closing: the record stays pending, and the rerun after the reopen waits again.
+    }
+  }
+
+  /**
+   * Waits for (or applies) the answer to a held call, then runs it once, refuses it, or lapses it.
+   * `held` may come from this call's own hold, a rerun after a crash, or an earlier call under the
+   * same request id and the same arguments.
+   */
+  async function settleHeld(
+    first: HeldCall,
+    call: GuardCall,
+    callKey: string,
+    api: Pick<HookApi, "snapshot">,
+    started: number,
+    context: Context,
+  ): Promise<Block> {
+    const sameCall = first.callKey === callKey;
+    let held = first;
+    while (held.status === "pending") {
+      if (options.now() >= held.expiresAt) {
+        await lapseHeld(parts(), held.number, "expired", options.now(), context);
+      } else {
+        try {
+          await waitForAnswer(
+            harness(),
+            held.number,
+            held.expiresAt - options.now(),
+            setTimer,
+            context,
+          );
+        } catch (error) {
+          if (context.abortSignal?.aborted === true) await lapseIfJobAborted(held, call, context);
+          throw error;
+        }
+      }
+      held = (await readHeld(harness(), held.number, context)) ?? held;
+    }
+    const outcome = (fields: {
+      readonly verdict: "allowed" | "refused";
+      readonly layer: GuardLayer;
+      readonly reason: string;
+    }): Promise<Block> | Block => {
+      // This call's own answer or lapse is already its record; a later call under the same
+      // request id gets a verdict record of its own.
+      if (sameCall) return fields.verdict === "allowed" ? undefined : { block: fields.reason };
+      return verdict(
+        call,
+        callKey,
+        { ...fields, ruleId: held.ruleId, ruleLevel: held.ruleLevel, matched: held.matched },
+        started,
+        context,
+      );
+    };
+    const by = held.answeredBy ?? "the person";
+    if (held.status === "denied") {
+      return outcome({ verdict: "refused", layer: "person", reason: `denied by ${by}` });
+    }
+    if (held.status === "lapsed") {
+      return outcome({ verdict: "refused", layer: "person", reason: LAPSED_TEXT });
+    }
+    // Allowed: an answer never clears a prohibit, so the rule stage runs again first.
+    const recheck = await ruleStage(call, api, context);
+    if (recheck.kind === "refuse") {
+      return verdict(
+        call,
+        `${callKey}:after-answer`,
+        {
+          verdict: "refused",
+          layer: "rule",
+          reason: recheck.reason,
+          ruleId: recheck.ruleId ?? null,
+          ruleLevel: recheck.ruleLevel ?? null,
+          matched: recheck.matched ?? [],
+        },
+        started,
+        context,
+      );
+    }
+    if ((await consumeHeld(harness(), held.number, callKey, context)) === "used") {
+      return outcome({ verdict: "refused", layer: "person", reason: USED_TEXT });
+    }
+    const how = held.status === "always" ? "always" : "once";
+    return outcome({ verdict: "allowed", layer: "person", reason: `allowed ${how} by ${by}` });
+  }
+
   return defineExtension({
     name: "secbot-guard",
     hooks: [
@@ -137,6 +342,7 @@ export function createGuardExtension(
           const started = Date.now();
           let role = "other";
           const ids = { task_id: String(api.taskId), call_id: toolCall.id };
+          const callKey = `${ids.task_id}:${ids.call_id}`;
           try {
             role = await roleOf(api, api.conversationId, context);
             const call: GuardCall = {
@@ -147,46 +353,75 @@ export function createGuardExtension(
               taskId: ids.task_id,
               callId: ids.call_id,
             };
+            const requestId =
+              options.requestIdOf?.(call, api) ?? `${String(api.conversationId)}:${toolCall.id}`;
+            const digest = await argumentDigest(call.arguments);
+            // First, an earlier hold of this request: a rerun after a crash, or a retry. A used
+            // allow-always answer is left to the rule it added.
+            const earlier = await findHeld(api, requestId, digest, context);
+            const reusable =
+              earlier !== undefined &&
+              !(
+                earlier.status === "always" &&
+                earlier.consumedBy !== null &&
+                earlier.consumedBy !== callKey
+              );
+            if (earlier !== undefined && reusable) {
+              return await settleHeld(earlier, call, callKey, api, started, context);
+            }
             const result = await runStages(stages, call, api, context);
-            const reason =
-              result.kind === "hold" ? `${result.reason}; ${HOLD_UNAVAILABLE}` : result.reason;
-            const verdict = result.kind === "pass" ? "allowed" : "refused";
-            await harness().commit(
-              (tx) =>
-                appendRecord(
-                  tx,
-                  recordOf({
-                    key: `${ids.task_id}:${ids.call_id}`,
-                    at: options.now(),
-                    kind: "verdict",
-                    agent: role,
-                    tool: call.tool,
-                    verdict,
-                    layer: result.layer,
-                    reason,
-                    ruleId: result.ruleId ?? null,
-                    ruleLevel: result.ruleLevel ?? null,
-                    arguments: call.arguments,
-                    keep: result.matched ?? [],
-                    cost: 0,
-                  }),
-                  options.timeZone,
-                ),
+            if (result.kind === "hold") {
+              const matched = result.matched ?? [];
+              const always = await offerFor(call, matched, api, context);
+              const heldAt = options.now();
+              const held = await harness().commit(
+                (tx) =>
+                  holdCall(
+                    tx,
+                    {
+                      requestId,
+                      callKey,
+                      digest,
+                      conversationId: String(api.conversationId),
+                      agent: role,
+                      tool: call.tool,
+                      arguments: call.arguments,
+                      matched,
+                      reason: result.reason,
+                      reasonSource:
+                        result.reasonSource ??
+                        (result.ruleLevel === "owner" ? "owner-rule" : "your-rule"),
+                      layer: result.layer,
+                      ruleId: result.ruleId ?? null,
+                      ruleLevel: result.ruleLevel ?? null,
+                      always,
+                      heldAt,
+                      expiresAt: heldAt + holdMs,
+                    },
+                    options.timeZone,
+                  ),
+                context,
+              );
+              heldEvent(person, held);
+              return await settleHeld(held, call, callKey, api, started, context);
+            }
+            return await verdict(
+              call,
+              callKey,
+              {
+                verdict: result.kind === "pass" ? "allowed" : "refused",
+                layer: result.layer,
+                reason: result.reason,
+                ruleId: result.ruleId ?? null,
+                ruleLevel: result.ruleLevel ?? null,
+                matched: result.matched ?? [],
+              },
+              started,
               context,
             );
-            logEvent("guard.verdict", {
-              cell: person,
-              role,
-              tool: call.tool,
-              verdict,
-              layer: result.layer,
-              rule_id: result.ruleId ?? null,
-              reason: redactText(reason),
-              ...ids,
-              duration_ms: Date.now() - started,
-            });
-            return verdict === "allowed" ? undefined : { block: reason };
           } catch (error) {
+            // An abort is not a guard failure: pi-durable settles an aborted call itself.
+            if (context.abortSignal?.aborted === true) throw error;
             logEvent(
               "guard.error",
               { cell: person, role, tool: toolCall.name, ...ids, ...errorFields(error) },
@@ -198,7 +433,7 @@ export function createGuardExtension(
                   appendRecord(
                     tx,
                     recordOf({
-                      key: `${ids.task_id}:${ids.call_id}`,
+                      key: `${callKey}:guard-error`,
                       at: options.now(),
                       kind: "verdict",
                       agent: role,

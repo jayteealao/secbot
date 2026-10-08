@@ -3,11 +3,14 @@
  * request id; the lead's answer streams in; a follow-up that arrives while the session is open is
  * printed with no new command. After a dropped connection the CLI reconnects and resends every
  * line the cell has not acknowledged, under the same request id, so nothing is submitted twice.
- * Messages the lead sent while no session was open arrive first, as `missed` frames.
+ * Calls held for the person arrive first, as `held` frames, then messages the lead sent while no
+ * session was open, as `missed` frames. Only an exact `/allow N`, `/always N`, or `/deny N`
+ * answers a held call; every other line goes to the lead unchanged.
  */
 import { randomUUID } from "node:crypto";
 import type { CellClient } from "../client.ts";
 import type { Io } from "../io.ts";
+import { answerHeld, answerOf, type HeldCall, heldBlock, NOT_SENT } from "./held.ts";
 
 type Frame =
   | { type: "connected"; lead: string }
@@ -18,7 +21,8 @@ type Frame =
   | { type: "waiting"; on: boolean }
   | { type: "missed"; entryId: number; from: string | null; text: string; remaining: number }
   | { type: "rejected"; requestId: string; message: string }
-  | { type: "error"; message: string; requestId?: string };
+  | { type: "error"; message: string; requestId?: string }
+  | { type: "held"; call: HeldCall; count: number };
 
 /** The longest line the cell accepts, in characters. */
 export const INPUT_LIMIT = 20_000;
@@ -37,6 +41,7 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
   let closing = false;
   let midAnswer = false;
   let noted = false;
+  const shown = new Set<number>();
   let delay = options.reconnectMs ?? 1_000;
   let ready!: () => void;
   let connected = new Promise<void>((resolve) => {
@@ -88,6 +93,12 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
       case "error":
         io.stderr(`cell: ${frame.message}\n`);
         break;
+      case "held":
+        // Once per call in this session: a reconnect sends every waiting call again.
+        if (shown.has(frame.call.number)) break;
+        shown.add(frame.call.number);
+        print(`\n${heldBlock(frame.call, frame.count).join("\n")}\n`);
+        break;
     }
   };
 
@@ -137,6 +148,18 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
     if (text === "") continue;
     if (text.length > INPUT_LIMIT) {
       io.stderr(`not sent: a message is at most ${INPUT_LIMIT} characters\n`);
+      continue;
+    }
+    // An answer to a held call goes to the cell's approval route, never to the lead; a line that
+    // only looks like one is not sent at all.
+    const kind = answerOf(text);
+    if (kind.kind === "answer") {
+      print("");
+      await answerHeld(client, io, kind.choice, kind.number);
+      continue;
+    }
+    if (kind.kind === "malformed") {
+      io.stderr(`${NOT_SENT}\n`);
       continue;
     }
     const requestId = `cli-${randomUUID()}`;

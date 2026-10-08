@@ -10,6 +10,7 @@ import {
   type TaskId,
 } from "@earendil-works/pi-durable";
 import type { ActivityRecord } from "./activity.ts";
+import type { HeldCall } from "./approvals.ts";
 import type { Rule } from "./rules.ts";
 
 export type SpecialistRecord = {
@@ -109,4 +110,36 @@ export const ActivityPageDoc = defineDocFamily<{ records: ActivityRecord[] }, nu
   scope: "session",
   family: true,
   initial: () => ({ records: [] }),
+});
+
+/**
+ * `secbot.approvals`: the next held-call number (numbers grow per cell and are never reused, so a
+ * late answer reaches the call it names) and the numbers still waiting for an answer, oldest first.
+ */
+export const ApprovalsDoc = defineDoc<{ nextNumber: number; pending: number[] }>({
+  kind: "secbot.approvals",
+  version: 1,
+  scope: "session",
+  initial: () => ({ nextNumber: 1, pending: [] }),
+});
+
+/** `secbot.approval`: one held call, keyed by its number as text. Records are never pruned. */
+export const ApprovalDoc = defineDocFamily<{ call: HeldCall | null }, null>({
+  kind: "secbot.approval",
+  version: 1,
+  scope: "session",
+  family: true,
+  initial: () => ({ call: null }),
+});
+
+/**
+ * `secbot.approval-key`: the held-call numbers of one request id, oldest first. A hook that runs
+ * again (after a crash, or a retry under the same request id) finds its record here.
+ */
+export const ApprovalKeyDoc = defineDocFamily<{ numbers: number[] }, null>({
+  kind: "secbot.approval-key",
+  version: 1,
+  scope: "session",
+  family: true,
+  initial: () => ({ numbers: [] }),
 });

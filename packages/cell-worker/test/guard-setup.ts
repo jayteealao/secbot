@@ -4,7 +4,7 @@
  * stubs do). A scripted faux model makes tool calls from a chat line that starts with `CALL`.
  */
 import type { JsonValue } from "@earendil-works/chord";
-import { type CellHarness, openCellHarness } from "@secbot/cell-harness";
+import { type CellHarness, type OpenCellOptions, openCellHarness } from "@secbot/cell-harness";
 import {
   createFauxGateway,
   FakeCelldStorage,
@@ -42,7 +42,10 @@ export interface GuardSetup {
   harness(person: string): CellHarness;
 }
 
-export async function guardSetup(fleet?: string): Promise<GuardSetup> {
+export async function guardSetup(
+  fleet?: string,
+  options: { readonly guard?: OpenCellOptions["guard"] } = {},
+): Promise<GuardSetup> {
   const gateway = createFauxGateway(scripted);
   const opened: CellHarness[] = [];
   const cells = new Map<string, PersonCell>();
@@ -56,6 +59,7 @@ export async function guardSetup(fleet?: string): Promise<GuardSetup> {
           version: "v0.0.0-test",
           env: {},
           models: gateway.models,
+          ...(options.guard === undefined ? {} : { guard: options.guard }),
         });
         opened.push(harness);
         byPerson.set(name, harness);

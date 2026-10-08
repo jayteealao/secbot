@@ -14,11 +14,14 @@ import type { Message } from "@earendil-works/pi-ai";
 import type { Harness } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
+import { type HeldCall, heldSection } from "../../cli/src/commands/held.ts";
 import { CellAlarm } from "../src/alarm.ts";
 import { leadMessageOf } from "../src/delivery.ts";
+import { ApprovalDoc, ApprovalsDoc, RosterDoc } from "../src/docs.ts";
 import { messageText } from "../src/history-search.ts";
 import { routineWake } from "../src/routines.ts";
-import { createFauxGateway, openTestCell, type TestCell, until } from "./fixtures.ts";
+import { approvalCrashResponder, CRASH_BRIEF } from "./approval-crash-script.ts";
+import { createFauxGateway, loggedEvents, openTestCell, type TestCell, until } from "./fixtures.ts";
 import {
   createHookProbe,
   FIRST_RUN_MEMO,
@@ -151,6 +154,67 @@ describe("a SIGKILL with a running job, an open transaction, and a pending timer
     expect(await storage.getAlarm()).toBe(summary.wakes[0]?.at);
     expect(summary.wakes.map((wake) => wake.source).sort()).toEqual(["heartbeat", "reminder"]);
     expect((await alarms.report(t.cell)).ok).toBe(true);
+  }, 120_000);
+});
+
+// A SIGKILL while a call is held for the person. The child holds the lead's hand-off and is
+// killed; the reopened cell lists the held call in missed, asks no second time, and the answer runs
+// the hand-off exactly once.
+describe("a SIGKILL while a call is held for the person", () => {
+  it("lists the held call after the restart, asks no second time, and runs it once on the answer", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    directory = await mkdtemp(join(tmpdir(), "secbot-approval-crash-"));
+    const file = join(directory, "cell.sqlite");
+    const { ready, kill } = await runChildUntilReady<{ number: number; requestId: string }>(
+      "approval-crash-child.ts",
+      [file],
+    );
+    expect(ready.number).toBe(1);
+    await kill();
+
+    const storage = new FakeCelldStorage({ file });
+    const gateway = createFauxGateway(approvalCrashResponder);
+    test = await openTestCell({ storage, gateway });
+    const t = test;
+
+    // After the restart: missed lists the held call first, and the CLI shows it under HELD CALLS.
+    const missed = await t.cell.missed("laptop");
+    expect(missed.held.map((call) => [call.number, call.requestId, call.status])).toEqual([
+      [1, ready.requestId, "pending"],
+    ]);
+    const shown = heldSection(missed.held as HeldCall[]);
+    expect(shown.slice(0, 2)).toEqual(["HELD CALLS", "-".repeat(78)]);
+    expect(shown[2]).toMatch(
+      /^#1 {2}lead {2}handoff -> research {2}your rule: ask first +lapses in 2[34] h \d+ m$/,
+    );
+    expect(shown[3]).toBe("answer in secbot chat: /allow 1, /always 1, /deny 1");
+
+    // The hook ran again after the restart and found its record: no second prompt.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(loggedEvents(log.mock.calls).filter((e) => e.event === "approval.held")).toEqual([]);
+    expect((await t.cell.harness.snapshot(ApprovalsDoc, BACKGROUND_CONTEXT))?.nextNumber).toBe(2);
+
+    // The answer runs the hand-off exactly once.
+    await t.cell.answer(1, "allow", { device: "laptop" });
+    const briefs = () =>
+      gateway.requests.filter((r) => r.role === "research" && r.lastText === CRASH_BRIEF).length;
+    await until(() => briefs() === 1, 30_000);
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    expect(briefs()).toBe(1);
+    const roster = await t.cell.harness.snapshot(RosterDoc, BACKGROUND_CONTEXT);
+    expect(Object.keys(roster?.reporters ?? {})).toHaveLength(1);
+    const record = await t.cell.harness.snapshot(ApprovalDoc, "1", BACKGROUND_CONTEXT);
+    expect(record?.call?.status).toBe("allowed");
+    expect(record?.call?.consumedBy).toBe(record?.call?.callKey);
+    // The hand-off ran from the rerun of the same call; still one record and no second prompt.
+    const numbers = (await t.cell.harness.snapshot(ApprovalsDoc, BACKGROUND_CONTEXT))?.nextNumber;
+    expect(numbers).toBe(2);
+    const prompts = loggedEvents(log.mock.calls).filter((e) => e.event === "approval.held");
+    expect(prompts).toEqual([]);
+    // The counts verify keeps as evidence.
+    console.info(
+      `approval crash: records=${(numbers ?? 1) - 1} prompts_after_restart=${prompts.length} runs=${briefs()}`,
+    );
   }, 120_000);
 });
 

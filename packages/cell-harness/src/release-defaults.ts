@@ -53,6 +53,21 @@ export const LEAD_INSTRUCTIONS =
  */
 export const RELEASE_OWNER_RULES = [{ agent: "all", tool: "pay", verdict: "prohibit" }] as const;
 
+/** How long a held call waits for an answer before it lapses as a refusal: 24 hours. */
+export const HOLD_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The argument an "allow always" rule matches when the holding rule matched none: the field that
+ * names what the call acts on. A tool not listed gets a rule with no argument match.
+ */
+export const ALWAYS_KEY_FIELD: Readonly<Record<string, string>> = {
+  handoff: "specialist",
+  household_change: "document",
+  household_read: "document",
+  set_reminder: "text",
+  search_history: "query",
+};
+
 /**
  * A new person's own rules: permit the four tools agents have today (hand-off, household list
  * edits, reminders, history search). Reading the household list matches no rule and passes.

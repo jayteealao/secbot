@@ -16,7 +16,7 @@ import {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ActivityRecord, listActivity } from "../src/activity.ts";
 import { RosterDoc } from "../src/docs.ts";
-import { createGuardExtension, GUARD_FAILED, HOLD_UNAVAILABLE } from "../src/guard.ts";
+import { createGuardExtension, GUARD_FAILED } from "../src/guard.ts";
 import {
   createFauxGateway,
   createHouseholdStub,
@@ -189,17 +189,28 @@ describe("the guard", () => {
     expect((await records(t))[0]).toMatchObject({ verdict: "refused", ruleLevel: "owner" });
   });
 
-  it("refuses an ask-first match for now, saying approvals are not available yet", async () => {
+  it("holds an ask-first match for the person instead of refusing it", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const made: Made[] = [];
     test = await open(made);
     const t = test;
     await t.cell.addRule("person", { agent: "lead", tool: "search_history", verdict: "ask-first" });
-    await chat(t, CALL("search_history", { query: "kale" }), "r-4");
+    await t.cell.submit(CALL("search_history", { query: "kale" }), "r-4");
+    await until(async () => (await t.cell.heldCalls()).length === 1);
+    const [held] = await t.cell.heldCalls();
+    expect(held).toMatchObject({
+      number: 1,
+      agent: "lead",
+      tool: "search_history",
+      reason: "your rule: lead search_history (any) -> ask first",
+      reasonSource: "your-rule",
+      status: "pending",
+    });
+    // Held, not refused: no tool result reached the model yet.
+    expect(lastToolResult(t)).toBe("");
+    await t.cell.answer(1, "deny", { device: "laptop" });
     await until(() => lastToolResult(t) !== "");
-    expect(lastToolResult(t)).toContain(
-      `your rule: lead search_history (any) -> ask first; ${HOLD_UNAVAILABLE}`,
-    );
+    expect(lastToolResult(t)).toContain("Tool call blocked: denied by owner");
   });
 
   it("records every tool call of the lead and of every specialist, one added after start included", async () => {
