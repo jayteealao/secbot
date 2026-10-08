@@ -200,7 +200,7 @@ describe("secbot activity against the cell routes", () => {
         )
       ).code,
     ).toBe(0);
-    const secret = "sk-test-0123456789abcdefghijklmnop";
+    const secret = "sk-test-0123456789abcdefghijklmnop"; // gitleaks:allow (fake test token)
     const cell = setup.cells.get("owner");
     const call = (query: string) =>
       `CALL search_history ${JSON.stringify({ query, api_key: secret })}`;

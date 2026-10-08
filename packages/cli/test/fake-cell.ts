@@ -95,7 +95,7 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     rules: { owner: [], person: [], timeZone: "UTC" },
     activity: { person, month: "2026-10", timeZone: "UTC", total: 0, records: [], next: null },
     refuseNextAdd: undefined,
-    operatorKey: "operator-key-0123456789abcdef",
+    operatorKey: "operator-key-0123456789abcdef", // gitleaks:allow (fake test key)
     close: async () => {},
   };
   const seen = new Set<string>();

@@ -37,6 +37,7 @@ import {
 import { specialistAdd } from "./commands/specialist.ts";
 import { CliError, type Environment } from "./config.ts";
 import { type Io, processIo } from "./io.ts";
+import { WIDTH, wrap } from "./text.ts";
 
 const USAGE = `usage:
   secbot chat
@@ -52,6 +53,19 @@ const USAGE = `usage:
       owner rules for a person: --owner --person <name> (operator key)
   secbot activity [--month YYYY-MM] [--person <name> (operator key)]
 `;
+
+/** `text` with every line wider than 80 columns wrapped, continuing two spaces further in. */
+function fitted(text: string): string {
+  return text
+    .split("\n")
+    .flatMap((row) => {
+      if (row.length <= WIDTH) return [row];
+      const lead = row.length - row.trimStart().length;
+      const [first = "", ...more] = wrap(row.trim(), lead + 2);
+      return [`${" ".repeat(lead)}${first.trimStart()}`, ...more];
+    })
+    .join("\n");
+}
 
 export interface RunOptions {
   readonly environment: Environment;
@@ -129,7 +143,7 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
     return 2;
   } catch (error) {
     if (error instanceof CliError) {
-      io.stderr(`secbot: ${error.message}\n`);
+      io.stderr(fitted(`secbot: ${error.message}\n`));
       return error.exitCode;
     }
     if (
@@ -137,7 +151,7 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
       "code" in error &&
       String(error.code).startsWith("ERR_PARSE_ARGS")
     ) {
-      io.stderr(`secbot: ${error.message}\n${USAGE}`);
+      io.stderr(fitted(`secbot: ${error.message}\n${USAGE}`));
       return 2;
     }
     throw error;

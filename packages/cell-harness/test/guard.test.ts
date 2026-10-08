@@ -319,7 +319,7 @@ describe("the guard", () => {
       verdict: "prohibit",
       match: { kind: "exact", field: "query", value: "secret plans" },
     });
-    const key = "sk-live-0123456789abcdefghij";
+    const key = "sk-live-0123456789abcdefghij"; // gitleaks:allow (fake test token)
     await chat(t, CALL("search_history", { query: "secret plans", api_key: key }), "s-1");
     await chat(t, CALL("search_history", { query: "kale", api_key: key }), "s-2");
     await until(async () => (await records(t)).length === 2);

@@ -246,6 +246,23 @@ describe("secbot rules", () => {
     const result = await secbot(environment, ...argv);
     expect(result.code).toBe(2);
     expect(result.err).toContain(message);
+    expect(everyLineFits(result.err)).toBe(true);
+  });
+
+  it("wraps a long refusal on stderr within 80 columns", async () => {
+    const { environment, fake } = await setup();
+    fake.refuseNextAdd =
+      "refused: this rule already exists: lead search_history (query = a long search about trains to Leeds) -> ask first";
+    const result = await secbot(environment, "rules", "add", "lead", "search_history", "ask-first");
+    expect(result).toEqual({
+      code: 1,
+      out: "",
+      err: [
+        "secbot: refused: this rule already exists: lead search_history (query = a long",
+        "  search about trains to Leeds) -> ask first",
+        "",
+      ].join("\n"),
+    });
   });
 });
 

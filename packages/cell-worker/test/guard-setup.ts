@@ -19,7 +19,7 @@ import { route, type WorkerEnv } from "../src/index.ts";
 import { PersonCell } from "../src/person-cell.ts";
 
 export const KEY = "owner-laptop-key-0123456789abcdef0123456789abcdef";
-export const OPERATOR_KEY = "operator-key-fedcba9876543210fedcba9876543210";
+export const OPERATOR_KEY = "operator-key-fedcba9876543210fedcba9876543210"; // gitleaks:allow (fake test key)
 export const HOST = "cells.example.test";
 
 /** `CALL <tool> <json>` per line makes those tool calls; anything else gets a short answer. */
