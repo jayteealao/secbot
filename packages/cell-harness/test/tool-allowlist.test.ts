@@ -63,4 +63,28 @@ describe("tool lists", () => {
       expect(agent?.extensions[0]?.name).toBe("secbot-guard");
     }
   });
+
+  it("puts the budget check right after the guard on every specialist's list, never the lead's", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    expect(test.cell.extensions.specialist[1]?.name).toBe("secbot-budget");
+    expect(test.cell.extensions.lead.map((extension) => extension.name)).not.toContain(
+      "secbot-budget",
+    );
+    const lead = await test.cell.root.agent(BACKGROUND_CONTEXT);
+    expect(lead.extensions.map((extension) => extension.name)).not.toContain("secbot-budget");
+    await test.cell.addSpecialist({ name: "garden", instruction: "Plants." });
+    const roster = await test.cell.harness.snapshot(RosterDoc, BACKGROUND_CONTEXT);
+    for (const record of Object.values(roster?.specialists ?? {})) {
+      const conversation = await test.cell.harness.conversation(
+        record.conversationId,
+        BACKGROUND_CONTEXT,
+      );
+      const agent = await conversation?.agent(BACKGROUND_CONTEXT);
+      expect(agent?.extensions.slice(0, 2).map((extension) => extension.name)).toEqual([
+        "secbot-guard",
+        "secbot-budget",
+      ]);
+    }
+  });
 });

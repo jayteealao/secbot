@@ -132,3 +132,30 @@ export const DEFAULT_PERSON_RULES = [
   { agent: "all", tool: "set_reminder", verdict: "permit" },
   { agent: "all", tool: "search_history", verdict: "permit" },
 ] as const;
+
+/** A new person's monthly spending limit, in USD. The owner changes it per person. */
+export const DEFAULT_PERSON_LIMIT_USD = 25;
+
+/** The household's developer budget, in USD a month: developer jobs draw on it, not on a person. */
+export const DEFAULT_DEVELOPER_BUDGET_USD = 50;
+
+/** The specialist whose model and guard costs count against the developer budget. */
+export const DEVELOPER_ROLE = "developer";
+
+/** The largest monthly limit or budget the owner can set, in USD. */
+export const LIMIT_MAX_USD = 10_000;
+
+/** The two lines of a limit, in percent: a notice and an owner alert at each. */
+export const LIMIT_LINES = [80, 100] as const;
+
+/**
+ * The tool keys under which the guard adds its own model usage to the calling conversation's
+ * `pi.usage`. A colon cannot appear in a model tool name, so these never mix with a real tool.
+ */
+export const GUARD_USAGE_KEYS = {
+  decision: "secbot-guard:decision",
+  reviewer: "secbot-guard:reviewer",
+} as const;
+
+/** A person cell reports its month to the household budget board at most this often. */
+export const SPEND_REPORT_MIN_MS = 5_000;

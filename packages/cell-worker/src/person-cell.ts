@@ -24,6 +24,7 @@ import {
   CellAlarm,
   type CellEnv,
   type CellHarness,
+  type CostView,
   errorFields,
   type Frame,
   type HeartbeatState,
@@ -406,7 +407,22 @@ export class PersonCell {
     if (this.streaming === undefined) {
       this.streaming = cell.session(
         (frame) => {
-          this.broadcast(frame);
+          const sent = this.broadcast(frame);
+          // A notice shows once per device: a device whose socket took it does not see it again
+          // in `missed` or at its next session open.
+          if (frame.type === "notice" && sent.size > 0) {
+            const seq = frame.notice.seq;
+            const work = Promise.all(
+              [...sent].map((device) => cell.markNoticeSeen(device, seq)),
+            ).catch((error: unknown) => {
+              logEvent(
+                "cli.notice_mark_failed",
+                { cell: cell.person, ...errorFields(error) },
+                "warn",
+              );
+            });
+            this.state.waitUntil?.(work);
+          }
         },
         async (entryId) => {
           // Only devices whose socket took the frame count it as delivered; a send that failed on
@@ -430,7 +446,11 @@ export class PersonCell {
    */
   private keepBusy(cell: CellHarness): void {
     const alarms = this.alarmFor(cell.person);
-    if (alarms.isSettling) return;
+    if (alarms.isSettling) {
+      // The running settle may have taken its last look before this work started.
+      alarms.again();
+      return;
+    }
     const work = alarms.settle(cell).catch((error: unknown) => {
       // Due routines and hand-offs may be left unrun; the next event or alarm settles again.
       logEvent("cell.settle_failed", { cell: cell.person, ...errorFields(error) }, "error");
@@ -493,6 +513,9 @@ export class PersonCell {
         return this.openSession(cell, person, device);
       if (request.method === "GET" && route === "/missed") {
         return json(await cell.missed(device));
+      }
+      if (request.method === "GET" && route === "/cost") {
+        return json(await cell.cost());
       }
       if (request.method === "GET" && route === "/models") {
         return json({ roles: await cell.listRoleModels() });
@@ -651,6 +674,35 @@ export class PersonCell {
     });
   }
 
+  /** RPC (operator routes): a person's month of spend, for the owner. */
+  async costOf(person: string): Promise<GuardAnswer<CostView>> {
+    const cell = await this.cell(person);
+    return guardAnswer(() => cell.cost());
+  }
+
+  /** RPC (operator routes): the owner sets a person's monthly limit; the next call uses it. */
+  async setLimitOf(
+    person: string,
+    usd: unknown,
+  ): Promise<GuardAnswer<{ person: string; limitUsd: number; previousUsd: number }>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => {
+      const result = await cell.setLimit(usd, "owner");
+      // Work waiting above the old limit may run now; keep the cell up while it does.
+      this.keepBusy(cell);
+      this.rearmSoon(person);
+      return { person, ...result };
+    });
+  }
+
+  /** RPC (operator routes): reads the household budget settings again after the owner changed one. */
+  async refreshBudget(person: string): Promise<void> {
+    const cell = await this.cell(person);
+    await cell.refreshHouseholdBudget(householdClientOf(this.env));
+    this.keepBusy(cell);
+    this.rearmSoon(person);
+  }
+
   /** RPC (operator routes): the owner switches the decision model; the next call uses it. */
   async setDecisionModelOf(
     person: string,
@@ -674,7 +726,8 @@ export class PersonCell {
     }
     // The live watch is registered before the missed scan, and frames for this device are held until
     // the missed page is sent: an event that commits while the scan runs is then in the page, in the
-    // held frames, or both (sent once), never in neither.
+    // held frames, or both (sent once), never in neither. The order a person sees: connected, the
+    // usage line, calls waiting for them, limit notices they have not seen, then missed messages.
     const held: Frame[] = [];
     this.handoffs.set(device, held);
     const pair = new Pair();
@@ -688,12 +741,21 @@ export class PersonCell {
       this.state.acceptWebSocket(pair[1], [device, person]);
       deliver({ type: "connected", lead: person });
       await this.ensureStream(cell);
+      deliver({ type: "usage", usage: await cell.usage() });
       // Calls waiting for the person come first, then what the lead said while this device had no
       // open socket, oldest first, so an answer that committed during a reconnect is shown before
       // the next live answer moves the device's cursor past it.
-      const { held: waiting, messages, remaining } = await cell.missed(device);
+      const {
+        held: waiting,
+        notices,
+        waiting: queued,
+        messages,
+        remaining,
+      } = await cell.missed(device);
       const shown = new Set(waiting.map((call) => call.number));
       for (const call of waiting) deliver({ type: "held", call, count: waiting.length });
+      const noticed = new Set(notices.map((notice) => notice.seq));
+      for (const notice of notices) deliver({ type: "notice", notice, waiting: queued });
       for (const message of messages) {
         deliver({
           type: "missed",
@@ -722,6 +784,8 @@ export class PersonCell {
           deltas = [];
         } else if (frame.type === "held" && shown.has(frame.call.number)) {
           // Already sent above with the waiting calls.
+        } else if (frame.type === "notice" && noticed.has(frame.notice.seq)) {
+          // Already sent above with the unseen notices.
         } else {
           deliver(frame);
         }
@@ -730,6 +794,13 @@ export class PersonCell {
       this.framesSent.set(device, framesSent);
       this.handoffs.delete(device);
       if (newest !== undefined) await cell.markDelivered(device, newest);
+      const newestNotice = held
+        .filter((frame) => frame.type === "notice")
+        .reduce(
+          (top, frame) => (frame.type === "notice" ? Math.max(top, frame.notice.seq) : top),
+          0,
+        );
+      if (newestNotice > 0) await cell.markNoticeSeen(device, newestNotice);
     } finally {
       if (this.handoffs.get(device) === held) this.handoffs.delete(device);
     }

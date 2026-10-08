@@ -4,6 +4,9 @@
  * credit-pause decorator the gateway uses. No network, no key. Also an in-process household cell
  * (the real change log on the stand-in) for the household tools.
  */
+
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Usage } from "@earendil-works/pi-ai";
 import {
   type AssistantMessage,
   createModels,
@@ -15,12 +18,15 @@ import {
   type Message,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
+import { UsageDoc } from "@earendil-works/pi-durable";
 import { CelldSqliteDatabase } from "../../cell-storage/src/index.ts";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
+import { BudgetBoardStore } from "../../household-cell/src/budget-board.ts";
 import { ChangeLog } from "../../household-cell/src/change-log.ts";
 import { withCreditPause } from "../src/credit-pause.ts";
 import type { DecisionModels } from "../src/decision-model.ts";
 import type { HouseholdChange, HouseholdClient } from "../src/household-tools.ts";
+import { addGuardUsage, costOnlyUsage, ledgerConversations } from "../src/month-ledger.ts";
 import {
   type CellEnv,
   type CellHarness,
@@ -223,20 +229,56 @@ export async function until(check: () => boolean | Promise<boolean>, ms = 10_000
 export interface HouseholdStub extends HouseholdClient {
   readonly log: ChangeLog;
   readonly changes: HouseholdChange[];
+  /** The household budget board on the same stand-in database. */
+  readonly board: BudgetBoardStore;
 }
 
-export function createHouseholdStub(): HouseholdStub {
-  const log = new ChangeLog(new CelldSqliteDatabase(new FakeCelldStorage()));
+export function createHouseholdStub(now: () => number = Date.now): HouseholdStub {
+  const database = new CelldSqliteDatabase(new FakeCelldStorage());
+  const log = new ChangeLog(database);
+  const board = new BudgetBoardStore(database, now);
   const changes: HouseholdChange[] = [];
   return {
     log,
     changes,
+    board,
     read: (document) => log.read(document),
     apply: (change) => {
       changes.push(change);
       return log.apply(change);
     },
+    budget: () => board.board(),
+    reportSpend: (report) => board.reportSpend(report),
+    setBudget: (change) => board.setBudget(change),
+    alertSent: (outcome) => board.alertSent(outcome),
   };
+}
+
+/**
+ * Adds `usd` of spend to a role's conversation ledger in one commit, as a model response (layer
+ * `agent`) or a guard call (`decision`, `reviewer`) would; the limit watch sees it like any other.
+ */
+export async function addSpend(
+  cell: CellHarness,
+  usd: number,
+  options: { readonly role?: string; readonly layer?: "agent" | "decision" | "reviewer" } = {},
+): Promise<void> {
+  const role = options.role ?? "lead";
+  const conversation = (await ledgerConversations(cell.harness, BACKGROUND_CONTEXT)).find(
+    (each) => each.role === role,
+  );
+  if (conversation === undefined) throw new Error(`no conversation for ${role}`);
+  const layer = options.layer ?? "agent";
+  await cell.harness.commit(async (tx) => {
+    if (layer !== "agent") {
+      await addGuardUsage(tx, conversation.id, layer, costOnlyUsage(usd));
+      return;
+    }
+    const models = (await tx.doc(UsageDoc, conversation.id)).models as Record<string, Usage>;
+    const known = models["test/spend"];
+    if (known === undefined) models["test/spend"] = costOnlyUsage(usd);
+    else known.cost.total += usd;
+  }, BACKGROUND_CONTEXT);
 }
 
 /** Every JSON log line written through console.log while `spy` was active. */

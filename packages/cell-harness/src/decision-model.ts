@@ -19,6 +19,7 @@ import type {
   ClassifierChoiceQuestion,
   ClassifierModel,
   JsonObject,
+  Usage,
 } from "@earendil-works/pi-ai";
 import {
   classifySystemOne,
@@ -47,6 +48,8 @@ export interface DecisionAnswer {
   /** The model id the service returned (dated), or the requested id when it returned none. */
   readonly model: string;
   readonly costUsd: number;
+  /** The request's usage, as the service priced it; the guard adds it to the cell's ledger. */
+  readonly usage?: Usage;
   readonly durationMs: number;
 }
 
@@ -65,6 +68,7 @@ export class DecisionFailure extends Error {
     readonly durationMs: number,
     /** A failed request may still be billed (pi-ai sets usage before it parses the answers). */
     readonly costUsd = 0,
+    readonly usage?: Usage,
   ) {
     super(`decision model failed: ${cause}`);
     this.name = "DecisionFailure";
@@ -205,16 +209,18 @@ export function createDecisionModel(
         },
       );
       const costUsd = result.usage?.cost.total ?? 0;
+      const usage = result.usage;
       if (result.stopReason !== "stop") {
         throw new DecisionFailure(
           causeOf(result.errorMessage ?? "", result.stopReason === "aborted"),
           elapsed(),
           costUsd,
+          usage,
         );
       }
       const answer = result.answers.risk;
       if (answer?.type !== "choice" || !CHOICES.includes(answer.choice as DecisionChoice)) {
-        throw new DecisionFailure("unknown-choice", elapsed(), costUsd);
+        throw new DecisionFailure("unknown-choice", elapsed(), costUsd, usage);
       }
       const score = markScore(answer.probabilities);
       return {
@@ -223,6 +229,7 @@ export function createDecisionModel(
         score,
         model: returned ?? model.id,
         costUsd,
+        ...(usage === undefined ? {} : { usage }),
         durationMs: elapsed(),
       };
     },

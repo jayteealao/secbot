@@ -21,6 +21,8 @@ import { createRegistry, defineExtension, Harness } from "@earendil-works/pi-dur
 import {
   type AlarmReport,
   alarmVerdict,
+  type BudgetBoard,
+  type BudgetSettings,
   CellAlarm,
   createHeartbeatRoutine,
   ensureRoutines,
@@ -34,6 +36,7 @@ import {
   logEvent,
   type NextWake,
   nextWake,
+  type ReportSpendResult,
   reportFields,
   type WakeSummary,
   wakesOf,
@@ -46,6 +49,7 @@ import {
   CellSnapshots,
   openCelldStorageWithDatabase,
 } from "@secbot/cell-storage";
+import { BudgetBoardStore } from "./budget-board.ts";
 import { ChangeLog, type HistoryEntry } from "./change-log.ts";
 
 export const HOUSEHOLD_CELL_NAME = "household";
@@ -70,6 +74,7 @@ export interface HouseholdCellOptions {
 
 interface Opened {
   readonly log: ChangeLog;
+  readonly board: BudgetBoardStore;
   readonly harness: Harness;
   readonly database: CelldSqliteDatabase;
   readonly wakes: () => Promise<{
@@ -145,6 +150,7 @@ export class HouseholdCell {
       harness.resume();
       const opened: Opened = {
         log,
+        board: new BudgetBoardStore(database, this.now),
         harness,
         database,
         wakes: async () => {
@@ -199,6 +205,34 @@ export class HouseholdCell {
   /** RPC: the document's change log, in order (or one item's). */
   async history(document: string, itemId?: string): Promise<HistoryEntry[]> {
     return (await this.open()).log.history(document, itemId);
+  }
+
+  /** RPC: the household budget board (the settings and each cell's newest month report). */
+  async budget(): Promise<BudgetBoard> {
+    return (await this.open()).board.board();
+  }
+
+  /**
+   * RPC: a person cell's month report, once per operation id; the answer says which developer
+   * alerts that cell sends.
+   */
+  async reportSpend(report: unknown): Promise<ReportSpendResult> {
+    return (await this.open()).board.reportSpend(report);
+  }
+
+  /** RPC: the owner changes the household time zone or the developer budget. */
+  async setBudget(change: unknown): Promise<BudgetSettings> {
+    const settings = await (await this.open()).board.setBudget(change);
+    logEvent("budget.settings", {
+      time_zone: settings.timeZone,
+      developer_limit_usd: settings.developerLimitUsd,
+    });
+    return settings;
+  }
+
+  /** RPC: a claimed developer alert went out, or did not and can be claimed again. */
+  async alertSent(outcome: unknown): Promise<void> {
+    await (await this.open()).board.alertSent(outcome);
   }
 
   /** RPC: up with the release version (check:cells). */

@@ -23,6 +23,7 @@ import {
   type TaskRuntime,
   type Tx,
 } from "@earendil-works/pi-durable";
+import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
 import { ROUTINE_KIND_PREFIX } from "./wake-times.ts";
 
@@ -61,6 +62,13 @@ export interface RoutineSpec<P extends JsonObject> {
   readonly name: string;
   /** Milliseconds between runs; absent for a one-off routine. */
   readonly every?: number;
+  /**
+   * False for a routine that spends nothing (the heartbeat): it runs above a limit. Every other
+   * routine waits above the person's limit before its effect (budget-gate.ts).
+   */
+  readonly spends?: boolean;
+  /** What the waiting list shows for one run; `routine <name>` by default. */
+  describe?(payload: P): string;
   run(fire: RoutineFire<P>): Promise<RoutineResult>;
 }
 
@@ -68,6 +76,8 @@ export interface RoutineHooks {
   readonly cell: string;
   /** Called after every commit that changes a wake time, so the cell re-arms its alarm. */
   readonly onWakeChange?: () => void;
+  /** The cell's budget gate; spending routines wait on it above the person's limit. */
+  readonly gate?: () => BudgetWaiter | undefined;
 }
 
 export interface Routine<P extends JsonObject = JsonObject> {
@@ -93,6 +103,17 @@ export function defineRoutine<P extends JsonObject>(
       wait: async (routine, runtime, context) => {
         const { wakeAt } = routine.state.checkpoint;
         await runtime.sleep(wakeAt, context);
+        if (spec.spends !== false) {
+          await hooks.gate?.()?.waitUntilUnder(
+            {
+              budget: "person",
+              taskId: String(routine.id),
+              what:
+                spec.describe?.(routine.input.payload) ?? `routine ${spec.name.replace(/-/g, " ")}`,
+            },
+            context,
+          );
+        }
         const firedAt = runtime.now();
         let result: RoutineResult;
         try {

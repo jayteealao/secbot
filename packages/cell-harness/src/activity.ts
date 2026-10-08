@@ -7,6 +7,7 @@
  * (cost, mode) to the same record shape without a migration.
  */
 import type { Context, JsonValue } from "@earendil-works/chord";
+import type { Usage } from "@earendil-works/pi-ai";
 import type { DocumentReader, Tx } from "@earendil-works/pi-durable";
 import { ActivityDoc, ActivityPageDoc } from "./docs.ts";
 import { ARGUMENTS_LIMIT, redact, redactText } from "./redact.ts";
@@ -82,6 +83,8 @@ export type GuardModelFields = {
   readonly costUsd: number;
   /** Shadow mode: the reviewer's block or ask, which did not stop the call. */
   readonly verdictWord?: "would block" | "would ask";
+  /** Each layer's usage, added to the calling conversation's `pi.usage` with the record. */
+  readonly usage?: { readonly decision?: Usage; readonly reviewer?: Usage };
 };
 
 /** The record fields of the model layers' answer. */

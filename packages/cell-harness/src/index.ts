@@ -16,7 +16,14 @@ export {
   type CellAlarmOptions,
   type WakeSource,
 } from "./alarm.ts";
-export { type AlertEnv, type Alerts, createAlerts } from "./alerts.ts";
+export {
+  type AlertEnv,
+  type Alerts,
+  createAlerts,
+  type LimitAlert,
+  limitDescription,
+  limitSummary,
+} from "./alerts.ts";
 export {
   AlwaysNotOffered,
   type AlwaysOffer,
@@ -32,6 +39,13 @@ export {
   type SetTimer,
   USED_TEXT,
 } from "./approvals.ts";
+export {
+  BudgetGate,
+  type BudgetWaiter,
+  createBudgetExtension,
+  shortText,
+  type WaitRequest,
+} from "./budget-gate.ts";
 export {
   type CellParts,
   errorFields,
@@ -58,7 +72,7 @@ export {
   UNTRUSTED_NOTE,
 } from "./decision-model.ts";
 export type { LeadMessage, MissedPage } from "./delivery.ts";
-export type { GuardMode } from "./docs.ts";
+export type { BudgetName, GuardMode, LimitNotice } from "./docs.ts";
 export { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 export {
   createGuardExtension,
@@ -92,6 +106,10 @@ export {
   pingRoutineHeartbeat,
 } from "./heartbeat.ts";
 export {
+  type BudgetAlertSent,
+  type BudgetAlertStatus,
+  type BudgetBoard,
+  type BudgetSettings,
   CELL_NAME,
   DEFAULT_HOUSEHOLD_DOCUMENT,
   HOUSEHOLD_DOCUMENT,
@@ -100,9 +118,34 @@ export {
   type HouseholdClient,
   type HouseholdDocument,
   type HouseholdItem,
+  type ReportSpendResult,
+  type SpendReport,
 } from "./household-contract.ts";
+export {
+  type BudgetLine,
+  type BudgetState,
+  budgetLine,
+  budgetState,
+  type CostView,
+  checkAmount,
+  LimitWatch,
+  type LineState,
+  lineOf,
+  type UsageLine,
+  type WaitingItem,
+} from "./limits.ts";
 export type { RoleModel } from "./model-map.ts";
 export {
+  addGuardUsage,
+  type LayerSpend,
+  localMonthStart,
+  type MonthSpend,
+  monthBounds,
+  readMonth,
+  zoneOffsetMs,
+} from "./month-ledger.ts";
+export {
+  type CellBudget,
   type CellEnv,
   CellHarness,
   type CellStatus,
@@ -116,12 +159,18 @@ export {
   DECISION_MODELS,
   DECISION_STATE_LIMIT,
   DEFAULT_DECISION_ADAPTER,
+  DEFAULT_DEVELOPER_BUDGET_USD,
   DEFAULT_LEAD_MODEL,
+  DEFAULT_PERSON_LIMIT_USD,
   DEFAULT_REVIEWER_MODEL,
   DEFAULT_SPECIALIST_MODEL,
+  DEVELOPER_ROLE,
   type DecisionAdapter,
+  GUARD_USAGE_KEYS,
   HOLD_MS,
   LEAD_ROLE,
+  LIMIT_LINES,
+  LIMIT_MAX_USD,
   MARK_THRESHOLDS,
   REVIEWER_ROLE,
   STARTER_SPECIALISTS,

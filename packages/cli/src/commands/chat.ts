@@ -5,12 +5,15 @@
  * line the cell has not acknowledged, under the same request id, so nothing is submitted twice.
  * Calls held for the person arrive first, as `held` frames, then messages the lead sent while no
  * session was open, as `missed` frames. Only an exact `/allow N`, `/always N`, or `/deny N`
- * answers a held call; every other line goes to the lead unchanged.
+ * answers a held call; every other line goes to the lead unchanged. The usage line (the month's
+ * spend against the person's limit) prints on connect and after each answer; a limit notice prints
+ * when a limit line is reached, or at connect when this device has not seen it.
  */
 import { randomUUID } from "node:crypto";
 import type { CellClient } from "../client.ts";
 import type { Io } from "../io.ts";
 import { answerHeld, answerOf, type HeldCall, heldBlock, NOT_SENT } from "./held.ts";
+import { type Notice, noticeBlock, type Usage, usageLine, type Waiting } from "./usage.ts";
 
 type Frame =
   | { type: "connected"; lead: string }
@@ -22,7 +25,9 @@ type Frame =
   | { type: "missed"; entryId: number; from: string | null; text: string; remaining: number }
   | { type: "rejected"; requestId: string; message: string }
   | { type: "error"; message: string; requestId?: string }
-  | { type: "held"; call: HeldCall; count: number };
+  | { type: "held"; call: HeldCall; count: number }
+  | { type: "usage"; usage: Usage }
+  | { type: "notice"; notice: Notice; waiting: Waiting[] };
 
 /** The longest line the cell accepts, in characters. */
 export const INPUT_LIMIT = 20_000;
@@ -42,6 +47,7 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
   let midAnswer = false;
   let noted = false;
   const shown = new Set<number>();
+  const noticed = new Set<number>();
   let delay = options.reconnectMs ?? 1_000;
   let ready!: () => void;
   let connected = new Promise<void>((resolve) => {
@@ -98,6 +104,15 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
         if (shown.has(frame.call.number)) break;
         shown.add(frame.call.number);
         print(`\n${heldBlock(frame.call, frame.count).join("\n")}\n`);
+        break;
+      case "usage":
+        print(`${usageLine(frame.usage)}\n`);
+        break;
+      case "notice":
+        // Once per notice in this session, one blank line before it.
+        if (noticed.has(frame.notice.seq)) break;
+        noticed.add(frame.notice.seq);
+        print(`\n${noticeBlock(frame.notice, frame.waiting ?? []).join("\n")}\n`);
         break;
     }
   };

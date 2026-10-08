@@ -13,6 +13,8 @@
  *   secbot rules list | add | remove        (owner rules: --owner --person <name>)
  *   secbot activity [--month YYYY-MM]       (another person: --person <name>)
  *   secbot mode show | set | decision <person>   (operator key)
+ *   secbot cost [--person <name> | --owner]  (another person or the household: operator key)
+ *   secbot limits show | set <person> <usd> | developer <usd> | zone <IANA>   (operator key)
  *
  * The owner's views of another person use the operator key (SECBOT_OPERATOR_KEY, or operator.json
  * in the config folder), sent only to the operator routes.
@@ -24,7 +26,9 @@ import { parseArgs } from "node:util";
 import { CellClient, OperatorClient } from "./client.ts";
 import { activity } from "./commands/activity.ts";
 import { chat } from "./commands/chat.ts";
+import { costHousehold, costOf, costOwn } from "./commands/cost.ts";
 import { deviceNew } from "./commands/device.ts";
+import { limits } from "./commands/limits.ts";
 import { missed } from "./commands/missed.ts";
 import { mode } from "./commands/mode.ts";
 import { modelList, modelSet } from "./commands/model.ts";
@@ -60,6 +64,14 @@ const USAGE = `usage:
   secbot mode decision <person> clef|jev            (operator key)
       shadow: the decision model and the reviewer only record what they
       would do; rules and ask-first rules always apply
+  secbot cost [--person <name> | --owner]           (another person, or the
+      household: operator key)
+  secbot limits show                                (operator key)
+  secbot limits set <person> <usd>                  (operator key)
+  secbot limits developer <usd>                     (operator key)
+  secbot limits zone <IANA time zone>               (operator key)
+      above a limit, hand-offs, routines, and reminders wait; chat with the
+      lead continues; nothing is dropped
 `;
 
 /** `text` with every line wider than 80 columns wrapped, continuing two spaces further in. */
@@ -144,6 +156,25 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
     }
     if (command === "mode") {
       return await mode(() => OperatorClient.from(environment, options.fetch), io, sub, rest);
+    }
+    if (command === "cost" && sub === undefined) {
+      if (values.owner === true && values.person !== undefined) {
+        throw new CliError("secbot cost takes --person <name> or --owner, not both", 2);
+      }
+      if (values.owner === true) {
+        return await costHousehold(await OperatorClient.from(environment, options.fetch), io);
+      }
+      if (values.person !== undefined) {
+        return await costOf(
+          await OperatorClient.from(environment, options.fetch),
+          io,
+          values.person,
+        );
+      }
+      return await costOwn(await client(), io);
+    }
+    if (command === "limits") {
+      return await limits(() => OperatorClient.from(environment, options.fetch), io, sub, rest);
     }
     if (command === "activity" && sub === undefined) {
       const target =

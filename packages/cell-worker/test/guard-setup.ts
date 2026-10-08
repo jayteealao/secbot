@@ -4,7 +4,12 @@
  * stubs do). A scripted faux model makes tool calls from a chat line that starts with `CALL`.
  */
 import type { JsonValue } from "@earendil-works/chord";
-import { type CellHarness, type OpenCellOptions, openCellHarness } from "@secbot/cell-harness";
+import {
+  type CellEnv,
+  type CellHarness,
+  type OpenCellOptions,
+  openCellHarness,
+} from "@secbot/cell-harness";
 import {
   createFauxGateway,
   FakeCelldStorage,
@@ -16,9 +21,10 @@ import {
   passingDecision,
   type Responder,
 } from "@secbot/cell-harness/testing";
+import { HouseholdCell } from "@secbot/household-cell";
 import { sha256Hex } from "../src/device-auth.ts";
 import { route, type WorkerEnv } from "../src/index.ts";
-import { PersonCell } from "../src/person-cell.ts";
+import { type HouseholdStubLike, PersonCell } from "../src/person-cell.ts";
 
 export const KEY = "owner-laptop-key-0123456789abcdef0123456789abcdef";
 export const OPERATOR_KEY = "operator-key-fedcba9876543210fedcba9876543210"; // gitleaks:allow (fake test key)
@@ -40,6 +46,8 @@ export interface GuardSetup {
   readonly cells: Map<string, PersonCell>;
   readonly opened: CellHarness[];
   readonly gateway: FauxGateway;
+  /** The household cell, when the setup has one (`household: true`). */
+  readonly household?: HouseholdCell;
   /** The open harness of a person (opened by its first request). */
   harness(person: string): CellHarness;
 }
@@ -49,8 +57,28 @@ export async function guardSetup(
   options: {
     readonly guard?: OpenCellOptions["guard"];
     readonly respond?: Responder;
+    /** A household cell (with its budget board) behind the person cells' binding. */
+    readonly household?: boolean;
+    /** The person cells' environment (for example the alert stand-in's settings). */
+    readonly cellEnv?: CellEnv;
+    /** The fetch the person cells use for alerts. */
+    readonly fetch?: typeof fetch;
   } = {},
 ): Promise<GuardSetup> {
+  const household =
+    options.household === true
+      ? new HouseholdCell({ storage: new FakeCelldStorage() }, {})
+      : undefined;
+  const householdBinding =
+    household === undefined
+      ? {}
+      : {
+          HOUSEHOLD_CELL: {
+            idFromName: (name: string) => name,
+            // The household cell's methods are its RPC surface, as celld's stub exposes them.
+            get: () => household as unknown as HouseholdStubLike,
+          },
+        };
   const gateway = createFauxGateway(options.respond ?? scripted);
   const opened: CellHarness[] = [];
   const cells = new Map<string, PersonCell>();
@@ -58,20 +86,26 @@ export async function guardSetup(
   const cellFor = (person: string) => {
     let cell = cells.get(person);
     if (cell === undefined) {
-      cell = new PersonCell({ storage: new FakeCelldStorage() }, {}, async (storage, name) => {
-        const harness = await openCellHarness(storage, {
-          person: name,
-          version: "v0.0.0-test",
-          env: {},
-          models: gateway.models,
-          // A passing decision model unless a test gives its own: the suites that are not about
-          // the model layers keep their request counts.
-          guard: { decision: passingDecision, ...options.guard },
-        });
-        opened.push(harness);
-        byPerson.set(name, harness);
-        return harness;
-      });
+      cell = new PersonCell(
+        { storage: new FakeCelldStorage() },
+        householdBinding,
+        async (storage, name, extras) => {
+          const harness = await openCellHarness(storage, {
+            person: name,
+            version: "v0.0.0-test",
+            env: options.cellEnv ?? {},
+            models: gateway.models,
+            ...(extras.household === undefined ? {} : { household: extras.household }),
+            ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+            // A passing decision model unless a test gives its own: the suites that are not about
+            // the model layers keep their request counts.
+            guard: { decision: passingDecision, ...options.guard },
+          });
+          opened.push(harness);
+          byPerson.set(name, harness);
+          return harness;
+        },
+      );
       cells.set(person, cell);
     }
     return cell;
@@ -82,12 +116,14 @@ export async function guardSetup(
     SECBOT_OPERATOR_KEY: OPERATOR_KEY,
     ...(fleet === undefined ? {} : { SECBOT_FLEET_CELLS: fleet }),
     PERSON_CELL: { idFromName: (name) => name, get: (id) => cellFor(String(id)) },
+    ...householdBinding,
   };
   return {
     env,
     cells,
     opened,
     gateway,
+    ...(household === undefined ? {} : { household }),
     harness: (person) => {
       const found = byPerson.get(person);
       if (found === undefined) throw new Error(`${person} is not open`);
@@ -104,4 +140,5 @@ export const workerFetch =
 
 export async function closeAll(setup: GuardSetup): Promise<void> {
   for (const harness of setup.opened) await harness.close();
+  await setup.household?.close();
 }

@@ -171,3 +171,121 @@ export const ApprovalKeyDoc = defineDocFamily<{ numbers: number[] }, null>({
   family: true,
   initial: () => ({ numbers: [] }),
 });
+
+/**
+ * `secbot.month-ledger`: the current month of the cell's spend. `pi.usage` holds totals that only
+ * grow, so a month is the current total less `baseline`: the cost of every bucket key of every
+ * conversation when the month began (`m:<provider/model>` or `t:<tool>`). A conversation with no
+ * baseline counts whole. `hours` is the month's spend by local hour and role (the app's heat
+ * chart), `seen` each conversation's total the hour chart last counted. `nextZone` is a household
+ * time zone that applies from the next month.
+ */
+export const MonthLedgerDoc = defineDoc<{
+  month: string;
+  zone: string;
+  startsAt: number;
+  endsAt: number;
+  nextZone: string | null;
+  baseline: Record<string, Record<string, number>>;
+  hours: Record<string, Record<string, number>>;
+  seen: Record<string, number>;
+}>({
+  kind: "secbot.month-ledger",
+  version: 1,
+  scope: "session",
+  initial: () => ({
+    month: "",
+    zone: "UTC",
+    startsAt: 0,
+    endsAt: 0,
+    nextZone: null,
+    baseline: {},
+    hours: {},
+    seen: {},
+  }),
+});
+
+/** One owner alert of a limit line: claimed before the send, then sent (or released on failure). */
+export type LimitAlert = { claimedAt: number; sentAt: number | null };
+
+/**
+ * `secbot.limits`: this person's monthly limit (null: the release default), who set it, and the
+ * limit lines already reached, keyed `<month>:<budget>:<limit>:<line>`: `noticed` once per line
+ * (its notice and `limit.crossed`), `alerts` the owner alert of that line.
+ */
+export const LimitsDoc = defineDoc<{
+  limitUsd: number | null;
+  setAt: number | null;
+  setBy: string | null;
+  noticed: Record<string, number>;
+  alerts: Record<string, LimitAlert>;
+}>({
+  kind: "secbot.limits",
+  version: 1,
+  scope: "session",
+  initial: () => ({ limitUsd: null, setAt: null, setBy: null, noticed: {}, alerts: {} }),
+});
+
+export type BudgetName = "person" | "developer";
+
+/** `secbot.budget-waits`: the tasks waiting above a limit, by task id (what, and since when). */
+export const BudgetWaitsDoc = defineDoc<{
+  tasks: Record<string, { budget: BudgetName; what: string; since: number }>;
+}>({
+  kind: "secbot.budget-waits",
+  version: 1,
+  scope: "session",
+  initial: () => ({ tasks: {} }),
+});
+
+/** One limit notice: a line of a budget reached in a month. */
+export type LimitNotice = {
+  seq: number;
+  at: number;
+  month: string;
+  zone: string;
+  budget: BudgetName;
+  line: number;
+  spentUsd: number;
+  limitUsd: number;
+  resetsAt: number;
+};
+
+/** `secbot.limit-notices`: every limit notice, oldest first; `next` is the next sequence number. */
+export const LimitNoticesDoc = defineDoc<{ next: number; notices: LimitNotice[] }>({
+  kind: "secbot.limit-notices",
+  version: 1,
+  scope: "session",
+  initial: () => ({ next: 1, notices: [] }),
+});
+
+/** `secbot.notice-delivery`: per device, the newest notice a session or `missed` showed. */
+export const NoticeDeliveryDoc = defineDoc<{ devices: Record<string, number> }>({
+  kind: "secbot.notice-delivery",
+  version: 1,
+  scope: "session",
+  initial: () => ({ devices: {} }),
+});
+
+/**
+ * `secbot.household-budget`: the household settings and the other cells' developer spend, as the
+ * household budget board last gave them (null: not read yet, so the release defaults apply).
+ */
+export const HouseholdBudgetDoc = defineDoc<{
+  timeZone: string | null;
+  developerLimitUsd: number | null;
+  othersDeveloperUsd: number;
+  month: string;
+  readAt: number | null;
+}>({
+  kind: "secbot.household-budget",
+  version: 1,
+  scope: "session",
+  initial: () => ({
+    timeZone: null,
+    developerLimitUsd: null,
+    othersDeveloperUsd: 0,
+    month: "",
+    readAt: null,
+  }),
+});

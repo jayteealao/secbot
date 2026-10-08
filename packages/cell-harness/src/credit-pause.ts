@@ -23,7 +23,12 @@ import {
 /** Prefix of a rewritten credit error; telemetry and model health read it. */
 export const CREDIT_MARKER = "[secbot.credit]";
 
-const CREDIT_ERROR = /^\s*402\b|insufficient.?credits|credit.?limit|key.?limit|insufficient_quota/i;
+/**
+ * A terminal 402 (no credit) or 403 (a key's limit, per OpenRouter's limits page read in shaping,
+ * 2026-10-08) and the providers' credit texts.
+ */
+const CREDIT_ERROR =
+  /^\s*40[23]\b|insufficient.?credits|credit.?limit|key.?limit|insufficient_quota/i;
 
 export const isCreditError = (message: Pick<AssistantMessage, "stopReason" | "errorMessage">) =>
   message.stopReason === "error" &&

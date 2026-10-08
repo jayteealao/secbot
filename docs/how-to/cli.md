@@ -32,7 +32,9 @@ device key is what proves the caller.
 | Command | What it does |
 | --- | --- |
 | `secbot chat` | A session with your lead. Answers stream in; a specialist's answer arrives later as `[from <name>] ...` while the session is open. `waiting for the model` means the model gateway is failing and your message is kept. |
-| `secbot missed` | Calls waiting for your answer first, under `HELD CALLS`, then lead messages this device has not seen yet, oldest first. |
+| `secbot missed` | Calls waiting for your answer first, under `HELD CALLS`, then limit notices this device has not seen, then lead messages this device has not seen yet, oldest first. |
+| `secbot cost` | Your month: spend against your limit, by layer (agent model, reviewer, decision model) and by role. `--person <name>` (another person) and `--owner` (the household) use the operator key. |
+| `secbot limits show \| set <person> <usd> \| developer <usd> \| zone <IANA>` | The owner's limits, with the operator key: each person's monthly limit, the household developer budget, and the time zone months follow. |
 | `secbot model list` | Each role's model and whether it is the release default or your change. The last row is the guard's `reviewer`, which judges the calls the decision model marks. |
 | `secbot model set <role> <model-id>` | Changes a role's model from its next turn (the reviewer's from its next review). An unknown role or model is refused (exit 1) and nothing changes. |
 | `secbot specialist add <name> --instruction "..." [--model <id>]` | Adds a specialist. The lead can hand work to it from its next turn. |
@@ -90,6 +92,50 @@ HELD CALLS
 #1  lead  handoff -> research  your rule: ask first        lapses in 21 h 10 m
 answer in secbot chat: /allow 1, /always 1, /deny 1
 ```
+
+### Your month's spend and limits
+
+`secbot chat` prints the month's spend against your limit when it connects and after each answer:
+
+```
+[ month: $11.52 / $25.00 ] [#####.....] 46% [ shadow ]
+[ month: $20.40 / $25.00 ] [########..] 82% [ 80% of limit ] [ shadow ]
+[ month: $25.30 / $25.00 ] [##########] 101% [ limit reached ] [ shadow ]
+```
+
+At 80% and at 100% of your limit you get one notice, in `secbot chat` or, when no session is
+open, in `secbot missed`; the owner gets one alert:
+
+```
+[ limit reached ] You have used $25.30 of $25.00 this month. Hand-offs,
+  routines, and reminders wait until the owner raises your limit or the
+  month resets on 1 Nov. Nothing is dropped. Chat with the lead continues.
+  3 waiting: routine morning check (06:00), reminder bins out (19:00),
+  handoff research train times (13:58)
+```
+
+Above your limit, chat with the lead continues; hand-offs, routines, and reminders wait, and a
+specialist's running job finishes its current step and then waits. Nothing is dropped: the work
+continues when the owner raises your limit or the month resets (local midnight on the first, in
+the household time zone). The developer specialist counts against the household developer budget
+instead, and its jobs wait above that budget the same way.
+
+Every person starts at a limit of 25 dollars a month, the owner included. When the owner's own
+spend is already above 25 dollars, the owner's hand-offs, routines, and reminders wait until the
+owner raises their own limit:
+
+```
+$ secbot limits set owner 60
+owner's monthly limit is now $60.00 from the next call
+$ secbot limits developer 60
+the developer budget is now $60.00 from the next call
+$ secbot limits zone Europe/London
+the household time zone is now Europe/London from the next month
+```
+
+`secbot cost` shows your month by layer and role; on the owner's machine `secbot cost --owner`
+shows every person, the developer budget, and when each shadow cell has a week of logs. A device
+key cannot change a limit.
 
 ### Read shadow verdicts
 

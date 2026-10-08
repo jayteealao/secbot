@@ -49,6 +49,19 @@ describe("credit limit", () => {
     expect(rewriteCreditError(answer)).toBe(answer);
   });
 
+  it("treats a 403 like a 402: a credit pause, not a failure", () => {
+    const forbidden = fauxAssistantMessage([], {
+      stopReason: "error",
+      errorMessage: '403 {"error":{"code":403,"message":"Key limit exceeded"}}',
+    });
+    const paused = rewriteCreditError(forbidden);
+    expect(paused.errorMessage).toBe(CREDIT_PAUSE_TEXT);
+    expect(isRetryableAssistantError(paused)).toBe(true);
+    // A number in an answer's text is not a status.
+    const answer = fauxAssistantMessage([fauxText("403 is a number too")]);
+    expect(rewriteCreditError(answer)).toBe(answer);
+  });
+
   it("keeps the request, pauses, alerts once, and resumes when the limit rises", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     let limitRaised = false;

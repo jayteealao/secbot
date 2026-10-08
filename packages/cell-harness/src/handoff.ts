@@ -17,8 +17,10 @@ import {
   defineTool,
   type Extension,
 } from "@earendil-works/pi-durable";
+import { type BudgetWaiter, shortText } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
 import { RosterDoc } from "./docs.ts";
+import { budgetOf } from "./month-ledger.ts";
 
 /** A follow-up the lead receives starts with this, then the specialist's name and the outcome. */
 export const HANDOFF_REPORT_PREFIX = "[handoff ";
@@ -58,8 +60,15 @@ type ReporterState = { phase: "deliver" } | { phase: "report"; report?: string; 
  * follow-up input. Both submissions carry request ids made from this task's id, and the answer id
  * is recorded in the roster in the same commit that decides the report, so a restart delivers once
  * and reports once.
+ *
+ * Above a limit both phases wait first (budget-gate.ts): the brief waits on the specialist's budget
+ * (the developer budget for the developer specialist, the person's limit for the others), and the
+ * report waits on the person's limit. A restart reruns the phase, which checks again.
  */
-export function createReporter(person: string) {
+export function createReporter(
+  person: string,
+  gate: () => BudgetWaiter | undefined = () => undefined,
+) {
   return defineTask<ReporterInput, ReporterState, null>({
     name: "secbot.handoff-reporter",
     version: 1,
@@ -67,6 +76,14 @@ export function createReporter(person: string) {
     phases: {
       deliver: async (reporter, runtime, context) => {
         const { name, conversationId, brief } = reporter.input;
+        await gate()?.waitUntilUnder(
+          {
+            budget: budgetOf(name),
+            taskId: String(reporter.id),
+            what: `handoff ${name} ${shortText(brief)}`,
+          },
+          context,
+        );
         const specialist = await runtime.conversation(conversationId, context);
         if (specialist === undefined) {
           await runtime.commit(
@@ -119,6 +136,14 @@ export function createReporter(person: string) {
       report: async (reporter, runtime, context) => {
         const { report, outcome } = reporter.state.checkpoint;
         if (report !== undefined) {
+          await gate()?.waitUntilUnder(
+            {
+              budget: "person",
+              taskId: String(reporter.id),
+              what: `handoff ${reporter.input.name} report`,
+            },
+            context,
+          );
           const lead = await runtime.conversation(runtime.conversationId, context);
           await lead?.submit(
             {
@@ -148,9 +173,19 @@ export function createReporter(person: string) {
   });
 }
 
-/** The lead's `handoff` tool and the tasks behind it. Selected by the lead only. */
-export function createHandoffExtension(person: string): Extension {
-  const Reporter = createReporter(person);
+/** The lead's note when the brief waits above a limit. */
+export const WAITS_NOTE =
+  "; the person is over their monthly limit, so the brief waits until the limit rises or the month resets";
+
+/**
+ * The lead's `handoff` tool and the tasks behind it. Selected by the lead only. The tool returns
+ * at once in every case, so chat with the lead never waits on a limit; only the reporter waits.
+ */
+export function createHandoffExtension(
+  person: string,
+  gate: () => BudgetWaiter | undefined = () => undefined,
+): Extension {
+  const Reporter = createReporter(person, gate);
   const handoff = defineTool({
     name: "handoff",
     description:
@@ -196,11 +231,12 @@ export function createHandoffExtension(person: string): Extension {
         reporter_task_id: result.reporter,
         brief_chars: args.brief.length,
       });
+      const waits = (await gate()?.isOver(budgetOf(args.specialist), context)) === true;
       return {
         content: [
           {
             type: "text",
-            text: `Briefed ${args.specialist}; the answer will follow as a message.`,
+            text: `Briefed ${args.specialist}; the answer will follow as a message${waits ? WAITS_NOTE : ""}.`,
           },
         ],
         details: { specialist: args.specialist, reporterTaskId: result.reporter },

@@ -9,8 +9,9 @@
  * faux gateway apply as for every other model call.
  */
 import type { Context } from "@earendil-works/chord";
-import type { AssistantMessage, JsonObject, Models } from "@earendil-works/pi-ai";
+import type { AssistantMessage, JsonObject, Models, Usage } from "@earendil-works/pi-ai";
 import type { DocumentReader } from "@earendil-works/pi-durable";
+import { isCreditError } from "./credit-pause.ts";
 import { RoleModelsDoc } from "./docs.ts";
 import { redactText } from "./redact.ts";
 import {
@@ -29,6 +30,8 @@ export interface ReviewVerdict {
   readonly reason: string;
   readonly model: string;
   readonly costUsd: number;
+  /** The review's usage; the guard adds it to the cell's ledger. */
+  readonly usage?: Usage;
 }
 
 export type ReviewerFailureCause = "error" | "timeout" | "malformed" | "unknown-model";
@@ -38,6 +41,9 @@ export class ReviewerFailure extends Error {
   constructor(
     override readonly cause: ReviewerFailureCause,
     readonly costUsd = 0,
+    readonly usage?: Usage,
+    /** The gateway reported a credit error (HTTP 402 or 403): the cell's credit pause applies. */
+    readonly credit = false,
   ) {
     super(`reviewer failed: ${cause}`);
     this.name = "ReviewerFailure";
@@ -186,10 +192,24 @@ export function createReviewer(options: ReviewerOptions): Reviewer {
         stopped.catch(() => {});
       }
       const costUsd = message.usage?.cost.total ?? 0;
+      const usage = message.usage;
       if (message.stopReason === "error" || message.stopReason === "aborted") {
-        throw new ReviewerFailure(timeout.aborted ? "timeout" : "error", costUsd);
+        throw new ReviewerFailure(
+          timeout.aborted ? "timeout" : "error",
+          costUsd,
+          usage,
+          isCreditError(message),
+        );
       }
-      return { ...parseVerdict(textOf(message), costUsd), model: modelId, costUsd };
+      let verdict: Omit<ReviewVerdict, "model" | "costUsd">;
+      try {
+        verdict = parseVerdict(textOf(message), costUsd);
+      } catch (error) {
+        if (error instanceof ReviewerFailure)
+          throw new ReviewerFailure(error.cause, costUsd, usage);
+        throw error;
+      }
+      return { ...verdict, model: modelId, costUsd, ...(usage === undefined ? {} : { usage }) };
     },
   };
 }

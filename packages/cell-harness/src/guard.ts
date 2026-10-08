@@ -27,16 +27,24 @@
  * reviewer, which allows, blocks, or asks the person; a reviewer failure holds the call. In shadow
  * mode (every cell's start) the model stage records what it would do and lets the call run; the
  * rule stage and the hold path never read the mode, so rules and ask-first holds always enforce.
+ *
+ * The guard's own model calls are spend like any other: the verdict or held record's commit also
+ * adds the decision model's and the reviewer's usage to the calling conversation's `pi.usage`
+ * (month-ledger.ts `addGuardUsage`), so the person's month-to-date spend counts them. A rerun that
+ * finds its record writes nothing again. A 402 or 403 from either model reports the credit pause.
  */
 import type { Context, JsonValue } from "@earendil-works/chord";
 import { withoutAbortSignal } from "@earendil-works/chord/context";
+import type { Usage } from "@earendil-works/pi-ai";
 import {
+  type ConversationId,
   defineExtension,
   type Extension,
   type Harness,
   type HookApi,
   hook,
   ToolTask,
+  type Tx,
 } from "@earendil-works/pi-durable";
 import {
   type ActivityRecord,
@@ -68,6 +76,7 @@ import { errorFields, logEvent } from "./cell-parts.ts";
 import { buildDecisionState, DecisionFailure, type DecisionModels } from "./decision-model.ts";
 import { RosterDoc, RulesDoc } from "./docs.ts";
 import { readDecisionAdapter, readGuardMode } from "./guard-settings.ts";
+import { addGuardUsage, costOnlyUsage } from "./month-ledger.ts";
 import { redactText } from "./redact.ts";
 import { HOLD_MS, LEAD_ROLE } from "./release-defaults.ts";
 import { type Reviewer, ReviewerFailure, type ReviewVerdict } from "./reviewer.ts";
@@ -82,6 +91,8 @@ export interface GuardCall {
   readonly arguments: Readonly<Record<string, JsonValue>>;
   readonly taskId: string;
   readonly callId: string;
+  /** The calling conversation, whose `pi.usage` carries the guard's model cost. */
+  readonly conversationId?: ConversationId;
 }
 
 /** Where a verdict came from; later stages add their layers. */
@@ -190,6 +201,31 @@ export interface ModelStageOptions {
   /** The decision model for the cell's current adapter. */
   readonly decision: DecisionModels;
   readonly reviewer: Reviewer;
+  /**
+   * A model layer answered 402 or 403 (no credit, or a key limit): the cell's credit pause. The
+   * call's own outcome does not change (a decision-model failure goes to the reviewer, a reviewer
+   * failure holds the call).
+   */
+  readonly onCredit?: (status: string) => void;
+}
+
+/** A guard model call's usage: the reported usage, or its cost alone when no usage came back. */
+const usageOf = (usage: Usage | undefined, costUsd: number): Usage | undefined =>
+  usage ?? (costUsd > 0 ? costOnlyUsage(costUsd) : undefined);
+
+/** Adds the guard's model usage of one call to the calling conversation's ledger, in `tx`. */
+async function addModelUsage(
+  tx: Tx,
+  conversationId: ConversationId | undefined,
+  model: GuardModelFields | undefined,
+): Promise<void> {
+  if (conversationId === undefined || model?.usage === undefined) return;
+  if (model.usage.decision !== undefined) {
+    await addGuardUsage(tx, conversationId, "decision", model.usage.decision);
+  }
+  if (model.usage.reviewer !== undefined) {
+    await addGuardUsage(tx, conversationId, "reviewer", model.usage.reviewer);
+  }
 }
 
 export const REVIEWER_UNAVAILABLE = "reviewer unavailable";
@@ -216,9 +252,16 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
     let decision: DecisionRecord;
     let fallback: string | null = null;
     let asked: string;
+    let decisionUsage: Usage | undefined;
+    let reviewerUsage: Usage | undefined;
+    const usage = () => ({
+      ...(decisionUsage === undefined ? {} : { decision: decisionUsage }),
+      ...(reviewerUsage === undefined ? {} : { reviewer: reviewerUsage }),
+    });
     try {
       const answer = await options.decision(adapter).ask(state, call.tool, context.abortSignal);
       costUsd += answer.costUsd;
+      decisionUsage = usageOf(answer.usage, answer.costUsd);
       decision = { outcome: answer.outcome, score: answer.score, model: answer.model };
       const label = `${answer.choice} (score ${answer.score.toFixed(2)})`;
       if (answer.outcome === "pass") {
@@ -227,13 +270,17 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
           layer: "decision",
           reason: `decision model: ${label}`,
           matched,
-          model: { mode, decision, fallback, costUsd },
+          model: { mode, decision, fallback, costUsd, usage: usage() },
         };
       }
       asked = label;
     } catch (error) {
       if (!(error instanceof DecisionFailure) || context.abortSignal?.aborted === true) throw error;
       costUsd += error.costUsd;
+      decisionUsage = usageOf(error.usage, error.costUsd);
+      if (error.cause === "http-402" || error.cause === "http-403") {
+        options.onCredit?.(error.cause.slice(5));
+      }
       fallback = error.cause;
       decision = { outcome: "fallback", score: null, model: null };
       logEvent(
@@ -255,6 +302,7 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
       decision,
       fallback,
       costUsd,
+      usage: usage(),
       ...(verdictWord === undefined ? {} : { verdictWord }),
     });
     let review: ReviewVerdict;
@@ -263,6 +311,8 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
     } catch (error) {
       if (!(error instanceof ReviewerFailure) || context.abortSignal?.aborted === true) throw error;
       costUsd += error.costUsd;
+      reviewerUsage = usageOf(error.usage, error.costUsd);
+      if (error.credit) options.onCredit?.("reviewer");
       if (mode === "shadow") {
         return {
           kind: "pass",
@@ -282,6 +332,7 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
       };
     }
     costUsd += review.costUsd;
+    reviewerUsage = usageOf(review.usage, review.costUsd);
     if (mode === "shadow") {
       const word =
         review.verdict === "block"
@@ -351,31 +402,31 @@ export function createGuardExtension(
     const { model } = fields;
     const mode = model?.mode ?? (await readGuardMode(harness(), context)).mode;
     const word = model?.verdictWord ?? fields.verdict;
-    await harness().commit(
-      (tx) =>
-        appendRecord(
-          tx,
-          recordOf({
-            key,
-            at: options.now(),
-            kind: "verdict",
-            agent: call.role,
-            tool: call.tool,
-            verdict: word,
-            layer: fields.layer,
-            reason: fields.reason,
-            ruleId: fields.ruleId,
-            ruleLevel: fields.ruleLevel,
-            arguments: call.arguments,
-            keep: fields.matched,
-            cost: 0,
-            mode,
-            ...modelRecordFields(model),
-          }),
-          options.timeZone,
-        ),
-      context,
-    );
+    await harness().commit(async (tx) => {
+      const appended = await appendRecord(
+        tx,
+        recordOf({
+          key,
+          at: options.now(),
+          kind: "verdict",
+          agent: call.role,
+          tool: call.tool,
+          verdict: word,
+          layer: fields.layer,
+          reason: fields.reason,
+          ruleId: fields.ruleId,
+          ruleLevel: fields.ruleLevel,
+          arguments: call.arguments,
+          keep: fields.matched,
+          cost: 0,
+          mode,
+          ...modelRecordFields(model),
+        }),
+        options.timeZone,
+      );
+      // A rerun that finds its record adds no cost again.
+      if (appended) await addModelUsage(tx, call.conversationId, model);
+    }, context);
     const outcome = model?.decision.outcome ?? null;
     logEvent("guard.verdict", {
       cell: person,
@@ -532,6 +583,7 @@ export function createGuardExtension(
               arguments: toolCall.arguments as Record<string, JsonValue>,
               taskId: ids.task_id,
               callId: ids.call_id,
+              conversationId: api.conversationId,
             };
             const requestId =
               options.requestIdOf?.(call, api) ?? `${String(api.conversationId)}:${toolCall.id}`;
@@ -569,35 +621,35 @@ export function createGuardExtension(
               const matched = result.matched ?? [];
               const always = await offerFor(call, matched, api, context);
               const heldAt = options.now();
-              const held = await harness().commit(
-                (tx) =>
-                  holdCall(
-                    tx,
-                    {
-                      requestId,
-                      callKey,
-                      digest,
-                      conversationId: String(api.conversationId),
-                      agent: role,
-                      tool: call.tool,
-                      arguments: call.arguments,
-                      matched,
-                      reason: result.reason,
-                      reasonSource:
-                        result.reasonSource ??
-                        (result.ruleLevel === "owner" ? "owner-rule" : "your-rule"),
-                      layer: result.layer,
-                      ruleId: result.ruleId ?? null,
-                      ruleLevel: result.ruleLevel ?? null,
-                      always,
-                      heldAt,
-                      expiresAt: heldAt + holdMs,
-                      ...(result.model === undefined ? {} : { model: result.model }),
-                    },
-                    options.timeZone,
-                  ),
-                context,
-              );
+              const held = await harness().commit(async (tx) => {
+                const made = await holdCall(
+                  tx,
+                  {
+                    requestId,
+                    callKey,
+                    digest,
+                    conversationId: String(api.conversationId),
+                    agent: role,
+                    tool: call.tool,
+                    arguments: call.arguments,
+                    matched,
+                    reason: result.reason,
+                    reasonSource:
+                      result.reasonSource ??
+                      (result.ruleLevel === "owner" ? "owner-rule" : "your-rule"),
+                    layer: result.layer,
+                    ruleId: result.ruleId ?? null,
+                    ruleLevel: result.ruleLevel ?? null,
+                    always,
+                    heldAt,
+                    expiresAt: heldAt + holdMs,
+                    ...(result.model === undefined ? {} : { model: result.model }),
+                  },
+                  options.timeZone,
+                );
+                await addModelUsage(tx, call.conversationId, result.model);
+                return made;
+              }, context);
               heldEvent(person, held);
               return await settleHeld(held, call, callKey, api, started, context);
             }

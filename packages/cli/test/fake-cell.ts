@@ -92,6 +92,17 @@ export interface FakeCell {
     switchedBy: string | null;
     decisionModel: string;
   };
+  /** Frames a session sends after `connected` (the usage line, notices). */
+  connectFrames: unknown[];
+  /** Limit notices and what waits, listed by `/missed` after the held calls. */
+  notices: unknown[];
+  waiting: unknown[];
+  /** `GET /v1/cells/<p>/cost` and `GET /ops/cost?cell=sam`. */
+  cost: Record<string, unknown>;
+  /** `GET /ops/cost`: the household view. */
+  household: Record<string, unknown>;
+  /** The limit changes the /ops routes took, in order. */
+  limitChanges: { path: string; body: unknown }[];
   close(): Promise<void>;
 }
 
@@ -115,6 +126,12 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       switchedBy: null,
       decisionModel: "clef",
     },
+    connectFrames: [],
+    notices: [],
+    waiting: [],
+    cost: {},
+    household: {},
+    limitChanges: [],
     close: async () => {},
   };
   const seen = new Set<string>();
@@ -172,8 +189,33 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
           return reply(401, { error: "refused: operator_key" });
         }
         const url = new URL(path, "http://cell");
-        if (url.searchParams.get("cell") !== "sam") return reply(404, { error: "no such cell" });
         const given = (body ?? {}) as Record<string, unknown>;
+        if (url.pathname === "/ops/cost" && url.searchParams.get("cell") === null) {
+          return reply(200, cell.household);
+        }
+        if (url.pathname === "/ops/time-zone" && request.method === "PUT") {
+          if (given.timeZone !== "Europe/London") {
+            return reply(400, { error: "refused: the time zone is not an IANA zone" });
+          }
+          cell.limitChanges.push({ path, body });
+          return reply(200, { timeZone: given.timeZone, developerLimitUsd: 50 });
+        }
+        if (
+          url.pathname === "/ops/limits" &&
+          url.searchParams.get("budget") === "developer" &&
+          request.method === "PUT"
+        ) {
+          cell.limitChanges.push({ path, body });
+          return reply(200, { timeZone: "UTC", developerLimitUsd: given.limitUsd });
+        }
+        if (url.searchParams.get("cell") !== "sam") return reply(404, { error: "no such cell" });
+        if (url.pathname === "/ops/cost" && request.method === "GET") {
+          return reply(200, { ...cell.cost, person: "sam" });
+        }
+        if (url.pathname === "/ops/limits" && request.method === "PUT") {
+          cell.limitChanges.push({ path, body });
+          return reply(200, { person: "sam", limitUsd: given.limitUsd, previousUsd: 25 });
+        }
         const view = () => ({ person: "sam", ...cell.guardMode, timeZone: "UTC" });
         if (url.pathname === "/ops/mode" && request.method === "GET") return reply(200, view());
         if (url.pathname === "/ops/mode" && request.method === "PUT") {
@@ -199,7 +241,18 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       if (route === "/missed") {
         const messages = cell.missed;
         cell.missed = [];
-        return reply(200, { held: cell.held, messages, remaining: 0 });
+        const notices = cell.notices;
+        cell.notices = [];
+        return reply(200, {
+          held: cell.held,
+          notices,
+          waiting: cell.waiting,
+          messages,
+          remaining: 0,
+        });
+      }
+      if (route === "/cost" && request.method === "GET") {
+        return reply(200, { ...cell.cost, person });
       }
       if (route === "/approvals" && request.method === "GET")
         return reply(200, { held: cell.held });
@@ -252,6 +305,7 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     });
     cell.sockets.push(ws);
     ws.send({ type: "connected", lead: person });
+    for (const frame of cell.connectFrames) ws.send(frame);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;

@@ -17,7 +17,8 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | --- | --- | --- | --- | --- |
 | GET | `/status` | none; `?tasks=1` adds the task list | `{version, roles, …}` | 200 |
 | GET | `/alarm` | none | the stored alarm against the earliest stored timer; never re-arms | 200 |
-| GET | `/missed` | none | `{held: [HeldCall], messages: [{kind: "answer", entryId, text} \| {kind: "followup", entryId, from, text}], remaining}`; `held` lists every call waiting for an answer, oldest first; `messages` are the oldest 100 after this device's cursor, which moves past them only | 200 |
+| GET | `/missed` | none | `{held: [HeldCall], notices: [LimitNotice], waiting: [Waiting], messages: [{kind: "answer", entryId, text} \| {kind: "followup", entryId, from, text}], remaining}`; `held` lists every call waiting for an answer, oldest first; `notices` the limit notices this device has not seen (shown once per device, here or in a session), with `waiting` beside them; `messages` are the oldest 100 after this device's cursor, which moves past them only | 200 |
+| GET | `/cost` | none | `CostView`: the person's month of spend (below) | 200 |
 | GET | `/models` | none | `{roles: [{role, model, source}]}`: the lead, each specialist, then the guard's `reviewer` (default `anthropic/claude-sonnet-5.5`) | 200 |
 | PUT | `/models/{role}` | `{"model": "<id>"}` (at most 16 KiB) | the role's new model | 200, 400 (unknown role or model, bad body), 413 |
 | POST | `/specialists` | `{"name", "instruction", "model"?}` (at most 16 KiB; instruction at most 4000 characters) | `{name, status: "added"}` | 201, 400, 413 |
@@ -28,6 +29,36 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | GET | `/activity?month=YYYY-MM&before=<n>&limit=<1-200>` | none; `month` defaults to the current month in the cell's time zone, `limit` to 50 | `{person, month, timeZone, total, records: [ActivityRecord], next}`, newest first; pass `next` as `before` for the next older page (`null` when none is left) | 200, 400 (a bad parameter) |
 | GET | `/approvals` | none | `{held: [HeldCall]}`: the calls waiting for an answer, oldest first | 200 |
 | POST | `/approvals/{n}` | `{"answer": "allow" \| "always" \| "deny"}` (at most 16 KiB) | `{number, status, answer, agent, tool, summary, answeredBy, rule}` (`rule` is the person rule allow always added, or `null`) | 200, 400 (a bad body, or `refused: …`), 404 (`no held call #n`), 409 (`{"error": "lapsed"}` or `{"error": "answered"}`), 413 |
+
+### Spend and limits
+
+A person cell counts its month-to-date spend from its own model ledger: every model response
+(failed attempts included) of the lead and each specialist, plus the guard's decision-model and
+reviewer calls, which the guard adds under the tool keys `secbot-guard:decision` and
+`secbot-guard:reviewer` of the calling conversation's `pi.usage`, in the commit that records its
+verdict. A month runs from local midnight on the first, in the household time zone, to the next
+first. The developer specialist's spend counts against the household developer budget (50 dollars
+by default, summed across every person cell); everything else counts against the person's monthly
+limit (25 dollars by default). Only the owner changes either, through the operator routes.
+
+A `CostView` is `{person, month, timeZone, resetsAt, mode, modeSince, spentUsd, limitUsd, percent,
+line, byLayer: {agent, decision, reviewer}, byRole, hours, waiting: [Waiting], developer: {spentUsd,
+limitUsd, percent, line}}`. `line` is `normal`, `warn` (80% or more of the limit), or `over` (100%
+or more); `percent` is rounded to a whole number; `hours` is spend by local hour (`"0"` to `"23"`)
+and role; `resetsAt` is the next month's start (milliseconds since 1970).
+
+Above the person's limit, hand-offs, routines, and reminders wait, and a specialist's running job
+waits before its next model request; chat with the lead and its own calls continue. Above the
+developer budget, the developer's jobs wait. Nothing is dropped: a waiting task continues when the
+owner raises the limit or the month resets, also after a restart. A `Waiting` is `{what, since,
+budget}`, for example `{"what": "routine morning check", "since": 1791489066251, "budget":
+"person"}`.
+
+A `LimitNotice` is `{seq, at, month, zone, budget, line, spentUsd, limitUsd, resetsAt}`: `budget`
+`person` or `developer`, `line` 80 or 100. Each line of each budget is noticed once per month and
+limit value; a change that passes both lines at once notices only 100. Each notice also sends the
+owner one alert, with no amount and no private detail, and logs `limit.crossed` with `cell`,
+`budget`, `line`, `spend_usd`, `limit_usd`, and `alerted`.
 
 ### Held calls
 
@@ -165,9 +196,12 @@ The cell sends these, as JSON text frames:
 | `waiting` | `on` | `true` while the model gateway is failing and inputs are kept; `false` when it answers again. |
 | `error` | `message`, `requestId`? | A frame the cell could not read (no `requestId`), or an input it could not take now (with `requestId`; the client resends it after a reconnect). |
 | `held` | `call` (a `HeldCall`), `count` | A call waiting for the person: every waiting call right after `connected`, oldest first, and each new one once when it is held. `count` is how many calls wait. The client answers through `POST /approvals/{n}`; a chat line is never an answer. |
+| `usage` | `usage`: `{month, zone, resetsAt, spentUsd, limitUsd, percent, line, mode}` | The person's month against their limit and the guard mode: right after `connected`, and after each `answer`. |
+| `notice` | `notice` (a `LimitNotice`), `waiting` (`[Waiting]`) | A limit line reached: once when it is recorded, and at connect for each notice this device has not seen. A device that took it does not see it again in `GET /missed`. |
 
-Ordering and reconnects: `connected`, then a `held` frame for every waiting call, then every
-`missed` frame, then live frames. An input with no `accepted` or `rejected` frame is resent on the
+Ordering and reconnects: `connected`, then `usage`, then a `held` frame for every waiting call,
+then a `notice` frame for every notice this device has not seen, then every `missed` frame, then
+live frames. An input with no `accepted` or `rejected` frame is resent on the
 next connection under the same `requestId`.
 
 ## Host routes
@@ -199,10 +233,15 @@ mode.
 | GET | `/ops/mode?cell=<person>` | `{person, mode, since, switchedBy, decisionModel, timeZone}`: the guard mode (`shadow` or `enforce`), when it began (milliseconds since 1970), who switched it, and the decision model (`clef` or `jev`). |
 | PUT | `/ops/mode?cell=<person>` | Body `{"mode": "shadow" \| "enforce"}`; the same shape plus `changed` (false when the cell already had that mode). Logs `guard.mode` and writes one `mode` activity record per switch. 400 for any other mode. |
 | PUT | `/ops/decision-model?cell=<person>` | Body `{"adapter": "clef" \| "jev"}`; the same shape as `GET /ops/mode`. The next call uses it. 400 for any other adapter. |
+| GET | `/ops/cost?cell=<person>` | That person's `CostView` plus `asOf`: live for a cell this fleet serves, else the household board's last report of it (`resetsAt` 0, `hours` empty). 404 when nothing is known. |
+| GET | `/ops/cost` | The household: `{month, timeZone, totalUsd, persons: [{person, spentUsd, limitUsd, percent, line, mode, modeSince, asOf}], developer: {spentUsd, limitUsd, percent, line}}`. This fleet's cells answer live; another fleet's from the board. |
+| PUT | `/ops/limits?cell=<person>` | Body `{"limitUsd": <usd>}` (above 0, at most 10000, two decimals); `{person, limitUsd, previousUsd}`. The next check uses it; waiting work continues at once when it is now under. Logs `limit.set` and `ops.limits`. 400 for a bad amount. |
+| PUT | `/ops/limits?budget=developer` | Body `{"limitUsd": <usd>}`; `{timeZone, developerLimitUsd}`. A household setting: every person cell reads it again. 400 for a bad amount, 503 without a household cell. |
+| PUT | `/ops/time-zone` | Body `{"timeZone": "<IANA zone>"}`; `{timeZone, developerLimitUsd}`. Months follow it from the next month in each cell. 400 for a zone the runtime does not know. |
 
 `<person>` is `owner` or `second` (`person` also names the second cell). A cell this fleet does not
 serve answers 404 `cell <name> is served by another fleet`; a cell that is not a person cell
-answers 404.
+answers 404. No device-key route changes a limit, the developer budget, or the time zone.
 
 ## Household routes: `/internal/household/…`
 
@@ -213,6 +252,15 @@ Auth: the operator key. A person cell in another fleet calls these to reach the 
 | POST | `/internal/household/read` | `{"document": "<name>"}` | the document | 200, 400 (`send {document}`), 401, 404 (served by another fleet), 503 (no binding) |
 | POST | `/internal/household/apply` | a change with an operation id | the result; the same operation id applies once | 200, 400 (a refused change), 401, 500 |
 | GET | `/internal/household/status` | none | the household cell's version and roles | 200 |
+| POST | `/internal/household/budget` | `{}` | the budget board: `{settings: {timeZone, developerLimitUsd}, reports: [SpendReport], developerUsd}` (each cell's newest report of the newest month) | 200, 401 |
+| POST | `/internal/household/report-spend` | a `SpendReport` with an operation id | `{board, othersDeveloperUsd, alerts: [{line, status}]}`; `status` is `yours` (this cell sends that developer alert), `taken` (another cell claimed it in the last 20 s), or `sent`; the same operation id applies once | 200, 400, 401 |
+| POST | `/internal/household/set-budget` | `{timeZone?, developerLimitUsd?}` | the new settings | 200, 400 (an unknown zone or a bad amount), 401 |
+| POST | `/internal/household/alert-sent` | `{month, budget: "developer", limitUsd, line, cell, sent}` | `{ok: true}`; `sent: false` frees the claim so the alert goes again | 200, 400, 401 |
+
+A `SpendReport` is `{opId, cell, month, timeZone, at, spentUsd, limitUsd, mode, modeSince,
+byLayer, byRole, developerUsd, developerLimitUsd, developerLines}`. Person cells report after their
+spend changes (at most every 5 seconds, at once when a line is reached). The board is a report of
+each cell's own ledger: a person's limit is decided in that person's cell only.
 
 A failed call is logged on both sides: `household.call` with `outcome: "refused" | "failed"`,
 `status`, and the error on the caller; `household.refused` or `household.error` on the household

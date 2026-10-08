@@ -21,7 +21,7 @@ import {
 } from "@secbot/household-cell";
 import { checkDevice, type DeviceEnv } from "./device-auth.ts";
 import { type CellHealth, health, releaseVersion } from "./health.ts";
-import type { HouseholdClientEnv } from "./household-client.ts";
+import { type HouseholdClientEnv, householdClientOf } from "./household-client.ts";
 import { type GuardStub, hasOperatorKey, type OpsEnv, ops, type SnapshotStub } from "./ops.ts";
 import {
   activityQuery,
@@ -185,9 +185,10 @@ function guardStubOf(env: WorkerEnv, cell: string): GuardStub | undefined {
 }
 
 /**
- * POST /internal/household/{read,apply,status}: the household cell's RPC for a person cell in
- * another fleet, over the private network with the operator key. The change carries its own
- * operation id, so a retried call applies once.
+ * POST /internal/household/{read,apply,status,budget,report-spend,set-budget,alert-sent}: the
+ * household cell's RPC for a person cell in another fleet, over the private network with the
+ * operator key. A change and a spend report carry their own operation id, so a retried call
+ * applies once.
  */
 async function internalHousehold(request: Request, env: WorkerEnv): Promise<Response> {
   const url = new URL(request.url);
@@ -218,6 +219,23 @@ async function internalHousehold(request: Request, env: WorkerEnv): Promise<Resp
     }
     if (method === "status" && household.status !== undefined) {
       return Response.json(await household.status());
+    }
+    if (request.method === "POST" && method === "budget" && household.budget !== undefined) {
+      return Response.json(await household.budget());
+    }
+    if (
+      request.method === "POST" &&
+      method === "report-spend" &&
+      household.reportSpend !== undefined
+    ) {
+      return Response.json(await household.reportSpend(body as never));
+    }
+    if (request.method === "POST" && method === "set-budget" && household.setBudget !== undefined) {
+      return Response.json(await household.setBudget(body));
+    }
+    if (request.method === "POST" && method === "alert-sent" && household.alertSent !== undefined) {
+      await household.alertSent(body as never);
+      return Response.json({ ok: true });
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -260,6 +278,7 @@ export async function route(request: Request, env: WorkerEnv): Promise<Response>
       stubOf: (cell) => snapshotStubOf(env, cell),
       guardOf: (cell) => guardStubOf(env, cell),
       activityQuery,
+      household: () => householdClientOf(env),
       ...(lab?.writeOne === undefined
         ? {}
         : { write: () => lab.writeOne?.() ?? Promise.resolve() }),

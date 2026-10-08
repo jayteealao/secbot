@@ -15,6 +15,10 @@
  *   GET  /ops/activity?cell=             a person's activity, for the owner
  *   GET|PUT /ops/mode?cell=              a person cell's guard mode (shadow or enforce)
  *   PUT  /ops/decision-model?cell=       a person cell's decision model (clef or jev)
+ *   GET  /ops/cost[?cell=]               a person's month of spend, or the household's
+ *   PUT  /ops/limits?cell=               a person's monthly limit ({"limitUsd": <usd>})
+ *   PUT  /ops/limits?budget=developer    the household developer budget ({"limitUsd": <usd>})
+ *   PUT  /ops/time-zone                  the household time zone, from the next month
  *
  * The rules and activity routes are the owner's command line (`secbot rules --owner`,
  * `secbot activity --person`), with the same operator key from the owner's machine.
@@ -24,11 +28,23 @@
  * docs/README.md:477-481; `put(key, value, options)` and `get(key)` in
  * crates/celld/js/harness.js:1132-1190).
  */
-import { type HeartbeatState, logEvent } from "@secbot/cell-harness";
+import {
+  type BudgetBoard,
+  budgetLine,
+  type CostView,
+  DEFAULT_DEVELOPER_BUDGET_USD,
+  DEVELOPER_ROLE,
+  errorFields,
+  type HeartbeatState,
+  type HouseholdClient,
+  logEvent,
+  type SpendReport,
+} from "@secbot/cell-harness";
 import type { CellDump } from "@secbot/cell-storage";
+import { isRefusedHouseholdChange } from "@secbot/household-cell";
 import { sameHex, sha256Hex } from "./device-auth.ts";
 import { contractStep } from "./health.ts";
-import { OPERATOR_HEADER } from "./household-client.ts";
+import { HouseholdCallError, OPERATOR_HEADER } from "./household-client.ts";
 
 /** What the operator routes need from a cell's stub (celld JS RPC). */
 export interface SnapshotStub {
@@ -72,6 +88,10 @@ export interface GuardStub {
   guardModeOf?(person: string): Promise<Answer<unknown>>;
   setGuardModeOf?(person: string, mode: unknown): Promise<Answer<unknown>>;
   setDecisionModelOf?(person: string, adapter: unknown): Promise<Answer<unknown>>;
+  /** Spend and limits; absent on a stub built before them. */
+  costOf?(person: string): Promise<Answer<CostView>>;
+  setLimitOf?(person: string, usd: unknown): Promise<Answer<unknown>>;
+  refreshBudget?(person: string): Promise<void>;
 }
 
 export interface OpsDeps {
@@ -87,6 +107,8 @@ export interface OpsDeps {
   ): { month?: string; before?: number; limit?: number } | { error: string };
   /** One committed single-row write (the test cell's lab); undefined elsewhere. */
   readonly write?: () => Promise<void>;
+  /** The household cell's client (its budget board), or undefined when this fleet has none. */
+  household?(): HouseholdClient | undefined;
 }
 
 const SNAPSHOT_ID = /^[A-Za-z0-9._-]{1,100}$/;
@@ -197,6 +219,207 @@ async function guardRoute(request: Request, url: URL, deps: OpsDeps): Promise<Re
   return reply(answer, 200, "removed");
 }
 
+/** A person's cost from the household board: a cell another fleet serves, as it last reported. */
+export function costFromReport(
+  report: SpendReport,
+  board: BudgetBoard,
+): CostView & { readonly asOf: number } {
+  const developerLimit = board.settings.developerLimitUsd ?? DEFAULT_DEVELOPER_BUDGET_USD;
+  const line = budgetLine(report.spentUsd, report.limitUsd);
+  return {
+    person: report.cell,
+    month: report.month,
+    timeZone: report.timeZone,
+    resetsAt: 0,
+    mode: report.mode,
+    modeSince: report.modeSince,
+    spentUsd: report.spentUsd,
+    limitUsd: report.limitUsd,
+    percent: line.percent,
+    line: line.line,
+    byLayer: report.byLayer,
+    byRole: report.byRole,
+    hours: {},
+    waiting: [],
+    developer: budgetLine(board.developerUsd, developerLimit),
+    asOf: report.at,
+  };
+}
+
+/** One person's row in the household view. */
+export interface HouseholdCostRow {
+  readonly person: string;
+  readonly spentUsd: number;
+  readonly limitUsd: number;
+  readonly percent: number;
+  readonly line: string;
+  readonly mode: string;
+  readonly modeSince: number | null;
+  /** When the row was read: now for this fleet's cells, the report time for another fleet's. */
+  readonly asOf: number;
+}
+
+const readBody = async (request: Request): Promise<Record<string, unknown> | undefined> => {
+  const text = await request.text().catch(() => "");
+  if (text.length > RULE_BODY_LIMIT) return undefined;
+  try {
+    const value = JSON.parse(text) as unknown;
+    return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+};
+
+/** True when the household refused a setting (bad zone or amount), over HTTP or RPC. */
+const householdRefused = (error: unknown) =>
+  isRefusedHouseholdChange(error) || (error instanceof HouseholdCallError && error.status < 500);
+
+/**
+ * The owner's view of spend and limits, behind the operator key. A person's limit is that
+ * person cell's own setting; the developer budget and the time zone are household settings on
+ * the household cell's budget board, which every served cell reads again after a change.
+ */
+async function budgetRoute(request: Request, url: URL, deps: OpsDeps): Promise<Response> {
+  const raw = url.searchParams.get("cell");
+  const cell = raw === "person" ? "second" : raw;
+  const household = deps.household?.();
+  const persons = deps.cells.filter((name) => deps.guardOf?.(name)?.costOf !== undefined);
+  const board = async (): Promise<BudgetBoard | undefined> => {
+    if (household?.budget === undefined) return undefined;
+    try {
+      return await household.budget();
+    } catch (error) {
+      logEvent("ops.board_unread", { ...errorFields(error) }, "warn");
+      return undefined;
+    }
+  };
+
+  if (request.method === "GET" && url.pathname === "/ops/cost") {
+    if (cell !== null) {
+      const guard = deps.guardOf?.(cell);
+      if (deps.cells.includes(cell) && guard?.costOf !== undefined) {
+        const answer = await guard.costOf(cell);
+        return answer.ok
+          ? json({ ...answer.value, asOf: Date.now() })
+          : json({ error: answer.error }, answer.status);
+      }
+      const read = await board();
+      const report = read?.reports.find((each) => each.cell === cell);
+      if (read === undefined || report === undefined) {
+        return json({ error: `no spend known for ${cell}` }, 404);
+      }
+      return json(costFromReport(report, read));
+    }
+    const read = await board();
+    const rows: HouseholdCostRow[] = [];
+    let live: CostView | undefined;
+    for (const person of persons) {
+      const answer = await deps.guardOf?.(person)?.costOf?.(person);
+      if (answer === undefined || !answer.ok) continue;
+      live ??= answer.value;
+      const view = answer.value;
+      rows.push({
+        person,
+        spentUsd: view.spentUsd,
+        limitUsd: view.limitUsd,
+        percent: view.percent,
+        line: view.line,
+        mode: view.mode,
+        modeSince: view.modeSince,
+        asOf: Date.now(),
+      });
+    }
+    const month = live?.month ?? read?.reports[0]?.month ?? "";
+    for (const report of read?.reports ?? []) {
+      if (rows.some((row) => row.person === report.cell) || report.month !== month) continue;
+      const view = costFromReport(report, read as BudgetBoard);
+      rows.push({
+        person: report.cell,
+        spentUsd: view.spentUsd,
+        limitUsd: view.limitUsd,
+        percent: view.percent,
+        line: view.line,
+        mode: view.mode,
+        modeSince: view.modeSince,
+        asOf: report.at,
+      });
+    }
+    rows.sort((a, b) => (a.person === "owner" ? -1 : b.person === "owner" ? 1 : 0));
+    // This fleet's cell knows its own developer spend now; the board adds the other fleet's.
+    const developer =
+      live?.developer ??
+      budgetLine(
+        read?.developerUsd ?? 0,
+        read?.settings.developerLimitUsd ?? DEFAULT_DEVELOPER_BUDGET_USD,
+      );
+    const totalUsd = rows.reduce((sum, row) => sum + row.spentUsd, 0) + developer.spentUsd;
+    return json({
+      month,
+      timeZone: live?.timeZone ?? read?.settings.timeZone ?? "UTC",
+      totalUsd: Math.round(totalUsd * 100) / 100,
+      persons: rows,
+      developer,
+    });
+  }
+
+  if (request.method !== "PUT") return json({ error: "not found" }, 404);
+  const body = await readBody(request);
+  if (body === undefined) return json({ error: `the body is over ${RULE_BODY_LIMIT} bytes` }, 413);
+
+  if (url.pathname === "/ops/limits" && cell !== null) {
+    if (!deps.cells.includes(cell)) {
+      return json({ error: `cell ${cell} is served by another fleet` }, 404);
+    }
+    const guard = deps.guardOf?.(cell);
+    if (guard?.setLimitOf === undefined)
+      return json({ error: `${cell} is not a person cell` }, 404);
+    const answer = await guard.setLimitOf(cell, body.limitUsd);
+    logEvent("ops.limits", { cell, budget: "person", ok: answer.ok });
+    return answer.ok ? json(answer.value) : json({ error: answer.error }, answer.status);
+  }
+
+  const developer =
+    url.pathname === "/ops/limits" && url.searchParams.get("budget") === DEVELOPER_ROLE;
+  const zone = url.pathname === "/ops/time-zone";
+  if (!developer && !zone) {
+    return json({ error: "send ?cell=<person> or ?budget=developer" }, 400);
+  }
+  if (household?.setBudget === undefined) {
+    return json({ error: "no household cell in this fleet" }, 503);
+  }
+  const change = developer ? { developerLimitUsd: body.limitUsd } : { timeZone: body.timeZone };
+  if (Object.values(change)[0] === undefined) {
+    return json(
+      { error: developer ? 'send {"limitUsd": <usd>}' : 'send {"timeZone": "<IANA>"}' },
+      400,
+    );
+  }
+  try {
+    const settings = await household.setBudget(change as never);
+    logEvent("ops.limits", { budget: developer ? DEVELOPER_ROLE : "time_zone", ok: true });
+    // Each served person cell reads the new settings now; another fleet's at its next report.
+    for (const person of persons) {
+      await deps
+        .guardOf?.(person)
+        ?.refreshBudget?.(person)
+        .catch((error: unknown) => {
+          logEvent("ops.refresh_failed", { cell: person, ...errorFields(error) }, "warn");
+        });
+    }
+    return json({
+      timeZone: settings.timeZone,
+      developerLimitUsd: settings.developerLimitUsd ?? DEFAULT_DEVELOPER_BUDGET_USD,
+    });
+  } catch (error) {
+    if (!householdRefused(error)) throw error;
+    logEvent("ops.limits", { budget: developer ? DEVELOPER_ROLE : "time_zone", ok: false });
+    return json(
+      { error: `refused: ${error instanceof Error ? error.message : String(error)}` },
+      400,
+    );
+  }
+}
+
 /** Handles one `/ops/*` request; the caller has checked the path prefix. */
 export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise<Response> {
   const url = new URL(request.url);
@@ -215,6 +438,14 @@ export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise
     route === "GET /ops/activity"
   ) {
     return guardRoute(request, url, deps);
+  }
+
+  if (
+    url.pathname === "/ops/cost" ||
+    url.pathname === "/ops/limits" ||
+    url.pathname === "/ops/time-zone"
+  ) {
+    return budgetRoute(request, url, deps);
   }
 
   if (route === "POST /ops/write") {
