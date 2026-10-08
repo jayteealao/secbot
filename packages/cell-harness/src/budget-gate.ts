@@ -89,7 +89,14 @@ export class BudgetGate implements BudgetWaiter {
       for (;;) {
         context.abortSignal?.throwIfAborted();
         const state = await this.options.state(context);
-        if (state[request.budget].line !== "over") return;
+        if (state[request.budget].line !== "over") {
+          // An entry an earlier run listed (a restart aborted its wait) ends here too.
+          if (!listed) {
+            const waits = await harness().snapshot(BudgetWaitsDoc, context);
+            listed = waits?.tasks[request.taskId] !== undefined;
+          }
+          return;
+        }
         if (!listed) {
           await harness().commit(async (tx) => {
             const waits = await tx.doc(BudgetWaitsDoc);
