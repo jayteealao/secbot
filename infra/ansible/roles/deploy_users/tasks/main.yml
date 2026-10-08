@@ -1,0 +1,181 @@
+# Two restricted users. Their SSH keys can run only secbot-release (forced command):
+# deploy-test stages bundles and deploys the test cell; deploy also reaches production.
+# Public keys come from the owner's shell: SECBOT_DEPLOY_TEST_PUBKEY, SECBOT_DEPLOY_PUBKEY.
+- name: Check that both deploy public keys are in the environment
+  ansible.builtin.assert:
+    that: lookup('ansible.builtin.env', item) | length > 0
+    fail_msg: "Set {{ item }} in your shell (the public half of the CI deploy key)."
+    quiet: true
+  loop:
+    - SECBOT_DEPLOY_TEST_PUBKEY
+    - SECBOT_DEPLOY_PUBKEY
+  delegate_to: localhost
+  become: false
+  run_once: true
+
+- name: Create the release groups
+  ansible.builtin.group:
+    name: "{{ item }}"
+    system: true
+  loop:
+    - secbot
+    - secbot-test
+    - secbot-prod
+
+# deploy-test reaches the test cell only; deploy also reaches the production fleets (secbot-prod).
+- name: Create the deploy users
+  ansible.builtin.user:
+    name: "{{ item.name }}"
+    groups: "{{ item.groups }}"
+    shell: /bin/bash
+    password: "!"
+    create_home: true
+  loop:
+    - { name: deploy-test, groups: [secbot, secbot-test] }
+    - { name: deploy, groups: [secbot, secbot-test, secbot-prod] }
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Create the release state directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: secbot
+    mode: "2770"
+  loop:
+    - /var/lib/secbot
+    - /var/lib/secbot/releases
+    - /var/lib/secbot/deploy
+
+- name: Create the VPS deploy lock file
+  ansible.builtin.copy:
+    dest: /var/lib/secbot/deploy.lock
+    content: ""
+    owner: root
+    group: secbot
+    mode: "0660"
+    force: false
+
+# Append-only by the release tool; only the production caller (secbot-prod) may write it.
+- name: Create the deploy ledger
+  ansible.builtin.copy:
+    dest: /var/lib/secbot/ledger.jsonl
+    content: ""
+    owner: root
+    group: secbot-prod
+    mode: "0660"
+    force: false
+
+- name: Install the release tool
+  ansible.builtin.copy:
+    src: secbot-release
+    dest: /usr/local/bin/secbot-release
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Allow each deploy key to run only the release tool
+  ansible.posix.authorized_key:
+    user: "{{ item.user }}"
+    key: "{{ lookup('ansible.builtin.env', item.key_env) }}"
+    key_options: 'command="/usr/local/bin/secbot-release {{ item.user }}",restrict'
+    exclusive: true
+  loop:
+    - { user: deploy-test, key_env: SECBOT_DEPLOY_TEST_PUBKEY }
+    - { user: deploy, key_env: SECBOT_DEPLOY_PUBKEY }
+  loop_control:
+    label: "{{ item.user }}"
+
+- name: Create the secbot configuration directory
+  ansible.builtin.file:
+    path: /etc/secbot
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+# The environments this run writes runtime settings for: the test cell always; production with
+# -e celld_production=true (the same switch that sets up the production fleets).
+- name: Choose the environments this run sets up
+  ansible.builtin.set_fact:
+    deploy_users_envs: >-
+      {{ [{'env': 'test-cell', 'group': 'secbot-test', 'heartbeats_env': 'SECBOT_HEARTBEAT_URLS', 'own': 'SECBOT_TEST_'}]
+         + ([{'env': 'production', 'group': 'secbot-prod', 'heartbeats_env': 'SECBOT_PROD_HEARTBEAT_URLS', 'own': ''}]
+            if (celld_production | default(false) | bool) else []) }}
+
+- name: Check the cells' runtime values are in the shell environment
+  ansible.builtin.assert:
+    that: lookup('ansible.builtin.env', item) | length > 0
+    fail_msg: "set {{ item }} in your shell before host setup; the release tool fills the cell's config from it"
+    quiet: true
+  loop:
+    - OPENROUTER_API_KEY
+    - BETTERSTACK_INCIDENTS_TOKEN
+    - BETTERSTACK_REQUESTER_EMAIL
+    - SECBOT_DEVICE_KEYS
+    - SECBOT_PRIVATE_HOSTS
+  no_log: true
+
+# The test cell runs bundles staged by the lower-trust test key. Its model key, incidents token,
+# and device keys can be its own: SECBOT_TEST_OPENROUTER_API_KEY, SECBOT_TEST_BETTERSTACK_INCIDENTS_TOKEN,
+# and SECBOT_TEST_DEVICE_KEYS replace the shared values for the test cell when they are set.
+# Heartbeat URLs per environment: SECBOT_HEARTBEAT_URLS (test cell) and SECBOT_PROD_HEARTBEAT_URLS
+# (production), each "<cell>:<ping URL>,..." from the infra/tofu heartbeat_urls output.
+- name: Write each environment's runtime settings (readable by its deploy users only)
+  ansible.builtin.copy:
+    dest: "/etc/secbot/{{ item.env }}-runtime.env"
+    content: |
+      OPENROUTER_API_KEY={{ lookup('ansible.builtin.env', item.own ~ 'OPENROUTER_API_KEY', default='') or lookup('ansible.builtin.env', 'OPENROUTER_API_KEY') }}
+      BETTERSTACK_INCIDENTS_TOKEN={{ lookup('ansible.builtin.env', item.own ~ 'BETTERSTACK_INCIDENTS_TOKEN', default='')
+        or lookup('ansible.builtin.env', 'BETTERSTACK_INCIDENTS_TOKEN') }}
+      BETTERSTACK_REQUESTER_EMAIL={{ lookup('ansible.builtin.env', 'BETTERSTACK_REQUESTER_EMAIL') }}
+      SECBOT_DEVICE_KEYS={{ lookup('ansible.builtin.env', (item.own or 'SECBOT_') ~ 'DEVICE_KEYS', default='')
+        or lookup('ansible.builtin.env', 'SECBOT_DEVICE_KEYS') }}
+      SECBOT_PRIVATE_HOSTS={{ lookup('ansible.builtin.env', 'SECBOT_PRIVATE_HOSTS') }}
+      SECBOT_HEARTBEAT_URLS={{ lookup('ansible.builtin.env', item.heartbeats_env, default='') }}
+      SECBOT_TIME_ZONE={{ lookup('ansible.builtin.env', 'SECBOT_TIME_ZONE', default='') }}
+    owner: root
+    group: "{{ item.group }}"
+    mode: "0640"
+  loop: "{{ deploy_users_envs }}"
+  loop_control:
+    label: "{{ item.env }}-runtime.env"
+  no_log: true
+
+# The operator key gates the cells' snapshot, restore, wipe, and household routes. It is made on
+# the VPS once and never leaves it: the release tool fills it into the worker config at deploy.
+- name: Create each environment's operator key once (never shown)
+  ansible.builtin.shell: |
+    set -o pipefail
+    umask 077
+    openssl rand -hex 32 > "/etc/secbot/{{ item.env }}-operator.key"
+  args:
+    executable: /bin/bash
+    creates: "/etc/secbot/{{ item.env }}-operator.key"
+  loop: "{{ deploy_users_envs }}"
+  loop_control:
+    label: "{{ item.env }}-operator.key"
+  no_log: true
+
+- name: Let each environment's deploy users read its operator key
+  ansible.builtin.file:
+    path: "/etc/secbot/{{ item.env }}-operator.key"
+    owner: root
+    group: "{{ item.group }}"
+    mode: "0640"
+  loop: "{{ deploy_users_envs }}"
+  loop_control:
+    label: "{{ item.env }}-operator.key"
+
+- name: Let the deploy users kill, stop, and start the test cell's unit only
+  ansible.builtin.copy:
+    dest: /etc/sudoers.d/secbot-test-cell
+    content: |
+      # The test cell's crash and downtime checks; nothing else, and never the production unit.
+      deploy-test,deploy ALL=(root) NOPASSWD: /usr/bin/systemctl kill -s KILL celld@test, \
+        /usr/bin/systemctl stop celld@test, /usr/bin/systemctl start celld@test
+    owner: root
+    group: root
+    mode: "0440"
+    validate: visudo -cf %s

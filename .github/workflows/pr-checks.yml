@@ -124,6 +124,9 @@ jobs:
         uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Addresses, private-network hostnames, account ids, and ping URLs (no dependencies needed).
+      - name: Scan for identifiers
+        run: node scripts/check-identifiers.mjs
 
   osv-scanner:
     name: osv-scanner
@@ -166,3 +169,36 @@ jobs:
       # The diff against the live test cell runs in release-server.yml.
       - name: Publish dry-run
         run: mise run deploy:dry-run
+
+  # The release tool's client, the workflow-shape tests, and the identifier scanner tests.
+  test-scripts:
+    name: test-scripts
+    if: ${{ vars.SDLC_GATE_SERVER == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          forks-token: ${{ secrets.FORKS_READ_TOKEN }}
+      - name: Test the task scripts
+        run: node --test scripts/*.test.mjs
+
+  # The infrastructure code, the VPS release tool, and the workflows themselves.
+  infra-check:
+    name: infra-check
+    if: ${{ vars.SDLC_GATE_SERVER == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install_args: node opentofu pipx:ansible-core pipx:ansible-lint
+          cache: true
+      - name: OpenTofu and Ansible static checks
+        run: mise run infra:check
+      - name: Shell check of the VPS release tool
+        run: shellcheck infra/ansible/roles/deploy_users/files/secbot-release
+      - name: Workflow lint (actionlint)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7 -color

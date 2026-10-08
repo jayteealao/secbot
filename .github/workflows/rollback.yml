@@ -60,6 +60,7 @@ jobs:
   approve:
     if: ${{ vars.SDLC_GATE_SERVER_RELEASE == 'true' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: production
     steps:
       - name: Validate the inputs
@@ -102,6 +103,7 @@ jobs:
   rollback:
     needs: approve
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: production-rollout
     steps:
       - uses: actions/checkout@v7
@@ -125,6 +127,7 @@ jobs:
   verify-rollback:
     needs: rollback
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: production-rollout
     env:
       HEARTBEAT_API_TOKEN: ${{ secrets.HEARTBEAT_API_TOKEN }}

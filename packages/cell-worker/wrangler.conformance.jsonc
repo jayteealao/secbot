@@ -1,0 +1,35 @@
+// Test-cell deployment: the person-cell routes, the household cell, ConformanceCell, and the
+// durability lab. Never deployed to a person cell. The vars are names only: secbot-release fills
+// them on the VPS at deploy time.
+{
+  "name": "secbot",
+  "main": "index.js",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["js_rpc"],
+  "durable_objects": {
+    "bindings": [
+      { "name": "CONFORMANCE", "class_name": "ConformanceCell" },
+      { "name": "PERSON_CELL", "class_name": "PersonCell" },
+      { "name": "HOUSEHOLD_CELL", "class_name": "HouseholdCell" },
+      { "name": "LAB", "class_name": "DurabilityLabCell" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ConformanceCell"] },
+    { "tag": "v2", "new_sqlite_classes": ["PersonCell"] },
+    { "tag": "v3", "new_sqlite_classes": ["HouseholdCell", "DurabilityLabCell"] }
+  ],
+  "r2_buckets": [{ "binding": "SNAPSHOTS", "bucket_name": "secbot-snapshots" }],
+  "vars": {
+    "OPENROUTER_API_KEY": "",
+    "BETTERSTACK_INCIDENTS_TOKEN": "",
+    "BETTERSTACK_REQUESTER_EMAIL": "",
+    "SECBOT_DEVICE_KEYS": "",
+    "SECBOT_PRIVATE_HOSTS": "",
+    "SECBOT_HEARTBEAT_URLS": "",
+    "SECBOT_TIME_ZONE": "",
+    "SECBOT_OPERATOR_KEY": "",
+    "SECBOT_FLEET_CELLS": "",
+    "SECBOT_HOUSEHOLD_URL": ""
+  }
+}

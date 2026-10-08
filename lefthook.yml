@@ -5,6 +5,8 @@ pre-commit:
   commands:
     gitleaks:
       run: gitleaks git --staged --redact --no-banner
+    identifiers:
+      run: node scripts/check-identifiers.mjs --staged
     biome:
       glob: "*.{js,jsx,ts,tsx,mjs,cjs,json,jsonc,css}"
       run: pnpm biome check --staged --no-errors-on-unmatched --files-ignore-unknown=true

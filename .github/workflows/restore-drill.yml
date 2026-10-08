@@ -1,0 +1,90 @@
+# Restore drill (runbook cell-restore): prove each month that a production snapshot restores.
+# The drill copies the newest release snapshot (or the one named) of a production cell into
+# the test cell and restores it there; the test cell then reports up with the restored data.
+#
+# The test cell holds real data until its next deploy: the release tool marks the restored
+# cells, and the next test-cell deploy wipes them before it deploys ("drill data wiped").
+# The production environment approval is the owner's yes to that.
+#
+# Production is never written: the drill reads the production snapshot and writes only the
+# test cell. The inputs reach shell commands only through environment variables, after a
+# whole-string match.
+#
+# Inert until SDLC_GATE_SERVER_RELEASE is "true".
+name: Restore drill (server)
+
+on:
+  schedule:
+    # 06:17 UTC on the 1st of each month.
+    - cron: "17 6 1 * *"
+  workflow_dispatch:
+    inputs:
+      snapshot:
+        description: "Snapshot id from the deploy ledger (empty: the newest release snapshot)"
+        required: false
+        type: string
+        default: ""
+      cells:
+        description: "The production cell to drill"
+        required: false
+        type: choice
+        default: owner
+        options:
+          - owner
+          - person
+          - household
+
+permissions:
+  contents: read
+
+# The drill, a release, a rollback, and a restore never change a cell at the same time: the
+# VPS deploy lock serializes them.
+concurrency:
+  group: restore-drill
+  cancel-in-progress: false
+
+env:
+  SNAPSHOT: ${{ inputs.snapshot || '' }}
+  CELLS: ${{ inputs.cells || 'owner' }}
+
+jobs:
+  drill:
+    if: ${{ vars.SDLC_GATE_SERVER_RELEASE == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Validate the inputs
+        run: |
+          if ! [[ "$CELLS" =~ ^(owner|person|household)$ ]]; then
+            echo "::error::The cells input is not owner, person, or household"
+            exit 1
+          fi
+          if [ -n "$SNAPSHOT" ] && ! [[ "$SNAPSHOT" =~ ^pre-v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?-[0-9]+$ ]]; then
+            echo "::error::The snapshot input is not a snapshot id like pre-v0.5.0-1234567890"
+            exit 1
+          fi
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-node-env
+        with:
+          install: "false"
+      - uses: ./.github/actions/vps-access
+        with:
+          oauth-client-id: ${{ secrets.PRIVATE_NET_PROD_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.PRIVATE_NET_PROD_OAUTH_SECRET }}
+          network-tag: tag:ci-prod
+          host: ${{ secrets.VPS_DEPLOY_HOST }}
+          ssh-key: ${{ secrets.VPS_DEPLOY_SSH_KEY }}
+          known-hosts: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          user: deploy
+      - name: Restore the snapshot into the test cell
+        run: |
+          if [ -n "$SNAPSHOT" ]; then
+            mise run restore:drill -- --cells "$CELLS" --snapshot "$SNAPSHOT"
+          else
+            mise run restore:drill -- --cells "$CELLS"
+          fi
+      - name: Check the test cell reports up with the restored data
+        uses: ./.github/actions/poll-check
+        with:
+          cmd: mise run check:cells -- --env test-cell

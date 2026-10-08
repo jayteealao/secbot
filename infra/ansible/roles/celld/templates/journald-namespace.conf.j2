@@ -1,0 +1,10 @@
+# Managed by Ansible (infra/ansible/roles/celld). Used only by the celld@ units
+# (LogNamespace={{ celld_log_namespace }}); the VPS-wide /etc/systemd/journald.conf is not touched.
+# Read with: sudo journalctl --namespace={{ celld_log_namespace }} -u celld@<fleet>
+[Journal]
+Storage=persistent
+Compress=yes
+SystemMaxUse={{ celld_journal_max_use }}
+SystemKeepFree={{ celld_journal_keep_free }}
+MaxRetentionSec={{ celld_journal_retention }}
+MaxFileSec={{ celld_journal_max_file }}

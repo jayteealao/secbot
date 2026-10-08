@@ -1,0 +1,4 @@
+# Files that run on the VPS or in CI keep LF endings on every checkout.
+infra/** text eol=lf
+scripts/** text eol=lf
+*.sh text eol=lf
