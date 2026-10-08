@@ -10,16 +10,30 @@
  *   secbot model set <role> <model-id>
  *   secbot specialist add <name> --instruction "<text>" [--model <model-id>]
  *   secbot device new <name>
+ *   secbot rules list | add | remove        (owner rules: --owner --person <name>)
+ *   secbot activity [--month YYYY-MM]       (another person: --person <name>)
+ *
+ * The owner's views of another person use the operator key (SECBOT_OPERATOR_KEY, or operator.json
+ * in the config folder), sent only to the operator routes.
  */
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { CellClient } from "./client.ts";
+import { CellClient, OperatorClient } from "./client.ts";
+import { activity } from "./commands/activity.ts";
 import { chat } from "./commands/chat.ts";
 import { deviceNew } from "./commands/device.ts";
 import { missed } from "./commands/missed.ts";
 import { modelList, modelSet } from "./commands/model.ts";
+import {
+  deviceTarget,
+  type GuardTarget,
+  operatorTarget,
+  rulesAdd,
+  rulesList,
+  rulesRemove,
+} from "./commands/rules.ts";
 import { specialistAdd } from "./commands/specialist.ts";
 import { CliError, type Environment } from "./config.ts";
 import { type Io, processIo } from "./io.ts";
@@ -31,6 +45,12 @@ const USAGE = `usage:
   secbot model set <role> <model-id>
   secbot specialist add <name> --instruction "<text>" [--model <model-id>]
   secbot device new <name>
+  secbot rules list
+  secbot rules add <agent> <tool> <permit|ask-first|prohibit> [match]
+  secbot rules remove <agent> <tool> [match]
+      match: --exact | --prefix | --email-domain | --web-domain | --regex <argument>=<value>
+      owner rules for a person: --owner --person <name> (operator key)
+  secbot activity [--month YYYY-MM] [--person <name> (operator key)]
 `;
 
 export interface RunOptions {
@@ -50,6 +70,14 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
         instruction: { type: "string" },
         model: { type: "string" },
         help: { type: "boolean", short: "h" },
+        exact: { type: "string" },
+        prefix: { type: "string" },
+        "email-domain": { type: "string" },
+        "web-domain": { type: "string" },
+        regex: { type: "string" },
+        owner: { type: "boolean" },
+        person: { type: "string" },
+        month: { type: "string" },
       },
     });
     const [command, sub, ...rest] = positionals;
@@ -72,6 +100,30 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
       return await modelSet(await client(), io, rest[0], rest[1]);
     if (command === "specialist" && sub === "add") {
       return await specialistAdd(await client(), io, rest[0], values.instruction, values.model);
+    }
+    const operator = async (person: string): Promise<GuardTarget> =>
+      operatorTarget(await OperatorClient.from(environment, options.fetch), person);
+    if (command === "rules" && (sub === "list" || sub === "add" || sub === "remove")) {
+      if ((values.owner === true) !== (values.person !== undefined)) {
+        throw new CliError("owner rules take --owner and --person <name> together", 2);
+      }
+      const target =
+        values.person === undefined ? deviceTarget(await client()) : await operator(values.person);
+      const match = {
+        ...(values.exact === undefined ? {} : { exact: values.exact }),
+        ...(values.prefix === undefined ? {} : { prefix: values.prefix }),
+        ...(values["email-domain"] === undefined ? {} : { "email-domain": values["email-domain"] }),
+        ...(values["web-domain"] === undefined ? {} : { "web-domain": values["web-domain"] }),
+        ...(values.regex === undefined ? {} : { regex: values.regex }),
+      };
+      if (sub === "list") return await rulesList(target, io);
+      if (sub === "add") return await rulesAdd(target, io, rest, match);
+      return await rulesRemove(target, io, rest, match);
+    }
+    if (command === "activity" && sub === undefined) {
+      const target =
+        values.person === undefined ? deviceTarget(await client()) : await operator(values.person);
+      return await activity(target, io, values.month);
     }
     io.stderr(USAGE);
     return 2;

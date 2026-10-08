@@ -5,9 +5,12 @@
 import {
   type ConversationId,
   defineDoc,
+  defineDocFamily,
   type EntryId,
   type TaskId,
 } from "@earendil-works/pi-durable";
+import type { ActivityRecord } from "./activity.ts";
+import type { Rule } from "./rules.ts";
 
 export type SpecialistRecord = {
   conversationId: ConversationId;
@@ -66,4 +69,44 @@ export const DeliveryDoc = defineDoc<{ devices: Record<string, EntryId> }>({
   version: 1,
   scope: "session",
   initial: () => ({ devices: {} }),
+});
+
+/**
+ * `secbot.rules`: the owner's rules and the person's rules for this person's agents. Seeded once
+ * with the release owner rule and the four default person rules (`seeded`).
+ */
+export const RulesDoc = defineDoc<{
+  seeded: boolean;
+  nextId: number;
+  owner: Rule[];
+  person: Rule[];
+}>({
+  kind: "secbot.rules",
+  version: 1,
+  scope: "session",
+  initial: () => ({ seeded: false, nextId: 1, owner: [], person: [] }),
+});
+
+/**
+ * `secbot.activity`: per month (`YYYY-MM` in the cell's time zone) the number of pages and
+ * records, and the keys of the newest records, so a guard that runs again after a crash finds
+ * its record and writes no second one.
+ */
+export const ActivityDoc = defineDoc<{
+  months: Record<string, { pages: number; total: number }>;
+  recent: string[];
+}>({
+  kind: "secbot.activity",
+  version: 1,
+  scope: "session",
+  initial: () => ({ months: {}, recent: [] }),
+});
+
+/** `secbot.activity-page`: up to ACTIVITY_PAGE_SIZE records, keyed `YYYY-MM:<page>` (from 1). */
+export const ActivityPageDoc = defineDocFamily<{ records: ActivityRecord[] }, null>({
+  kind: "secbot.activity-page",
+  version: 1,
+  scope: "session",
+  family: true,
+  initial: () => ({ records: [] }),
 });

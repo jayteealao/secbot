@@ -32,8 +32,12 @@ import {
   type HouseholdDocument,
   heartbeatState,
   logEvent,
+  MONTH,
   openCellHarness,
   RefusedChange,
+  type Rule,
+  type RuleLevel,
+  RuleNotFound,
   type SessionStream,
 } from "@secbot/cell-harness";
 import {
@@ -146,6 +150,52 @@ function parseInput(data: string | ArrayBuffer): ParsedInput {
 }
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
+
+/**
+ * A guard answer for RPC and routes alike: the value, or a status and a reason. RPC returns it
+ * instead of throwing, so a refusal keeps its status and text across the celld RPC boundary.
+ */
+export type GuardAnswer<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly status: number; readonly error: string };
+
+/** Activity query parameters, checked: month YYYY-MM, before >= 0, limit 1-200. */
+export function activityQuery(
+  params: URLSearchParams,
+): { month?: string; before?: number; limit?: number } | { error: string } {
+  const month = params.get("month");
+  const before = params.get("before");
+  const limit = params.get("limit");
+  if (month !== null && !MONTH.test(month)) return { error: "month must be YYYY-MM" };
+  if (before !== null && !/^\d{1,9}$/.test(before)) return { error: "before must be a number" };
+  if (limit !== null && !(/^\d{1,3}$/.test(limit) && Number(limit) >= 1 && Number(limit) <= 200)) {
+    return { error: "limit must be 1-200" };
+  }
+  return {
+    ...(month === null ? {} : { month }),
+    ...(before === null ? {} : { before: Number(before) }),
+    ...(limit === null ? {} : { limit: Number(limit) }),
+  };
+}
+
+/** Runs a rule or activity call; refusals become 400 ("refused: …"), a missing rule 404. */
+async function guardAnswer<T>(work: () => Promise<T>): Promise<GuardAnswer<T>> {
+  try {
+    return { ok: true, value: await work() };
+  } catch (error) {
+    if (error instanceof RuleNotFound) return { ok: false, status: 404, error: error.message };
+    if (error instanceof RefusedChange) {
+      return { ok: false, status: 400, error: `refused: ${error.message}` };
+    }
+    throw error;
+  }
+}
+
+const answerJson = <T>(
+  answer: GuardAnswer<T>,
+  status = 200,
+  wrap: (value: T) => unknown = (v) => v,
+) => (answer.ok ? json(wrap(answer.value), status) : json({ error: answer.error }, answer.status));
 
 /** Reads a JSON body of at most BODY_LIMIT characters; undefined when it is larger or not JSON. */
 async function readJson(request: Request): Promise<Record<string, unknown> | undefined> {
@@ -438,11 +488,70 @@ export class PersonCell {
         this.rearmSoon(person);
         return json({ name: body.name, status: "added" }, 201);
       }
+      if (route === "/rules") return this.rulesRoute(request, cell, "person");
+      if (request.method === "GET" && route === "/activity") {
+        const query = activityQuery(url.searchParams);
+        if ("error" in query) return json({ error: query.error }, 400);
+        return json({ person, ...(await cell.activity(query)) });
+      }
       return json({ error: "not found" }, 404);
     } catch (error) {
       if (error instanceof RefusedChange) return json({ error: error.message }, 400);
       throw error;
     }
+  }
+
+  /**
+   * GET lists both levels; POST adds one rule (body: agent, tool, verdict, match?); DELETE removes
+   * the rule with the body's agent, tool, and match. A device key edits only the person's level.
+   */
+  private async rulesRoute(request: Request, cell: CellHarness, level: RuleLevel) {
+    if (request.method === "GET") return json({ ...(await cell.rules()), timeZone: cell.timeZone });
+    if (request.method !== "POST" && request.method !== "DELETE") {
+      return json({ error: "not found" }, 404);
+    }
+    const body = await readJson(request);
+    if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+    if (request.method === "POST") {
+      return answerJson(await guardAnswer(() => cell.addRule(level, body)), 201, (rule) => ({
+        rule,
+      }));
+    }
+    return answerJson(await guardAnswer(() => cell.removeRule(level, body)), 200, (removed) => ({
+      removed,
+    }));
+  }
+
+  /** RPC (operator routes): both levels of a person's rules. */
+  async ownerRules(
+    person: string,
+  ): Promise<GuardAnswer<{ owner: Rule[]; person: Rule[]; timeZone: string }>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => {
+      const rules = await cell.rules();
+      return { owner: [...rules.owner], person: [...rules.person], timeZone: cell.timeZone };
+    });
+  }
+
+  /** RPC (operator routes): adds an owner rule for this person's agents. */
+  async addOwnerRule(person: string, input: unknown): Promise<GuardAnswer<Rule>> {
+    const cell = await this.cell(person);
+    return guardAnswer(() => cell.addRule("owner", input));
+  }
+
+  /** RPC (operator routes): removes an owner rule; the release rule cannot be removed. */
+  async removeOwnerRule(person: string, input: unknown): Promise<GuardAnswer<Rule>> {
+    const cell = await this.cell(person);
+    return guardAnswer(() => cell.removeRule("owner", input));
+  }
+
+  /** RPC (operator routes): a person's activity for the owner. */
+  async activityOf(
+    person: string,
+    query: { month?: string; before?: number; limit?: number },
+  ): Promise<GuardAnswer<Record<string, unknown>>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => ({ person, ...(await cell.activity(query)) }));
   }
 
   private async openSession(cell: CellHarness, person: string, device: string): Promise<Response> {

@@ -75,6 +75,12 @@ export interface FakeCell {
   /** Called with each new input; answer through the socket. */
   onInput: (input: { text: string; requestId: string }, socket: ServerSocket) => void;
   missed: unknown[];
+  /** The guard routes: both rule levels, the activity answer, and a refusal for the next add. */
+  rules: { owner: Record<string, unknown>[]; person: Record<string, unknown>[]; timeZone: string };
+  activity: Record<string, unknown>;
+  refuseNextAdd: string | undefined;
+  /** The operator key the /ops routes accept. */
+  operatorKey: string;
   close(): Promise<void>;
 }
 
@@ -86,6 +92,10 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     calls: [],
     onInput: () => {},
     missed: [],
+    rules: { owner: [], person: [], timeZone: "UTC" },
+    activity: { person, month: "2026-10", timeZone: "UTC", total: 0, records: [], next: null },
+    refuseNextAdd: undefined,
+    operatorKey: "operator-key-0123456789abcdef",
     close: async () => {},
   };
   const seen = new Set<string>();
@@ -110,6 +120,42 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
         response.writeHead(status, { "content-type": "application/json" });
         response.end(JSON.stringify(value));
       };
+      const guard = (level: "owner" | "person", route: string) => {
+        if (route === "rules" && request.method === "GET") return reply(200, cell.rules);
+        if (route === "activity" && request.method === "GET") return reply(200, cell.activity);
+        const given = (body ?? {}) as Record<string, unknown>;
+        if (route === "rules" && request.method === "POST") {
+          if (cell.refuseNextAdd !== undefined) {
+            const error = cell.refuseNextAdd;
+            cell.refuseNextAdd = undefined;
+            return reply(400, { error });
+          }
+          const rule = { ...given, id: 100 + cell.rules[level].length, source: level, addedAt: 0 };
+          cell.rules[level].push(rule);
+          return reply(201, { rule });
+        }
+        if (route === "rules" && request.method === "DELETE") {
+          const list = cell.rules[level];
+          const index = list.findIndex(
+            (rule) =>
+              rule.agent === given.agent &&
+              rule.tool === given.tool &&
+              JSON.stringify(rule.match) === JSON.stringify(given.match),
+          );
+          if (index === -1) return reply(404, { error: "no rule" });
+          const [removed] = list.splice(index, 1);
+          return reply(200, { removed });
+        }
+        return reply(404, { error: "not found" });
+      };
+      if (path.startsWith("/ops/")) {
+        if (request.headers["x-secbot-operator"] !== cell.operatorKey) {
+          return reply(401, { error: "refused: operator_key" });
+        }
+        const url = new URL(path, "http://cell");
+        if (url.searchParams.get("cell") !== "sam") return reply(404, { error: "no such cell" });
+        return guard("owner", url.pathname.slice(5));
+      }
       if (!authorized(request)) return reply(401, { error: "refused: unknown_key" });
       if (!path.startsWith(`${prefix}/`)) return reply(403, { error: "refused: other_person" });
       const route = path.slice(prefix.length);
@@ -134,6 +180,8 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
           return reply(400, { error: `unknown model "${model}"` });
         return reply(200, { role: route.slice(8), model, source: "changed" });
       }
+      const guardRoute = /^\/(rules|activity)(\?.*)?$/.exec(route);
+      if (guardRoute !== null) return guard("person", guardRoute[1] ?? "");
       if (route === "/specialists" && request.method === "POST")
         return reply(201, { name: body?.name, status: "added" });
       return reply(404, { error: "not found" });

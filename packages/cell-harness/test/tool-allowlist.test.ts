@@ -44,4 +44,23 @@ describe("tool lists", () => {
     const installed = test.cell.extensions.lead.flatMap((extension) => extension.tools ?? []);
     expect(installed.map((tool) => tool.name).sort()).toEqual(LEAD_TOOLS);
   });
+
+  it("puts the guard first in the lead's list and in every specialist's, one added later included", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    expect(test.cell.extensions.lead[0]?.name).toBe("secbot-guard");
+    expect(test.cell.extensions.specialist[0]?.name).toBe("secbot-guard");
+    const lead = await test.cell.root.agent(BACKGROUND_CONTEXT);
+    expect(lead.extensions[0]?.name).toBe("secbot-guard");
+    await test.cell.addSpecialist({ name: "garden", instruction: "Plants." });
+    const roster = await test.cell.harness.snapshot(RosterDoc, BACKGROUND_CONTEXT);
+    for (const record of Object.values(roster?.specialists ?? {})) {
+      const conversation = await test.cell.harness.conversation(
+        record.conversationId,
+        BACKGROUND_CONTEXT,
+      );
+      const agent = await conversation?.agent(BACKGROUND_CONTEXT);
+      expect(agent?.extensions[0]?.name).toBe("secbot-guard");
+    }
+  });
 });

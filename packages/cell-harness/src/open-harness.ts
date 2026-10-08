@@ -11,6 +11,7 @@ import {
   type Conversation,
   createRegistry,
   defineExtension,
+  type Extension,
   type Harness,
   Harness as HarnessFactory,
   type Submission,
@@ -20,11 +21,13 @@ import {
   type CelldStorage,
   openCelldStorageWithDatabase,
 } from "@secbot/cell-storage";
+import { type ActivityPage, type ActivityQuery, listActivity } from "./activity.ts";
 import { type AlertEnv, createAlerts } from "./alerts.ts";
 import { type CellParts, errorFields, logEvent } from "./cell-parts.ts";
 import { type MissedPage, markDelivered, missedPage } from "./delivery.ts";
 import { ModelHealthDoc, RosterDoc } from "./docs.ts";
 import { createGatewayModels, type GatewayEnv } from "./gateway.ts";
+import { createGuardExtension } from "./guard.ts";
 import { createHandoffExtension } from "./handoff.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import { createHistoryExtension } from "./history-search.ts";
@@ -39,6 +42,8 @@ import {
 } from "./reminder.ts";
 import { addSpecialist, ensureRoster } from "./roster.ts";
 import { ensureRoutines, type Routine } from "./routines.ts";
+import { addRule, listRules, type RuleLists, removeRule, seedRules } from "./rule-store.ts";
+import type { Rule, RuleLevel } from "./rules.ts";
 import { createLeadExtension, type TimeEnv, timeZoneOf } from "./sections.ts";
 import { type Frame, openSessionStream, type SessionStream } from "./session-stream.ts";
 import { cellSettings } from "./settings.ts";
@@ -69,6 +74,8 @@ export interface OpenCellOptions {
   readonly onWakeChange?: () => void;
   /** More recurring routines beside the heartbeat (for example a morning briefing). */
   readonly routines?: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
+  /** Tests: more extensions for every role, after the release ones (the guard stays first). */
+  readonly extensions?: readonly Extension[];
 }
 
 export interface CellStatus {
@@ -91,7 +98,40 @@ export class CellHarness implements CellParts {
     readonly database: CelldSqliteDatabase,
     readonly reminders: Routine<ReminderPayload>,
     readonly now: () => number,
+    /** The cell's time zone: activity months and times are read in it. */
+    readonly timeZone: string = "UTC",
   ) {}
+
+  /** The owner's rules and the person's rules. */
+  rules(context: Context = BACKGROUND_CONTEXT): Promise<RuleLists> {
+    return listRules(this, context);
+  }
+
+  /** Adds a rule; a person rule looser than an owner rule is refused (RefusedChange). */
+  addRule(level: RuleLevel, input: unknown, context: Context = BACKGROUND_CONTEXT): Promise<Rule> {
+    return addRule(this, level, input, this.now(), context);
+  }
+
+  /** Removes the rule with this agent, tool, and match (RuleNotFound when none matches). */
+  removeRule(
+    level: RuleLevel,
+    input: unknown,
+    context: Context = BACKGROUND_CONTEXT,
+  ): Promise<Rule> {
+    return removeRule(this, level, input, context);
+  }
+
+  /** One month of guard records, newest first. */
+  activity(
+    query: ActivityQuery = {},
+    context: Context = BACKGROUND_CONTEXT,
+  ): Promise<ActivityPage> {
+    return listActivity(
+      this.harness,
+      { ...query, now: this.now(), timeZone: this.timeZone },
+      context,
+    );
+  }
 
   /** Every durable wake time and the cell's next alarm, from the live tasks' checkpoints. */
   async wakes(
@@ -193,9 +233,13 @@ export async function openCellHarness(
     tasks: recurring.map(({ routine }) => routine.task),
   });
   const telemetry = createTelemetryExtension(person, monitor);
+  // The guard is first in every role's list and in the default list, so every role (and a
+  // specialist added after start) runs it before any tool call.
+  const guard = createGuardExtension(person, current, { now, timeZone });
+  const extra = options.extensions ?? [];
   const extensions = {
-    lead: [lead, handoff, history, household, reminder, routines, telemetry],
-    specialist: [history, household, telemetry],
+    lead: [guard, lead, handoff, history, household, reminder, routines, telemetry, ...extra],
+    specialist: [guard, history, household, telemetry, ...extra],
   };
   const registry = createRegistry();
   for (const extension of extensions.lead) registry.install(extension);
@@ -217,6 +261,7 @@ export async function openCellHarness(
       database: durable.database,
       reminders,
       recurring,
+      timeZone,
     });
   } catch (error) {
     // A failure after the open (roster, routines, inspect) must not leave this harness running on
@@ -250,6 +295,7 @@ async function finishOpen(
     readonly database: CelldSqliteDatabase;
     readonly reminders: Routine<ReminderPayload>;
     readonly recurring: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
+    readonly timeZone: string;
   },
 ): Promise<CellHarness> {
   const { person } = options;
@@ -267,6 +313,7 @@ async function finishOpen(
     parts.database,
     reminders,
     now,
+    parts.timeZone,
   );
   // What the last run left: live work, and routines whose time passed while the cell was down.
   // Read before this open creates anything and before resume(), so nothing has run yet.
@@ -274,6 +321,8 @@ async function finishOpen(
   const created = await ensureRoster(cell, context);
   await harness.commit(async (tx) => {
     await tx.doc(ModelHealthDoc);
+    // The release owner rule and the default person rules, once per cell (existing cells too).
+    await seedRules(tx, now());
   }, context);
   const routineTasks = left.filter(({ record }) => record.kind.startsWith(ROUTINE_KIND_PREFIX));
   const overdue = wakesOf({ tasks: routineTasks }).wakes.filter((wake) => wake.at <= now()).length;

@@ -37,6 +37,26 @@ device key is what proves the caller.
 | `secbot model set <role> <model-id>` | Changes a role's model from its next turn. An unknown role or model is refused (exit 1) and nothing changes. |
 | `secbot specialist add <name> --instruction "..." [--model <id>]` | Adds a specialist. The lead can hand work to it from its next turn. |
 
+| `secbot rules list` | The owner's rules (you cannot loosen these), then your own rules: agent, tool, argument match, verdict. |
+| `secbot rules add <agent> <tool> <permit\|ask-first\|prohibit> [match]` | Adds one of your rules. A rule looser than an owner rule is refused on stderr, naming the owner rule (exit 1). |
+| `secbot rules remove <agent> <tool> [match]` | Removes the rule with that agent, tool, and match (give the match it was added with). |
+| `secbot activity [--month YYYY-MM]` | This month's guard verdicts, newest first: time, agent, tool, verdict, the layer that decided, the cost, and the reason on the line below. |
+
+The match option is one of `--exact`, `--prefix`, `--email-domain`, `--web-domain`, or `--regex`,
+each followed by `<argument>=<value>`, for example
+`secbot rules add lead handoff permit --exact specialist=research`. The agent is `all`, `lead`, or
+a specialist's name; the tool is a tool name, `pay` (every pay tool), or `*` (any tool). Inside
+your rules the most specific one decides; between the owner's rules and yours the stricter wins.
+
+### The owner's views of another person
+
+On the owner's machine, `--owner --person <name>` makes `rules list`, `add`, and `remove` work on
+the owner rules of that person's cell, and `secbot activity --person <name>` reads that person's
+activity (the header then says `(operator key)`). These use the operator key, from
+`SECBOT_OPERATOR_KEY` in your shell or `{"key": "..."}` in `~/.config/secbot/operator.json`
+(mode 0600). The key is sent only to the operator routes and never printed. A device key cannot
+read another person's rules or activity.
+
 If the connection drops, `chat` reconnects and resends every line the cell has not acknowledged,
 under the same request id, so nothing is submitted twice. When a session opens, what the lead
 said while no session was open on this device is printed first, oldest first. A line over 20000

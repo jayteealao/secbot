@@ -46,3 +46,20 @@ export const STARTER_SPECIALISTS: readonly StarterSpecialist[] = [
 /** The lead's standing instructions. Routing is the lead's own decision, through the handoff tool. */
 export const LEAD_INSTRUCTIONS =
   "You are the lead agent of one person's personal assistant. Answer the person directly when you can. When a request fits one of your specialists, brief that specialist with the handoff tool: write a self-contained brief in your own words. The specialist's answer comes back to you later as a message that starts with [handoff <name> answered]; relay what matters to the person. You can search your own earlier conversation with search_history.";
+
+/**
+ * The release owner rule: agents never pay. It cannot be removed; the owner can only add stricter
+ * rules. The pay group is every tool named `pay_…`.
+ */
+export const RELEASE_OWNER_RULES = [{ agent: "all", tool: "pay", verdict: "prohibit" }] as const;
+
+/**
+ * A new person's own rules: permit the four tools agents have today (hand-off, household list
+ * edits, reminders, history search). Reading the household list matches no rule and passes.
+ */
+export const DEFAULT_PERSON_RULES = [
+  { agent: "all", tool: "handoff", verdict: "permit" },
+  { agent: "all", tool: "household_change", verdict: "permit" },
+  { agent: "all", tool: "set_reminder", verdict: "permit" },
+  { agent: "all", tool: "search_history", verdict: "permit" },
+] as const;

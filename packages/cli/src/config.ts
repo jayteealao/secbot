@@ -71,6 +71,24 @@ export async function readDevice(environment: Environment): Promise<Device> {
   return { name: value.name, person: value.person, key: value.key };
 }
 
+export const operatorFile = (environment: Environment) =>
+  join(configDir(environment), "operator.json");
+
+/**
+ * The owner's operator key, for the owner's views of another person (`--owner`, `--person`): from
+ * SECBOT_OPERATOR_KEY, or `{"key": "…"}` in operator.json (mode 0600) in the config folder. It is
+ * sent only to the operator routes and never printed.
+ */
+export async function readOperatorKey(environment: Environment): Promise<string> {
+  const fromEnv = environment.env.SECBOT_OPERATOR_KEY;
+  if (fromEnv !== undefined && fromEnv !== "") return fromEnv;
+  const key = (await readJson(operatorFile(environment)))?.key;
+  if (typeof key === "string" && key !== "") return key;
+  throw new CliError(
+    `no operator key: set SECBOT_OPERATOR_KEY in your shell or {"key": "…"} in ${operatorFile(environment)} (mode 0600)`,
+  );
+}
+
 export async function writeDevice(environment: Environment, device: Device): Promise<string> {
   const path = deviceFile(environment);
   await mkdir(configDir(environment), { recursive: true, mode: 0o700 });

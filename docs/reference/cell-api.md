@@ -22,6 +22,51 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | PUT | `/models/{role}` | `{"model": "<id>"}` (at most 16 KiB) | the role's new model | 200, 400 (unknown role or model, bad body), 413 |
 | POST | `/specialists` | `{"name", "instruction", "model"?}` (at most 16 KiB; instruction at most 4000 characters) | `{name, status: "added"}` | 201, 400, 413 |
 | GET | `/session` | WebSocket upgrade | the frame stream below | 101, 501 (no WebSocket support) |
+| GET | `/rules` | none | `{owner: [Rule], person: [Rule], timeZone}`: the owner's rules (read only here) and the person's own rules | 200 |
+| POST | `/rules` | one rule without an id: `{agent, tool, verdict, match?}` (at most 16 KiB) | `{rule: Rule}` | 201, 400 (`refused: …`), 413 |
+| DELETE | `/rules` | the rule's `{agent, tool, match?}` as it was added | `{removed: Rule}` | 200, 400 (`refused: …`), 404 (no such rule), 413 |
+| GET | `/activity?month=YYYY-MM&before=<n>&limit=<1-200>` | none; `month` defaults to the current month in the cell's time zone, `limit` to 50 | `{person, month, timeZone, total, records: [ActivityRecord], next}`, newest first; pass `next` as `before` for the next older page (`null` when none is left) | 200, 400 (a bad parameter) |
+
+### Rules
+
+A `Rule` is `{id, agent, tool, verdict, match?, source, addedAt}`:
+
+- `agent`: `all`, `lead`, or a specialist's name.
+- `tool`: a tool name, `pay` (every tool named `pay_…`), or `*` (any tool).
+- `verdict`: `permit`, `ask-first`, or `prohibit`.
+- `match`: `{kind, field, value}` on one argument. `kind` is `exact`, `prefix`, `email-domain`,
+  `web-domain`, or `regex`. Values are compared after NFKC, URL decoding, and lower case; domains
+  match themselves and their subdomains. A regular expression is matched without case, may hold
+  at most one repeat (`*`, `+`, `{n,}`), no back-reference, no look-around, and at most 200
+  characters, and runs on at most 4096 characters of a value (a longer value counts as a match for
+  `prohibit` and `ask-first`, and as no match for `permit`).
+- `source`: `release` (the owner rule that agents never pay; it cannot be removed), `default` (a
+  new person's four permit rules), `owner`, `person`, or `allow-always`.
+- `addedAt`: milliseconds since 1970, by the cell's clock.
+
+Inside one level the most specific rule decides (an agent name before `all`, a tool name before
+`pay` before `*`, a match before none, `exact` before `prefix` before a domain before `regex`);
+across levels the strictest verdict wins, so a person's rule never loosens an owner rule. A call
+no rule matches is allowed by the rules.
+
+A person rule looser than an overlapping owner rule is refused, naming the owner rule:
+
+```json
+{"error": "refused: this rule is looser than an owner rule:\n  all handoff (specialist = developer) -> ask first\n  Your rules can be stricter than the owner's rules, never looser."}
+```
+
+Other refusals: an unknown agent, tool, verdict, or match kind; a pattern of a refused form; a
+duplicate rule; more than 200 rules in one level; the release rule's removal (`refused: this rule
+is part of the release: agents never pay`).
+
+### Activity records
+
+An `ActivityRecord` is `{key, at, kind: "verdict", agent, tool, verdict, layer, reason, ruleId,
+ruleLevel, arguments, cost}`: one per tool call the guard decided, written before the call runs.
+`verdict` is `allowed` or `refused`; `layer` is `rule` (or `guard` when the guard itself failed and
+refused the call); `arguments` are the call's arguments with secret-looking fields and values
+replaced by `[redacted]` and capped at 2 KiB (the fields a rule matched are kept). Records are kept
+forever. Later releases add record kinds and fields; a client ignores what it does not know.
 
 ## The session frames
 
@@ -58,7 +103,8 @@ no `accepted` or `rejected` frame is resent on the next connection under the sam
 ## Operator routes: `/ops/…`
 
 Auth: the operator key in `x-secbot-operator`; any other request is `401` and logs `ops.refused`.
-Only the VPS release tool calls them.
+The VPS release tool calls the snapshot routes; the owner's command line calls the rules and
+activity routes. A device key never opens them.
 
 | Method | Path | Does |
 | --- | --- | --- |
@@ -68,6 +114,14 @@ Only the VPS release tool calls them.
 | GET | `/ops/digest?cells=` | Each cell's digest and row count. |
 | GET | `/ops/heartbeats?cells=` | Each cell's heartbeat routine state. |
 | POST | `/ops/write` | One committed single-row write (the test cell only). |
+| GET | `/ops/rules?cell=<person>` | Both levels of that person's rules, as `GET /rules`. |
+| POST | `/ops/rules?cell=<person>` | Adds an owner rule for that person's agents (body as `POST /rules`); 201 `{rule}`. |
+| DELETE | `/ops/rules?cell=<person>` | Removes an owner rule (body as `DELETE /rules`); the release rule is refused with 400. |
+| GET | `/ops/activity?cell=<person>&month=&before=&limit=` | That person's activity, as `GET /activity`. |
+
+`<person>` is `owner` or `second` (`person` also names the second cell). A cell this fleet does not
+serve answers 404 `cell <name> is served by another fleet`; a cell that is not a person cell
+answers 404.
 
 ## Household routes: `/internal/household/…`
 

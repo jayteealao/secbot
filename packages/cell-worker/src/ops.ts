@@ -11,6 +11,11 @@
  *   GET  /ops/digest?cells=              each cell's digest and row count
  *   GET  /ops/heartbeats?cells=          each cell's heartbeat routine state
  *   POST /ops/write                      one committed single-row write (test cell only)
+ *   GET|POST|DELETE /ops/rules?cell=     a person's rules; the owner adds and removes owner rules
+ *   GET  /ops/activity?cell=             a person's activity, for the owner
+ *
+ * The rules and activity routes are the owner's command line (`secbot rules --owner`,
+ * `secbot activity --person`), with the same operator key from the owner's machine.
  *
  * The SNAPSHOTS binding is an `r2_buckets` entry: celld serves it from the fleet bucket under
  * `r2/secbot-snapshots/`, so a snapshot lives at the bucket provider, not on the VPS (celld v0.6.1
@@ -47,11 +52,33 @@ export interface OpsEnv {
   readonly SNAPSHOTS?: SnapshotBucket;
 }
 
+/** A refusal or a missing rule keeps its status across RPC (see person-cell.ts GuardAnswer). */
+type Answer<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly status: number; readonly error: string };
+
+/** What the owner's rule and activity routes need from a person cell's stub (celld JS RPC). */
+export interface GuardStub {
+  ownerRules(person: string): Promise<Answer<unknown>>;
+  addOwnerRule(person: string, input: unknown): Promise<Answer<unknown>>;
+  removeOwnerRule(person: string, input: unknown): Promise<Answer<unknown>>;
+  activityOf(
+    person: string,
+    query: { month?: string; before?: number; limit?: number },
+  ): Promise<Answer<unknown>>;
+}
+
 export interface OpsDeps {
   /** The cells this fleet serves, by name. */
   readonly cells: readonly string[];
   /** The stub of one served cell, or undefined when the fleet has no binding for it. */
   stubOf(cell: string): SnapshotStub | undefined;
+  /** The guard RPC of one served person cell, or undefined for any other cell. */
+  guardOf?(cell: string): GuardStub | undefined;
+  /** Checks the activity query parameters (person-cell.ts activityQuery). */
+  activityQuery?(
+    params: URLSearchParams,
+  ): { month?: string; before?: number; limit?: number } | { error: string };
   /** One committed single-row write (the test cell's lab); undefined elsewhere. */
   readonly write?: () => Promise<void>;
 }
@@ -89,6 +116,58 @@ function cellsOf(url: URL, deps: OpsDeps): { cells: string[] } | { error: string
 
 const snapshotKey = (id: string, cell: string) => `snapshots/${id}/${cell}.json`;
 
+/** The largest rule body the owner routes read. */
+const RULE_BODY_LIMIT = 16 * 1024;
+
+/**
+ * The owner's view of one person's guard, behind the operator key:
+ *
+ *   GET    /ops/rules?cell=<person>       both levels of that person's rules
+ *   POST   /ops/rules?cell=<person>       add an owner rule (body: agent, tool, verdict, match?)
+ *   DELETE /ops/rules?cell=<person>       remove an owner rule (body: agent, tool, match?)
+ *   GET    /ops/activity?cell=<person>&month=YYYY-MM&before=&limit=   that person's activity
+ */
+async function guardRoute(request: Request, url: URL, deps: OpsDeps): Promise<Response> {
+  const raw = url.searchParams.get("cell") ?? "";
+  const cell = raw === "person" ? "second" : raw;
+  if (!deps.cells.includes(cell)) {
+    return json({ error: `cell ${cell} is served by another fleet` }, 404);
+  }
+  const guard = deps.guardOf?.(cell);
+  if (guard === undefined) return json({ error: `${cell} is not a person cell` }, 404);
+  const reply = (answer: Answer<unknown>, status = 200, key?: string) =>
+    answer.ok
+      ? json(key === undefined ? answer.value : { [key]: answer.value }, status)
+      : json({ error: answer.error }, answer.status);
+  if (request.method === "GET" && url.pathname === "/ops/activity") {
+    const query = deps.activityQuery?.(url.searchParams) ?? {};
+    if ("error" in query) return json({ error: query.error }, 400);
+    return reply(await guard.activityOf(cell, query));
+  }
+  if (request.method === "GET") return reply(await guard.ownerRules(cell));
+  if (request.method !== "POST" && request.method !== "DELETE") {
+    return json({ error: "not found" }, 404);
+  }
+  const text = await request.text().catch(() => "");
+  if (text.length > RULE_BODY_LIMIT) {
+    return json({ error: `the body is over ${RULE_BODY_LIMIT} bytes` }, 413);
+  }
+  let body: unknown = {};
+  try {
+    body = JSON.parse(text);
+  } catch {
+    body = {};
+  }
+  if (request.method === "POST") {
+    const answer = await guard.addOwnerRule(cell, body);
+    logEvent("ops.rules", { cell, action: "add", ok: answer.ok });
+    return reply(answer, 201, "rule");
+  }
+  const answer = await guard.removeOwnerRule(cell, body);
+  logEvent("ops.rules", { cell, action: "remove", ok: answer.ok });
+  return reply(answer, 200, "removed");
+}
+
 /** Handles one `/ops/*` request; the caller has checked the path prefix. */
 export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise<Response> {
   const url = new URL(request.url);
@@ -99,6 +178,10 @@ export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise
     if (found === undefined) throw new Error(`cell ${cell} has no binding in this fleet`);
     return found;
   };
+
+  if (url.pathname === "/ops/rules" || route === "GET /ops/activity") {
+    return guardRoute(request, url, deps);
+  }
 
   if (route === "POST /ops/write") {
     if (deps.write === undefined) return json({ error: "no write probe in this bundle" }, 404);

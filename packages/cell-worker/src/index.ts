@@ -22,8 +22,9 @@ import {
 import { checkDevice, type DeviceEnv } from "./device-auth.ts";
 import { type CellHealth, health, releaseVersion } from "./health.ts";
 import type { HouseholdClientEnv } from "./household-client.ts";
-import { hasOperatorKey, type OpsEnv, ops, type SnapshotStub } from "./ops.ts";
+import { type GuardStub, hasOperatorKey, type OpsEnv, ops, type SnapshotStub } from "./ops.ts";
 import {
+  activityQuery,
   DEVICE_HEADER,
   householdOf,
   PERSON_HEADER,
@@ -176,6 +177,13 @@ function snapshotStubOf(env: WorkerEnv, cell: string): SnapshotStub | undefined 
   return stub.snapshot === undefined ? undefined : (stub as SnapshotStub);
 }
 
+/** The guard RPC surface of one served person cell, or undefined for any other cell. */
+function guardStubOf(env: WorkerEnv, cell: string): GuardStub | undefined {
+  if (!PERSONS.includes(cell)) return undefined;
+  const stub = cellOf(env, cell) as DurableObjectStubLike & Partial<GuardStub>;
+  return stub.ownerRules === undefined ? undefined : (stub as GuardStub);
+}
+
 /**
  * POST /internal/household/{read,apply,status}: the household cell's RPC for a person cell in
  * another fleet, over the private network with the operator key. The change carries its own
@@ -250,6 +258,8 @@ export async function route(request: Request, env: WorkerEnv): Promise<Response>
     return ops(request, env, {
       cells: fleetCells(env),
       stubOf: (cell) => snapshotStubOf(env, cell),
+      guardOf: (cell) => guardStubOf(env, cell),
+      activityQuery,
       ...(lab?.writeOne === undefined
         ? {}
         : { write: () => lab.writeOne?.() ?? Promise.resolve() }),
