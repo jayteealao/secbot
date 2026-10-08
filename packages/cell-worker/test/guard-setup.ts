@@ -13,6 +13,8 @@ import {
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
+  passingDecision,
+  type Responder,
 } from "@secbot/cell-harness/testing";
 import { sha256Hex } from "../src/device-auth.ts";
 import { route, type WorkerEnv } from "../src/index.ts";
@@ -44,9 +46,12 @@ export interface GuardSetup {
 
 export async function guardSetup(
   fleet?: string,
-  options: { readonly guard?: OpenCellOptions["guard"] } = {},
+  options: {
+    readonly guard?: OpenCellOptions["guard"];
+    readonly respond?: Responder;
+  } = {},
 ): Promise<GuardSetup> {
-  const gateway = createFauxGateway(scripted);
+  const gateway = createFauxGateway(options.respond ?? scripted);
   const opened: CellHarness[] = [];
   const cells = new Map<string, PersonCell>();
   const byPerson = new Map<string, CellHarness>();
@@ -59,7 +64,9 @@ export async function guardSetup(
           version: "v0.0.0-test",
           env: {},
           models: gateway.models,
-          ...(options.guard === undefined ? {} : { guard: options.guard }),
+          // A passing decision model unless a test gives its own: the suites that are not about
+          // the model layers keep their request counts.
+          guard: { decision: passingDecision, ...options.guard },
         });
         opened.push(harness);
         byPerson.set(name, harness);

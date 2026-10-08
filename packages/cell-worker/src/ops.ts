@@ -13,6 +13,8 @@
  *   POST /ops/write                      one committed single-row write (test cell only)
  *   GET|POST|DELETE /ops/rules?cell=     a person's rules; the owner adds and removes owner rules
  *   GET  /ops/activity?cell=             a person's activity, for the owner
+ *   GET|PUT /ops/mode?cell=              a person cell's guard mode (shadow or enforce)
+ *   PUT  /ops/decision-model?cell=       a person cell's decision model (clef or jev)
  *
  * The rules and activity routes are the owner's command line (`secbot rules --owner`,
  * `secbot activity --person`), with the same operator key from the owner's machine.
@@ -66,6 +68,10 @@ export interface GuardStub {
     person: string,
     query: { month?: string; before?: number; limit?: number },
   ): Promise<Answer<unknown>>;
+  /** The guard mode and the decision model; absent on a stub built before them. */
+  guardModeOf?(person: string): Promise<Answer<unknown>>;
+  setGuardModeOf?(person: string, mode: unknown): Promise<Answer<unknown>>;
+  setDecisionModelOf?(person: string, adapter: unknown): Promise<Answer<unknown>>;
 }
 
 export interface OpsDeps {
@@ -126,6 +132,11 @@ const RULE_BODY_LIMIT = 16 * 1024;
  *   POST   /ops/rules?cell=<person>       add an owner rule (body: agent, tool, verdict, match?)
  *   DELETE /ops/rules?cell=<person>       remove an owner rule (body: agent, tool, match?)
  *   GET    /ops/activity?cell=<person>&month=YYYY-MM&before=&limit=   that person's activity
+ *   GET    /ops/mode?cell=<person>        the guard mode, since when, and the decision model
+ *   PUT    /ops/mode?cell=<person>        switch the mode (body: {"mode": "shadow" | "enforce"})
+ *   PUT    /ops/decision-model?cell=<person>   switch the decision model ({"adapter": "clef" | "jev"})
+ *
+ * No device-key route reaches the mode: only the operator key switches a cell to enforce.
  */
 async function guardRoute(request: Request, url: URL, deps: OpsDeps): Promise<Response> {
   const raw = url.searchParams.get("cell") ?? "";
@@ -144,10 +155,16 @@ async function guardRoute(request: Request, url: URL, deps: OpsDeps): Promise<Re
     if ("error" in query) return json({ error: query.error }, 400);
     return reply(await guard.activityOf(cell, query));
   }
-  if (request.method === "GET") return reply(await guard.ownerRules(cell));
-  if (request.method !== "POST" && request.method !== "DELETE") {
-    return json({ error: "not found" }, 404);
+  const modeRoute = url.pathname === "/ops/mode" || url.pathname === "/ops/decision-model";
+  if (modeRoute && (guard.guardModeOf === undefined || guard.setGuardModeOf === undefined)) {
+    return json({ error: `${cell} has no guard mode in this release` }, 404);
   }
+  if (request.method === "GET" && url.pathname === "/ops/mode") {
+    return reply((await guard.guardModeOf?.(cell)) as Answer<unknown>);
+  }
+  if (request.method === "GET") return reply(await guard.ownerRules(cell));
+  const writes = modeRoute ? ["PUT"] : ["POST", "DELETE"];
+  if (!writes.includes(request.method)) return json({ error: "not found" }, 404);
   const text = await request.text().catch(() => "");
   if (text.length > RULE_BODY_LIMIT) {
     return json({ error: `the body is over ${RULE_BODY_LIMIT} bytes` }, 413);
@@ -157,6 +174,18 @@ async function guardRoute(request: Request, url: URL, deps: OpsDeps): Promise<Re
     body = JSON.parse(text);
   } catch {
     body = {};
+  }
+  const field = (name: string) =>
+    body !== null && typeof body === "object" ? (body as Record<string, unknown>)[name] : undefined;
+  if (url.pathname === "/ops/mode") {
+    const answer = (await guard.setGuardModeOf?.(cell, field("mode"))) as Answer<unknown>;
+    logEvent("ops.mode", { cell, ok: answer.ok });
+    return reply(answer);
+  }
+  if (url.pathname === "/ops/decision-model") {
+    const answer = (await guard.setDecisionModelOf?.(cell, field("adapter"))) as Answer<unknown>;
+    logEvent("ops.decision_model", { cell, ok: answer.ok });
+    return reply(answer);
   }
   if (request.method === "POST") {
     const answer = await guard.addOwnerRule(cell, body);
@@ -179,7 +208,12 @@ export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise
     return found;
   };
 
-  if (url.pathname === "/ops/rules" || route === "GET /ops/activity") {
+  if (
+    url.pathname === "/ops/rules" ||
+    url.pathname === "/ops/mode" ||
+    url.pathname === "/ops/decision-model" ||
+    route === "GET /ops/activity"
+  ) {
     return guardRoute(request, url, deps);
   }
 

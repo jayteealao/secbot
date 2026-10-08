@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-durable";
 import type { ActivityRecord } from "./activity.ts";
 import type { HeldCall } from "./approvals.ts";
+import { DEFAULT_DECISION_ADAPTER, type DecisionAdapter } from "./release-defaults.ts";
 import type { Rule } from "./rules.ts";
 
 export type SpecialistRecord = {
@@ -121,6 +122,33 @@ export const ApprovalsDoc = defineDoc<{ nextNumber: number; pending: number[] }>
   version: 1,
   scope: "session",
   initial: () => ({ nextNumber: 1, pending: [] }),
+});
+
+export type GuardMode = "shadow" | "enforce";
+
+/**
+ * `secbot.guard-mode`: whether the model layers (the decision model and the reviewer) enforce. In
+ * shadow mode they record what they would do and the call runs; rules, ask-first holds, and their
+ * approvals enforce in both modes. Every cell starts in shadow; `since` is when the current mode
+ * began (set at the first open for a cell that never switched).
+ */
+export const GuardModeDoc = defineDoc<{
+  mode: GuardMode;
+  since: number | null;
+  switchedBy: string | null;
+}>({
+  kind: "secbot.guard-mode",
+  version: 1,
+  scope: "session",
+  initial: () => ({ mode: "shadow", since: null, switchedBy: null }),
+});
+
+/** `secbot.decision-model`: the decision model's adapter; the owner switches it. */
+export const DecisionModelDoc = defineDoc<{ adapter: DecisionAdapter }>({
+  kind: "secbot.decision-model",
+  version: 1,
+  scope: "session",
+  initial: () => ({ adapter: DEFAULT_DECISION_ADAPTER }),
 });
 
 /** `secbot.approval`: one held call, keyed by its number as text. Records are never pruned. */

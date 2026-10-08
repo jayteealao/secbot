@@ -34,6 +34,8 @@ import {
   type HouseholdClient,
   type HouseholdDocument,
   heartbeatState,
+  isDecisionAdapter,
+  isGuardMode,
   logEvent,
   MONTH,
   NoHeldCall,
@@ -194,6 +196,30 @@ async function guardAnswer<T>(work: () => Promise<T>): Promise<GuardAnswer<T>> {
     throw error;
   }
 }
+
+/** The owner's view of a cell's guard mode (`GET|PUT /ops/mode`, `PUT /ops/decision-model`). */
+export interface GuardModeAnswer {
+  readonly person: string;
+  readonly mode: "shadow" | "enforce";
+  readonly since: number | null;
+  readonly switchedBy: string | null;
+  readonly decisionModel: string;
+  readonly timeZone: string;
+  readonly changed?: boolean;
+}
+
+const modeAnswer = (
+  person: string,
+  cell: CellHarness,
+  state: Awaited<ReturnType<CellHarness["guardMode"]>>,
+): GuardModeAnswer => ({
+  person,
+  mode: state.mode,
+  since: state.since,
+  switchedBy: state.switchedBy,
+  decisionModel: state.decisionModel,
+  timeZone: cell.timeZone,
+});
 
 const answerJson = <T>(
   answer: GuardAnswer<T>,
@@ -606,6 +632,38 @@ export class PersonCell {
   ): Promise<GuardAnswer<Record<string, unknown>>> {
     const cell = await this.cell(person);
     return guardAnswer(async () => ({ person, ...(await cell.activity(query)) }));
+  }
+
+  /** RPC (operator routes): the guard mode, since when, and the decision model, for the owner. */
+  async guardModeOf(person: string): Promise<GuardAnswer<GuardModeAnswer>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => modeAnswer(person, cell, await cell.guardMode()));
+  }
+
+  /** RPC (operator routes): the owner switches the mode; the next marked call uses it. */
+  async setGuardModeOf(person: string, mode: unknown): Promise<GuardAnswer<GuardModeAnswer>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => {
+      if (!isGuardMode(mode)) throw new RefusedChange('send {"mode": "shadow" | "enforce"}');
+      const switched = await cell.setGuardMode(mode, "owner");
+      const state = await cell.guardMode();
+      return { ...modeAnswer(person, cell, state), changed: switched.changed };
+    });
+  }
+
+  /** RPC (operator routes): the owner switches the decision model; the next call uses it. */
+  async setDecisionModelOf(
+    person: string,
+    adapter: unknown,
+  ): Promise<GuardAnswer<GuardModeAnswer>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => {
+      if (!isDecisionAdapter(adapter)) {
+        throw new RefusedChange('send {"adapter": "clef" | "jev"}');
+      }
+      await cell.setDecisionAdapter(adapter);
+      return modeAnswer(person, cell, await cell.guardMode());
+    });
   }
 
   private async openSession(cell: CellHarness, person: string, device: string): Promise<Response> {

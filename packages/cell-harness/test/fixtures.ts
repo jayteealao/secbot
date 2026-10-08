@@ -19,6 +19,7 @@ import { CelldSqliteDatabase } from "../../cell-storage/src/index.ts";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
 import { ChangeLog } from "../../household-cell/src/change-log.ts";
 import { withCreditPause } from "../src/credit-pause.ts";
+import type { DecisionModels } from "../src/decision-model.ts";
 import type { HouseholdChange, HouseholdClient } from "../src/household-tools.ts";
 import {
   type CellEnv,
@@ -27,6 +28,7 @@ import {
   openCellHarness,
 } from "../src/open-harness.ts";
 import { DEFAULT_LEAD_MODEL, DEFAULT_SPECIALIST_MODEL } from "../src/release-defaults.ts";
+import { REVIEWER_FIRST_LINE } from "../src/reviewer.ts";
 
 export { FakeCelldStorage, fauxAssistantMessage, fauxText, fauxToolCall };
 
@@ -114,6 +116,48 @@ export function createFauxGateway(
   return gateway;
 }
 
+/**
+ * A decision model that passes every call with score 0 (model id "stand-in", no cost), so suites
+ * that are not about the model layers keep their faux request counts. openTestCell uses it unless
+ * a test gives its own (for example the Decisions API against the stub server).
+ */
+export const passingDecision: DecisionModels = (adapter) => ({
+  adapter,
+  ask: async () => ({
+    outcome: "pass",
+    choice: "routine",
+    score: 0,
+    model: "stand-in",
+    costUsd: 0,
+    durationMs: 0,
+  }),
+});
+
+/** True for a request from the guard's reviewer (its system prompt starts with the first line). */
+export const isReviewerRequest = (request: FauxRequest): boolean =>
+  request.system.includes(REVIEWER_FIRST_LINE);
+
+/**
+ * Answers reviewer requests with scripted text (each call to `verdicts` gives the next answer, for
+ * example `{"verdict": "block", "reason": "…"}`), and every other request with `others`.
+ */
+export function reviewerResponder(
+  verdicts: (
+    request: FauxRequest,
+  ) => string | AssistantMessage | Promise<string | AssistantMessage>,
+  others: Responder = defaultResponder,
+): Responder {
+  return async (request) => {
+    if (!isReviewerRequest(request)) return others(request);
+    const answer = await verdicts(request);
+    return typeof answer === "string" ? fauxAssistantMessage([fauxText(answer)]) : answer;
+  };
+}
+
+/** A reviewer verdict as the reviewer writes it. */
+export const verdictJson = (verdict: "allow" | "block" | "ask", reason: string) =>
+  JSON.stringify({ verdict, reason });
+
 export interface TestCell {
   readonly storage: FakeCelldStorage;
   readonly gateway: FauxGateway;
@@ -151,7 +195,7 @@ export async function openTestCell(
       ...(options.onWakeChange === undefined ? {} : { onWakeChange: options.onWakeChange }),
       ...(options.routines === undefined ? {} : { routines: options.routines }),
       ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
-      ...(options.guard === undefined ? {} : { guard: options.guard }),
+      guard: { decision: passingDecision, ...options.guard },
     });
   const test: TestCell = {
     storage,

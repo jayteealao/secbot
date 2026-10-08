@@ -18,7 +18,7 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | GET | `/status` | none; `?tasks=1` adds the task list | `{version, roles, …}` | 200 |
 | GET | `/alarm` | none | the stored alarm against the earliest stored timer; never re-arms | 200 |
 | GET | `/missed` | none | `{held: [HeldCall], messages: [{kind: "answer", entryId, text} \| {kind: "followup", entryId, from, text}], remaining}`; `held` lists every call waiting for an answer, oldest first; `messages` are the oldest 100 after this device's cursor, which moves past them only | 200 |
-| GET | `/models` | none | `{roles: [{role, model, source}]}` | 200 |
+| GET | `/models` | none | `{roles: [{role, model, source}]}`: the lead, each specialist, then the guard's `reviewer` (default `anthropic/claude-sonnet-5.5`) | 200 |
 | PUT | `/models/{role}` | `{"model": "<id>"}` (at most 16 KiB) | the role's new model | 200, 400 (unknown role or model, bad body), 413 |
 | POST | `/specialists` | `{"name", "instruction", "model"?}` (at most 16 KiB; instruction at most 4000 characters) | `{name, status: "added"}` | 201, 400, 413 |
 | GET | `/session` | WebSocket upgrade | the frame stream below | 101, 501 (no WebSocket support) |
@@ -42,8 +42,10 @@ expiresAt, remainingMs, status}`:
   normalization as rules); a retry under the same request id is not asked again, and other
   arguments are held again.
 - `arguments`: redacted as in activity records; the fields the rule matched are kept whole.
-- `reason` and `reasonSource`: the rule in its command-line form, and where it came from:
-  `your-rule`, `owner-rule` (later releases add `reviewer` and `reviewer-unavailable`).
+- `reason` and `reasonSource`: why the call waits, and where that came from: `your-rule` or
+  `owner-rule` (the rule in its command-line form), `reviewer` (`reviewer: <the reviewer's
+  reason>`), or `reviewer-unavailable` (`reviewer unavailable`: the reviewer failed or timed out,
+  so the person decides).
 - `always`: `{offered, rule, note}`. Allow always adds `rule`, a person permit rule for the agent,
   the tool, and an exact match on the matched field (or the tool's key field). It is not offered
   when the rules with that rule added would still ask first, for example under an owner ask-first
@@ -95,13 +97,16 @@ is part of the release: agents never pay`).
 ### Activity records
 
 An `ActivityRecord` is `{key, at, kind, number?, agent, tool, verdict, layer, reason, ruleId,
-ruleLevel, arguments, cost}`, written before the call runs:
+ruleLevel, arguments, cost, mode?, decision?, fallback?}`, written before the call runs:
 
-- `kind: "verdict"`: the guard decided a call. `verdict` is `allowed` or `refused`; `layer` is
-  `rule`, `person` (a later call under an earlier answer), or `guard` (the guard itself failed and
-  refused the call).
-- `kind: "held"`: a call waits for the person; `verdict` `held`, `layer` `rule`, `number` the held
-  call's number.
+- `kind: "verdict"`: the guard decided a call. `verdict` is `allowed` or `refused`, or in shadow
+  mode `would block` or `would ask` (the call ran); `layer` is `rule`, `decision` (the decision
+  model passed a call no rule matched), `reviewer`, `person` (a later call under an earlier
+  answer), or `guard` (the guard itself failed and refused the call).
+- `kind: "held"`: a call waits for the person; `verdict` `held`, `layer` `rule` or `reviewer`,
+  `number` the held call's number.
+- `kind: "mode"`: the owner switched the cell's guard mode; `verdict` `switched`, `layer` `guard`,
+  `agent` who switched, `tool` `mode`, `reason` `mode: shadow -> enforce`.
 - `kind: "answered"`: the person answered; `verdict` `allowed` or `denied`, `layer` `person`,
   `reason` `allowed once by <person>`, `allowed always by <person>`, or `denied by <person>`.
 - `kind: "lapsed"`: nobody answered in 24 hours (`no answer in 24 h; refused`) or the agent's job
@@ -110,6 +115,33 @@ ruleLevel, arguments, cost}`, written before the call runs:
 `arguments` are the call's arguments with secret-looking fields and values replaced by
 `[redacted]` and capped at 2 KiB (the fields a rule matched are kept). Records are kept forever.
 Later releases add record kinds and fields; a client ignores what it does not know.
+
+The model layers' fields:
+
+- `mode`: `shadow` or `enforce`, the cell's guard mode when the guard decided (on every record
+  this release writes).
+- `decision`: `{outcome, score, model}` when the call reached the decision model: `outcome` is
+  `pass`, `mark` (sent to the reviewer), or `fallback` (no answer); `score` is the probability of
+  "risky" plus "unclear" (0 to 1, `null` on a fallback); `model` is the id the service returned.
+- `fallback`: why the decision model gave no answer (`http-<status>`, `malformed`, `timeout`,
+  `unknown-choice`, `no-key`), or `null`.
+- `cost`: the decision model's and the reviewer's cost for this call, in USD.
+
+In shadow mode a reviewer's reason reads `shadow: <reason>; the call ran` (or `shadow: reviewer
+unavailable; the call ran`). In enforce mode it reads `reviewer: <reason>`.
+
+### The guard's layers and the mode
+
+Every tool call passes the rules first. A prohibit refuses it and an ask-first rule holds it before
+any model sees it. A call the rules pass goes to the decision model (Clef by default, or Jev, on
+OpenRouter's Decisions API), which can only pass it or mark it; a mark, or any decision-model
+failure (an HTTP error, a malformed body, a timeout over 1.5 s, an unknown answer, no key), sends
+it to the reviewer. The reviewer allows it, blocks it (`reviewer: <reason>`), or asks the person
+(a held call). A reviewer that fails or takes over 30 s holds the call (`reviewer unavailable`).
+
+Every cell starts in shadow mode: the decision model and the reviewer run and the record says what
+they would have done, but the call runs. Rules, ask-first holds, and approvals enforce in both
+modes. The owner switches a cell to enforce with `PUT /ops/mode`.
 
 ## The session frames
 
@@ -148,8 +180,9 @@ next connection under the same `requestId`.
 ## Operator routes: `/ops/…`
 
 Auth: the operator key in `x-secbot-operator`; any other request is `401` and logs `ops.refused`.
-The VPS release tool calls the snapshot routes; the owner's command line calls the rules and
-activity routes. A device key never opens them.
+The VPS release tool calls the snapshot routes; the owner's command line calls the rules,
+activity, and mode routes. A device key never opens them, and no device-key route changes the
+mode.
 
 | Method | Path | Does |
 | --- | --- | --- |
@@ -163,6 +196,9 @@ activity routes. A device key never opens them.
 | POST | `/ops/rules?cell=<person>` | Adds an owner rule for that person's agents (body as `POST /rules`); 201 `{rule}`. |
 | DELETE | `/ops/rules?cell=<person>` | Removes an owner rule (body as `DELETE /rules`); the release rule is refused with 400. |
 | GET | `/ops/activity?cell=<person>&month=&before=&limit=` | That person's activity, as `GET /activity`. |
+| GET | `/ops/mode?cell=<person>` | `{person, mode, since, switchedBy, decisionModel, timeZone}`: the guard mode (`shadow` or `enforce`), when it began (milliseconds since 1970), who switched it, and the decision model (`clef` or `jev`). |
+| PUT | `/ops/mode?cell=<person>` | Body `{"mode": "shadow" \| "enforce"}`; the same shape plus `changed` (false when the cell already had that mode). Logs `guard.mode` and writes one `mode` activity record per switch. 400 for any other mode. |
+| PUT | `/ops/decision-model?cell=<person>` | Body `{"adapter": "clef" \| "jev"}`; the same shape as `GET /ops/mode`. The next call uses it. 400 for any other adapter. |
 
 `<person>` is `owner` or `second` (`person` also names the second cell). A cell this fleet does not
 serve answers 404 `cell <name> is served by another fleet`; a cell that is not a person cell

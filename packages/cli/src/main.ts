@@ -12,6 +12,7 @@
  *   secbot device new <name>
  *   secbot rules list | add | remove        (owner rules: --owner --person <name>)
  *   secbot activity [--month YYYY-MM]       (another person: --person <name>)
+ *   secbot mode show | set | decision <person>   (operator key)
  *
  * The owner's views of another person use the operator key (SECBOT_OPERATOR_KEY, or operator.json
  * in the config folder), sent only to the operator routes.
@@ -25,6 +26,7 @@ import { activity } from "./commands/activity.ts";
 import { chat } from "./commands/chat.ts";
 import { deviceNew } from "./commands/device.ts";
 import { missed } from "./commands/missed.ts";
+import { mode } from "./commands/mode.ts";
 import { modelList, modelSet } from "./commands/model.ts";
 import {
   deviceTarget,
@@ -53,6 +55,11 @@ const USAGE = `usage:
       match: --exact | --prefix | --email-domain | --web-domain | --regex <argument>=<value>
       owner rules for a person: --owner --person <name> (operator key)
   secbot activity [--month YYYY-MM] [--person <name> (operator key)]
+  secbot mode show <person>                         (operator key)
+  secbot mode set <person> shadow|enforce           (operator key)
+  secbot mode decision <person> clef|jev            (operator key)
+      shadow: the decision model and the reviewer only record what they
+      would do; rules and ask-first rules always apply
 `;
 
 /** `text` with every line wider than 80 columns wrapped, continuing two spaces further in. */
@@ -134,6 +141,9 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
       if (sub === "list") return await rulesList(target, io);
       if (sub === "add") return await rulesAdd(target, io, rest, match);
       return await rulesRemove(target, io, rest, match);
+    }
+    if (command === "mode") {
+      return await mode(() => OperatorClient.from(environment, options.fetch), io, sub, rest);
     }
     if (command === "activity" && sub === undefined) {
       const target =

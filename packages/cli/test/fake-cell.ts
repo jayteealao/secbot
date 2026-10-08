@@ -85,6 +85,13 @@ export interface FakeCell {
   refuseNextAdd: string | undefined;
   /** The operator key the /ops routes accept. */
   operatorKey: string;
+  /** The guard mode of the person "sam" behind the /ops/mode routes. */
+  guardMode: {
+    mode: string;
+    since: number | null;
+    switchedBy: string | null;
+    decisionModel: string;
+  };
   close(): Promise<void>;
 }
 
@@ -102,6 +109,12 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     activity: { person, month: "2026-10", timeZone: "UTC", total: 0, records: [], next: null },
     refuseNextAdd: undefined,
     operatorKey: "operator-key-0123456789abcdef", // gitleaks:allow (fake test key)
+    guardMode: {
+      mode: "shadow",
+      since: Date.UTC(2026, 9, 8, 18, 20),
+      switchedBy: null,
+      decisionModel: "clef",
+    },
     close: async () => {},
   };
   const seen = new Set<string>();
@@ -160,6 +173,22 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
         }
         const url = new URL(path, "http://cell");
         if (url.searchParams.get("cell") !== "sam") return reply(404, { error: "no such cell" });
+        const given = (body ?? {}) as Record<string, unknown>;
+        const view = () => ({ person: "sam", ...cell.guardMode, timeZone: "UTC" });
+        if (url.pathname === "/ops/mode" && request.method === "GET") return reply(200, view());
+        if (url.pathname === "/ops/mode" && request.method === "PUT") {
+          if (given.mode !== "shadow" && given.mode !== "enforce") {
+            return reply(400, { error: 'refused: send {"mode": "shadow" | "enforce"}' });
+          }
+          const changed = cell.guardMode.mode !== given.mode;
+          if (changed)
+            cell.guardMode = { ...cell.guardMode, mode: given.mode, switchedBy: "owner" };
+          return reply(200, { ...view(), changed });
+        }
+        if (url.pathname === "/ops/decision-model" && request.method === "PUT") {
+          cell.guardMode = { ...cell.guardMode, decisionModel: String(given.adapter) };
+          return reply(200, view());
+        }
         return guard("owner", url.pathname.slice(5));
       }
       if (!authorized(request)) return reply(401, { error: "refused: unknown_key" });
@@ -185,6 +214,7 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
           roles: [
             { role: "lead", model: "anthropic/claude-opus-5.5", source: "release default" },
             { role: "research", model: "anthropic/claude-haiku-4.5", source: "release default" },
+            { role: "reviewer", model: "anthropic/claude-sonnet-5.5", source: "release default" },
           ],
         });
       }

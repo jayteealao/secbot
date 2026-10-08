@@ -53,6 +53,60 @@ export const LEAD_INSTRUCTIONS =
  */
 export const RELEASE_OWNER_RULES = [{ agent: "all", tool: "pay", verdict: "prohibit" }] as const;
 
+/**
+ * The reviewer's role name in the role-to-model map. The reviewer is a model call inside the guard,
+ * not a conversation; it reviews only the calls the decision model marks or cannot judge.
+ */
+export const REVIEWER_ROLE = "reviewer";
+
+/** The reviewer's default model. */
+export const DEFAULT_REVIEWER_MODEL = "anthropic/claude-sonnet-5.5";
+
+/** The decision models the owner can switch between, by adapter name (OpenRouter catalogue ids). */
+export const DECISION_MODELS = { clef: "cloudflare/clef", jev: "typesafe/jev-1.13" } as const;
+
+export type DecisionAdapter = keyof typeof DECISION_MODELS;
+
+/** Every cell starts on Clef. */
+export const DEFAULT_DECISION_ADAPTER: DecisionAdapter = "clef";
+
+/**
+ * OpenRouter's Decisions API path (alpha), on the gateway origin. Kept in one place: the shape
+ * probe found it working; the built-in System One route is `/api/v1/systemone`.
+ */
+export const DECISIONS_PATH = "/api/alpha/decisions";
+
+/**
+ * The mark score (the probability of "risky" plus "unclear") at or above which a call goes to the
+ * reviewer, per tool. Reads are less risky, so they need a higher score. Starting values: the
+ * shadow week calibrates them before any cell enforces.
+ */
+export const MARK_THRESHOLDS: Readonly<Record<string, number>> = {
+  handoff: 0.5,
+  household_change: 0.5,
+  household_read: 0.7,
+  set_reminder: 0.5,
+  search_history: 0.7,
+};
+
+/** The threshold of a tool not listed above. */
+export const DEFAULT_MARK_THRESHOLD = 0.5;
+
+/** A decision model slower than this goes to the reviewer (the latency budget is 500 ms at p95). */
+export const DECISION_TIMEOUT_MS = 1_500;
+
+/** A reviewer slower than this holds the call for the person ("reviewer unavailable"). */
+export const REVIEWER_TIMEOUT_MS = 30_000;
+
+/** The largest decision-model state, in UTF-8 bytes. */
+export const DECISION_STATE_LIMIT = 4_096;
+
+/**
+ * The reviewer's outbound account-data check: the check point exists, and it starts with the first
+ * outside tool (a later release). Until then the reviewer is told the check is not active.
+ */
+export const OUTBOUND_CHECK_ACTIVE = false;
+
 /** How long a held call waits for an answer before it lapses as a refusal: 24 hours. */
 export const HOLD_MS = 24 * 60 * 60 * 1000;
 

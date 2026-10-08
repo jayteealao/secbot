@@ -20,7 +20,13 @@
  */
 import type { Context, JsonValue } from "@earendil-works/chord";
 import type { DocumentReader, Harness, Tx } from "@earendil-works/pi-durable";
-import { type ActivityLayer, appendRecord, recordOf } from "./activity.ts";
+import {
+  type ActivityLayer,
+  appendRecord,
+  type GuardModelFields,
+  modelRecordFields,
+  recordOf,
+} from "./activity.ts";
 import { logEvent } from "./cell-parts.ts";
 import { ApprovalDoc, ApprovalKeyDoc, ApprovalsDoc } from "./docs.ts";
 import { ARGUMENTS_LIMIT, redact } from "./redact.ts";
@@ -249,6 +255,8 @@ export interface HoldInput {
   readonly always: AlwaysOffer;
   readonly heldAt: number;
   readonly expiresAt: number;
+  /** A reviewer hold: the mode, the decision model's answer or fallback, and the guard's cost. */
+  readonly model?: GuardModelFields;
 }
 
 /**
@@ -307,6 +315,7 @@ export async function holdCall(tx: Tx, input: HoldInput, timeZone: string): Prom
       arguments: input.arguments,
       keep: input.matched,
       cost: 0,
+      ...modelRecordFields(input.model),
     }),
     timeZone,
   );

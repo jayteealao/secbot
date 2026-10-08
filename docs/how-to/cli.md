@@ -33,8 +33,8 @@ device key is what proves the caller.
 | --- | --- |
 | `secbot chat` | A session with your lead. Answers stream in; a specialist's answer arrives later as `[from <name>] ...` while the session is open. `waiting for the model` means the model gateway is failing and your message is kept. |
 | `secbot missed` | Calls waiting for your answer first, under `HELD CALLS`, then lead messages this device has not seen yet, oldest first. |
-| `secbot model list` | Each role's model and whether it is the release default or your change. |
-| `secbot model set <role> <model-id>` | Changes a role's model from its next turn. An unknown role or model is refused (exit 1) and nothing changes. |
+| `secbot model list` | Each role's model and whether it is the release default or your change. The last row is the guard's `reviewer`, which judges the calls the decision model marks. |
+| `secbot model set <role> <model-id>` | Changes a role's model from its next turn (the reviewer's from its next review). An unknown role or model is refused (exit 1) and nothing changes. |
 | `secbot specialist add <name> --instruction "..." [--model <id>]` | Adds a specialist. The lead can hand work to it from its next turn. |
 
 | `secbot rules list` | The owner's rules (you cannot loosen these), then your own rules: agent, tool, argument match, verdict. |
@@ -90,6 +90,39 @@ HELD CALLS
 #1  lead  handoff -> research  your rule: ask first        lapses in 21 h 10 m
 answer in secbot chat: /allow 1, /always 1, /deny 1
 ```
+
+### Read shadow verdicts
+
+Every cell starts in shadow mode. Rules, ask-first rules, and approvals always apply; the decision
+model and the reviewer run on the calls the rules permit and record what they would have done, but
+the call runs. In `secbot activity` such a row reads:
+
+```
+11:20  lead       set_reminder             would block   reviewer  $0.0061
+         shadow: reminder text holds a card number; the call ran
+```
+
+`would block` and `would ask` are the reviewer's block and ask; the reason says the call ran. In
+enforce mode the same call is `refused` with `reviewer: <reason>`, or held for you with
+`why held   reviewer: <reason>`. When the reviewer fails or is too slow, an enforced call is held
+with `why held   reviewer unavailable`.
+
+### Switch a cell between shadow and enforce (owner)
+
+On the owner's machine, with the operator key:
+
+```
+$ secbot mode show sam
+sam  mode shadow  since 8 Oct 18:20  decision model clef
+$ secbot mode set sam enforce
+sam now runs in enforce mode
+$ secbot mode decision sam jev
+sam now uses the jev decision model from the next call
+```
+
+`secbot mode set <person> shadow` switches back; switching to the mode a cell already has prints
+`<person> already runs in <mode> mode` and changes nothing. Read at least a week of shadow verdicts
+before you switch a cell to enforce. A device key cannot switch a mode.
 
 ### The owner's views of another person
 

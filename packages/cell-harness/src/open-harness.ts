@@ -31,22 +31,38 @@ import {
   listHeld,
 } from "./approvals.ts";
 import { type CellParts, errorFields, logEvent } from "./cell-parts.ts";
+import { createDecisionModels, type DecisionModels } from "./decision-model.ts";
 import { type MissedPage, markDelivered, missedPage } from "./delivery.ts";
-import { ApprovalsDoc, ModelHealthDoc, RosterDoc } from "./docs.ts";
+import {
+  ApprovalsDoc,
+  DecisionModelDoc,
+  type GuardMode,
+  GuardModeDoc,
+  ModelHealthDoc,
+  RosterDoc,
+} from "./docs.ts";
 import { createGatewayModels, type GatewayEnv } from "./gateway.ts";
-import { createGuardExtension, type GuardOptions } from "./guard.ts";
+import { createGuardExtension, createModelStage, type GuardOptions, ruleStage } from "./guard.ts";
+import {
+  type GuardModeState,
+  readDecisionAdapter,
+  readGuardMode,
+  setDecisionAdapter,
+  setGuardMode,
+} from "./guard-settings.ts";
 import { createHandoffExtension } from "./handoff.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import { createHistoryExtension } from "./history-search.ts";
 import { createHouseholdExtension, type HouseholdClient } from "./household-tools.ts";
 import { ModelHealthMonitor } from "./model-health.ts";
 import { listRoleModels, type RoleModel, setRoleModel } from "./model-map.ts";
-import { LEAD_ROLE } from "./release-defaults.ts";
+import { type DecisionAdapter, LEAD_ROLE } from "./release-defaults.ts";
 import {
   createReminderExtension,
   createReminderRoutine,
   type ReminderPayload,
 } from "./reminder.ts";
+import { createReviewer, type Reviewer } from "./reviewer.ts";
 import { addSpecialist, ensureRoster } from "./roster.ts";
 import { ensureRoutines, type Routine } from "./routines.ts";
 import { addRule, listRules, type RuleLists, removeRule, seedRules } from "./rule-store.ts";
@@ -83,8 +99,17 @@ export interface OpenCellOptions {
   readonly routines?: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
   /** Tests: more extensions for every role, after the release ones (the guard stays first). */
   readonly extensions?: readonly Extension[];
-  /** Tests and later inputs: the held-call request id, the hold length, and the lapse timer. */
-  readonly guard?: Pick<GuardOptions, "requestIdOf" | "holdMs" | "setTimer">;
+  /**
+   * Tests and later inputs: the held-call request id, the hold length, and the lapse timer; tests
+   * also replace the decision model (default: the Decisions API with the cell's OpenRouter key)
+   * and the reviewer (default: the reviewer role's model through the cell's gateway).
+   */
+  readonly guard?: Pick<GuardOptions, "requestIdOf" | "holdMs" | "setTimer"> & {
+    readonly decision?: DecisionModels;
+    readonly reviewer?: Reviewer;
+    /** Tests: a shorter reviewer timeout for the default reviewer. */
+    readonly reviewerTimeoutMs?: number;
+  };
 }
 
 /** Missed messages, and the held calls waiting for an answer (listed first). */
@@ -145,6 +170,26 @@ export class CellHarness implements CellParts {
       { ...query, now: this.now(), timeZone: this.timeZone },
       context,
     );
+  }
+
+  /** The guard mode (shadow or enforce), since when, and the decision model's adapter. */
+  async guardMode(
+    context: Context = BACKGROUND_CONTEXT,
+  ): Promise<GuardModeState & { readonly decisionModel: DecisionAdapter }> {
+    return {
+      ...(await readGuardMode(this.harness, context)),
+      decisionModel: await readDecisionAdapter(this.harness, context),
+    };
+  }
+
+  /** The owner switches the mode; the next call the model stage sees uses it. */
+  setGuardMode(mode: GuardMode, by: string, context: Context = BACKGROUND_CONTEXT) {
+    return setGuardMode(this, mode, by, this.now(), context);
+  }
+
+  /** The owner switches the decision model (clef or jev); the next call uses it. */
+  setDecisionAdapter(adapter: string, context: Context = BACKGROUND_CONTEXT) {
+    return setDecisionAdapter(this, adapter, context);
   }
 
   /** Every durable wake time and the cell's next alarm, from the live tasks' checkpoints. */
@@ -276,9 +321,37 @@ export async function openCellHarness(
     tasks: recurring.map(({ routine }) => routine.task),
   });
   const telemetry = createTelemetryExtension(person, monitor);
+  const models = options.models ?? createGatewayModels(env);
+  const {
+    decision: decisionOption,
+    reviewer: reviewerOption,
+    reviewerTimeoutMs,
+    ...guardOptions
+  } = options.guard ?? {};
+  // The decision model and the reviewer run after the rules, on calls the rules passed.
+  const modelStage = createModelStage({
+    decision:
+      decisionOption ??
+      createDecisionModels({
+        apiKey: env.OPENROUTER_API_KEY,
+        baseUrl: env.OPENROUTER_BASE_URL,
+      }),
+    reviewer:
+      reviewerOption ??
+      createReviewer({
+        models: () => models,
+        reader: current,
+        ...(reviewerTimeoutMs === undefined ? {} : { timeoutMs: reviewerTimeoutMs }),
+      }),
+  });
   // The guard is first in every role's list and in the default list, so every role (and a
   // specialist added after start) runs it before any tool call.
-  const guard = createGuardExtension(person, current, { now, timeZone, ...options.guard });
+  const guard = createGuardExtension(person, current, {
+    now,
+    timeZone,
+    stages: [ruleStage, modelStage],
+    ...guardOptions,
+  });
   const extra = options.extensions ?? [];
   const extensions = {
     lead: [guard, lead, handoff, history, household, reminder, routines, telemetry, ...extra],
@@ -286,7 +359,6 @@ export async function openCellHarness(
   };
   const registry = createRegistry();
   for (const extension of extensions.lead) registry.install(extension);
-  const models = options.models ?? createGatewayModels(env);
   const durable = await openCelldStorageWithDatabase(storage);
   const harness = await HarnessFactory.open(
     durable.storage,
@@ -368,6 +440,10 @@ async function finishOpen(
     await tx.doc(ApprovalsDoc);
     // The release owner rule and the default person rules, once per cell (existing cells too).
     await seedRules(tx, now());
+    // Every cell, existing ones too, starts in shadow mode on the default decision model.
+    const mode = await tx.doc(GuardModeDoc);
+    if (mode.since === null) mode.since = now();
+    await tx.doc(DecisionModelDoc);
   }, context);
   const routineTasks = left.filter(({ record }) => record.kind.startsWith(ROUTINE_KIND_PREFIX));
   const overdue = wakesOf({ tasks: routineTasks }).wakes.filter((wake) => wake.at <= now()).length;

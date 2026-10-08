@@ -21,6 +21,12 @@
  * Fail closed: any error inside the guard blocks the call with "the guard failed; the call was not
  * run" and logs `guard.error`. An abort (the job was aborted, or the harness is closing) is passed
  * on, so pi-durable's abort path settles the call; an aborted job lapses its held call first.
+ *
+ * The model stage (createModelStage) runs after the rules, only on a call they passed: the
+ * decision model passes it or marks it, and a mark or any decision-model failure goes to the
+ * reviewer, which allows, blocks, or asks the person; a reviewer failure holds the call. In shadow
+ * mode (every cell's start) the model stage records what it would do and lets the call run; the
+ * rule stage and the hold path never read the mode, so rules and ask-first holds always enforce.
  */
 import type { Context, JsonValue } from "@earendil-works/chord";
 import { withoutAbortSignal } from "@earendil-works/chord/context";
@@ -32,7 +38,14 @@ import {
   hook,
   ToolTask,
 } from "@earendil-works/pi-durable";
-import { type ActivityRecord, appendRecord, recordOf } from "./activity.ts";
+import {
+  type ActivityRecord,
+  appendRecord,
+  type DecisionRecord,
+  type GuardModelFields,
+  modelRecordFields,
+  recordOf,
+} from "./activity.ts";
 import {
   type AlwaysOffer,
   alwaysOffer,
@@ -52,9 +65,12 @@ import {
   waitForAnswer,
 } from "./approvals.ts";
 import { errorFields, logEvent } from "./cell-parts.ts";
+import { buildDecisionState, DecisionFailure, type DecisionModels } from "./decision-model.ts";
 import { RosterDoc, RulesDoc } from "./docs.ts";
+import { readDecisionAdapter, readGuardMode } from "./guard-settings.ts";
 import { redactText } from "./redact.ts";
 import { HOLD_MS, LEAD_ROLE } from "./release-defaults.ts";
+import { type Reviewer, ReviewerFailure, type ReviewVerdict } from "./reviewer.ts";
 import { decide, ruleText } from "./rules.ts";
 import { roleOf } from "./telemetry.ts";
 
@@ -71,7 +87,10 @@ export interface GuardCall {
 /** Where a verdict came from; later stages add their layers. */
 export type GuardLayer = ActivityRecord["layer"];
 
-/** A stage's answer. `matched` names the argument fields a rule matched (kept whole in records). */
+/**
+ * A stage's answer. `matched` names the argument fields a rule matched (kept whole in records);
+ * `model` carries the model stage's mode, decision, fallback, and cost into the record.
+ */
 export type StageResult =
   | {
       readonly kind: "pass";
@@ -80,6 +99,7 @@ export type StageResult =
       readonly ruleId?: number;
       readonly ruleLevel?: "owner" | "person";
       readonly matched?: readonly string[];
+      readonly model?: GuardModelFields;
     }
   | {
       readonly kind: "refuse" | "hold";
@@ -90,6 +110,7 @@ export type StageResult =
       readonly matched?: readonly string[];
       /** Who held the call; from the rule level when absent. */
       readonly reasonSource?: ReasonSource;
+      readonly model?: GuardModelFields;
     };
 
 /** One step of the guard. A stage reads committed documents only (the hook has no transaction). */
@@ -137,7 +158,11 @@ export interface GuardOptions {
   readonly setTimer?: SetTimer;
 }
 
-/** Runs the stages: the first refuse or hold decides; otherwise the last pass explains. */
+/**
+ * Runs the stages: the first refuse or hold decides; otherwise the last pass explains. A later
+ * stage's pass explains only when it decided something (a rule, or the reviewer's review); a
+ * permit rule's reason stays over the decision model's pass, which still adds its fields.
+ */
 export async function runStages(
   stages: readonly GuardStage[],
   call: GuardCall,
@@ -148,10 +173,146 @@ export async function runStages(
   for (const stage of stages) {
     const answer = await stage(call, api, context);
     if (answer.kind !== "pass") return answer;
-    // A later stage's pass explains only when it decided something; the rule's reason stays.
-    if (result.reason === "no rule matched" || answer.ruleId !== undefined) result = answer;
+    if (
+      result.reason === "no rule matched" ||
+      answer.ruleId !== undefined ||
+      answer.layer === "reviewer"
+    ) {
+      result = answer;
+    } else if (answer.model !== undefined) {
+      result = { ...result, model: answer.model };
+    }
   }
   return result;
+}
+
+export interface ModelStageOptions {
+  /** The decision model for the cell's current adapter. */
+  readonly decision: DecisionModels;
+  readonly reviewer: Reviewer;
+}
+
+export const REVIEWER_UNAVAILABLE = "reviewer unavailable";
+
+/**
+ * The model stage: after the rules, on a call they passed. The decision model can only pass or
+ * mark; a mark or a decision-model failure goes to the reviewer. In enforce mode the reviewer's
+ * allow runs the call, its block refuses it, and its ask (or its failure) holds it for the person.
+ * In shadow mode every outcome runs the call and the record says what would have happened.
+ */
+export function createModelStage(options: ModelStageOptions): GuardStage {
+  return async (call, api, context) => {
+    const { mode } = await readGuardMode(api, context);
+    const adapter = await readDecisionAdapter(api, context);
+    const rules = await api.snapshot(RulesDoc, context);
+    const decided = decide(rules?.owner ?? [], rules?.person ?? [], call);
+    const rule =
+      decided.rule === undefined
+        ? "none"
+        : `${decided.level === "owner" ? "owner" : "your"} rule: ${ruleText(decided.rule)}`;
+    const matched = decided.matched ?? [];
+    const state = buildDecisionState(call, rule, matched);
+    let costUsd = 0;
+    let decision: DecisionRecord;
+    let fallback: string | null = null;
+    let asked: string;
+    try {
+      const answer = await options.decision(adapter).ask(state, call.tool, context.abortSignal);
+      costUsd += answer.costUsd;
+      decision = { outcome: answer.outcome, score: answer.score, model: answer.model };
+      const label = `${answer.choice} (score ${answer.score.toFixed(2)})`;
+      if (answer.outcome === "pass") {
+        return {
+          kind: "pass",
+          layer: "decision",
+          reason: `decision model: ${label}`,
+          matched,
+          model: { mode, decision, fallback, costUsd },
+        };
+      }
+      asked = label;
+    } catch (error) {
+      if (!(error instanceof DecisionFailure) || context.abortSignal?.aborted === true) throw error;
+      costUsd += error.costUsd;
+      fallback = error.cause;
+      decision = { outcome: "fallback", score: null, model: null };
+      logEvent(
+        "guard.fallback",
+        {
+          cell: call.person,
+          role: call.role,
+          tool: call.tool,
+          adapter,
+          cause: error.cause,
+          duration_ms: error.durationMs,
+        },
+        "warn",
+      );
+      asked = `no answer (${error.cause})`;
+    }
+    const fields = (verdictWord?: "would block" | "would ask"): GuardModelFields => ({
+      mode,
+      decision,
+      fallback,
+      costUsd,
+      ...(verdictWord === undefined ? {} : { verdictWord }),
+    });
+    let review: ReviewVerdict;
+    try {
+      review = await options.reviewer.review({ state, decision: asked }, context);
+    } catch (error) {
+      if (!(error instanceof ReviewerFailure) || context.abortSignal?.aborted === true) throw error;
+      costUsd += error.costUsd;
+      if (mode === "shadow") {
+        return {
+          kind: "pass",
+          layer: "reviewer",
+          reason: `shadow: ${REVIEWER_UNAVAILABLE}; the call ran`,
+          matched,
+          model: fields("would ask"),
+        };
+      }
+      return {
+        kind: "hold",
+        layer: "reviewer",
+        reason: REVIEWER_UNAVAILABLE,
+        reasonSource: "reviewer-unavailable",
+        matched,
+        model: fields(),
+      };
+    }
+    costUsd += review.costUsd;
+    if (mode === "shadow") {
+      const word =
+        review.verdict === "block"
+          ? "would block"
+          : review.verdict === "ask"
+            ? "would ask"
+            : undefined;
+      return {
+        kind: "pass",
+        layer: "reviewer",
+        reason: `shadow: ${review.reason}; the call ran`,
+        matched,
+        model: fields(word),
+      };
+    }
+    const reason = `reviewer: ${review.reason}`;
+    if (review.verdict === "allow") {
+      return { kind: "pass", layer: "reviewer", reason, matched, model: fields() };
+    }
+    if (review.verdict === "block") {
+      return { kind: "refuse", layer: "reviewer", reason, matched, model: fields() };
+    }
+    return {
+      kind: "hold",
+      layer: "reviewer",
+      reason,
+      reasonSource: "reviewer",
+      matched,
+      model: fields(),
+    };
+  };
 }
 
 type Block = { block: string } | undefined;
@@ -167,7 +328,10 @@ export function createGuardExtension(
   const setTimer = options.setTimer ?? defaultSetTimer;
   const parts = () => ({ harness: harness(), person, timeZone: options.timeZone });
 
-  /** Commits one verdict record (skipped on a rerun of the same key) and logs `guard.verdict`. */
+  /**
+   * Commits one verdict record (skipped on a rerun of the same key) and logs `guard.verdict`. The
+   * call runs when `fields.verdict` is "allowed"; a shadow "would block" or "would ask" still runs.
+   */
   async function verdict(
     call: GuardCall,
     key: string,
@@ -178,10 +342,15 @@ export function createGuardExtension(
       readonly ruleId: number | null;
       readonly ruleLevel: "owner" | "person" | null;
       readonly matched: readonly string[];
+      readonly model?: GuardModelFields;
+      readonly ruleMs?: number | null;
     },
     started: number,
     context: Context,
   ): Promise<Block> {
+    const { model } = fields;
+    const mode = model?.mode ?? (await readGuardMode(harness(), context)).mode;
+    const word = model?.verdictWord ?? fields.verdict;
     await harness().commit(
       (tx) =>
         appendRecord(
@@ -192,7 +361,7 @@ export function createGuardExtension(
             kind: "verdict",
             agent: call.role,
             tool: call.tool,
-            verdict: fields.verdict,
+            verdict: word,
             layer: fields.layer,
             reason: fields.reason,
             ruleId: fields.ruleId,
@@ -200,21 +369,32 @@ export function createGuardExtension(
             arguments: call.arguments,
             keep: fields.matched,
             cost: 0,
+            mode,
+            ...modelRecordFields(model),
           }),
           options.timeZone,
         ),
       context,
     );
+    const outcome = model?.decision.outcome ?? null;
     logEvent("guard.verdict", {
       cell: person,
       role: call.role,
       tool: call.tool,
-      verdict: fields.verdict,
+      verdict: word,
       layer: fields.layer,
       rule_id: fields.ruleId,
       reason: redactText(fields.reason),
       task_id: call.taskId,
       call_id: call.callId,
+      mode,
+      // In shadow mode a mark is what the decision model would have sent to the reviewer.
+      decision: outcome === "mark" && mode === "shadow" ? "would mark" : outcome,
+      decision_score: model?.decision.score ?? null,
+      decision_model: model?.decision.model ?? null,
+      fallback: model?.fallback ?? null,
+      cost_usd: model?.costUsd ?? 0,
+      rule_ms: fields.ruleMs ?? null,
       duration_ms: Date.now() - started,
     });
     return fields.verdict === "allowed" ? undefined : { block: fields.reason };
@@ -369,7 +549,22 @@ export function createGuardExtension(
             if (earlier !== undefined && reusable) {
               return await settleHeld(earlier, call, callKey, api, started, context);
             }
-            const result = await runStages(stages, call, api, context);
+            // The rule stage (always first) is timed on its own for the benchmark (`rule_ms`).
+            let ruleMs: number | null = null;
+            const timed = stages.map(
+              (stage, index): GuardStage =>
+                index > 0
+                  ? stage
+                  : async (...args) => {
+                      const ruleStarted = performance.now();
+                      try {
+                        return await stage(...args);
+                      } finally {
+                        ruleMs = Math.round((performance.now() - ruleStarted) * 1000) / 1000;
+                      }
+                    },
+            );
+            const result = await runStages(timed, call, api, context);
             if (result.kind === "hold") {
               const matched = result.matched ?? [];
               const always = await offerFor(call, matched, api, context);
@@ -397,6 +592,7 @@ export function createGuardExtension(
                       always,
                       heldAt,
                       expiresAt: heldAt + holdMs,
+                      ...(result.model === undefined ? {} : { model: result.model }),
                     },
                     options.timeZone,
                   ),
@@ -415,6 +611,8 @@ export function createGuardExtension(
                 ruleId: result.ruleId ?? null,
                 ruleLevel: result.ruleLevel ?? null,
                 matched: result.matched ?? [],
+                ruleMs,
+                ...(result.model === undefined ? {} : { model: result.model }),
               },
               started,
               context,

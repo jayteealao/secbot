@@ -15,14 +15,36 @@ export const ACTIVITY_PAGE_SIZE = 200;
 /** How many of the newest record keys the rerun check remembers. */
 export const RECENT_KEYS = 64;
 
-export type ActivityVerdict = "allowed" | "refused" | "held" | "denied" | "lapsed";
-export type ActivityLayer = "rule" | "guard" | "person";
+/**
+ * `would block` and `would ask`: in shadow mode, what the reviewer would have done; the call ran.
+ * `switched`: the owner switched the cell's guard mode.
+ */
+export type ActivityVerdict =
+  | "allowed"
+  | "refused"
+  | "held"
+  | "denied"
+  | "lapsed"
+  | "would block"
+  | "would ask"
+  | "switched";
+export type ActivityLayer = "rule" | "guard" | "person" | "decision" | "reviewer";
 /**
  * `verdict`: the guard decided a call. `held`: a call waits for the person (key `<task id>:<call
  * id>`). `answered` and `lapsed`: what became of a held call (keys `approval:<n>:answer` and
  * `approval:<n>:lapse`, written only in the commit that changes the held call, so each exists once).
+ * `mode`: the owner switched the guard mode (reason `mode: shadow -> enforce`).
  */
-export type ActivityKind = "verdict" | "held" | "answered" | "lapsed";
+export type ActivityKind = "verdict" | "held" | "answered" | "lapsed" | "mode";
+
+/** What the decision model made of a call: passed, marked for the reviewer, or failed (fallback). */
+export type DecisionRecord = {
+  outcome: "pass" | "mark" | "fallback";
+  /** The mark score (risky plus unclear); null on a fallback. */
+  score: number | null;
+  /** The model id the service returned; null on a fallback. */
+  model: string | null;
+};
 
 export type ActivityRecord = {
   /** `<task id>:<call id>`: the same on a rerun of the same call. */
@@ -41,8 +63,37 @@ export type ActivityRecord = {
   ruleLevel: "owner" | "person" | null;
   /** The call's arguments after redaction, capped at ARGUMENTS_LIMIT bytes. */
   arguments: JsonValue;
+  /** The guard's own model cost for this call (decision model plus reviewer), in USD. */
   cost: number;
+  /** The cell's guard mode when the guard decided (records written before it existed have none). */
+  mode?: "shadow" | "enforce";
+  /** The decision model's answer, when the call reached it. */
+  decision?: DecisionRecord;
+  /** Why the decision model gave no answer (for example `http-503`, `timeout`), or null. */
+  fallback?: string | null;
 };
+
+/** What the model layers add to a verdict or a held record. */
+export type GuardModelFields = {
+  readonly mode: "shadow" | "enforce";
+  readonly decision: DecisionRecord;
+  readonly fallback: string | null;
+  /** Decision model plus reviewer, in USD. */
+  readonly costUsd: number;
+  /** Shadow mode: the reviewer's block or ask, which did not stop the call. */
+  readonly verdictWord?: "would block" | "would ask";
+};
+
+/** The record fields of the model layers' answer. */
+export const modelRecordFields = (model: GuardModelFields | undefined) =>
+  model === undefined
+    ? {}
+    : {
+        mode: model.mode,
+        decision: { ...model.decision },
+        fallback: model.fallback,
+        cost: model.costUsd,
+      };
 
 /** `YYYY-MM` of `at` in `timeZone`. */
 export function monthOf(at: number, timeZone: string): string {

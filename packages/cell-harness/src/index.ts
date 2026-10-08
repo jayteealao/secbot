@@ -3,6 +3,8 @@ export {
   type ActivityPage,
   type ActivityQuery,
   type ActivityRecord,
+  type DecisionRecord,
+  type GuardModelFields,
   MONTH,
   monthOf,
 } from "./activity.ts";
@@ -39,19 +41,45 @@ export {
   safeErrorText,
 } from "./cell-parts.ts";
 export { CREDIT_MARKER, isCreditError, withCreditPause } from "./credit-pause.ts";
+export {
+  buildDecisionState,
+  createDecisionModel,
+  createDecisionModels,
+  type DecisionAnswer,
+  type DecisionChoice,
+  DecisionFailure,
+  type DecisionFailureCause,
+  type DecisionModel,
+  type DecisionModels,
+  type DecisionsClientOptions,
+  markScore,
+  RISK_QUESTION,
+  thresholdFor,
+  UNTRUSTED_NOTE,
+} from "./decision-model.ts";
 export type { LeadMessage, MissedPage } from "./delivery.ts";
+export type { GuardMode } from "./docs.ts";
 export { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 export {
   createGuardExtension,
+  createModelStage,
   GUARD_FAILED,
   type GuardCall,
   type GuardLayer,
   type GuardOptions,
   type GuardStage,
+  type ModelStageOptions,
+  REVIEWER_UNAVAILABLE,
   ruleStage,
   runStages,
   type StageResult,
 } from "./guard.ts";
+export {
+  GUARD_MODES,
+  type GuardModeState,
+  isDecisionAdapter,
+  isGuardMode,
+} from "./guard-settings.ts";
 export {
   createHeartbeatRoutine,
   HEARTBEAT_EVERY_MS,
@@ -85,13 +113,32 @@ export {
 } from "./open-harness.ts";
 export { ARGUMENTS_LIMIT, isSecretKey, REDACTED, redact, redactText } from "./redact.ts";
 export {
+  DECISION_MODELS,
+  DECISION_STATE_LIMIT,
+  DEFAULT_DECISION_ADAPTER,
   DEFAULT_LEAD_MODEL,
+  DEFAULT_REVIEWER_MODEL,
   DEFAULT_SPECIALIST_MODEL,
+  type DecisionAdapter,
   HOLD_MS,
   LEAD_ROLE,
+  MARK_THRESHOLDS,
+  REVIEWER_ROLE,
   STARTER_SPECIALISTS,
 } from "./release-defaults.ts";
 export { REMINDER_PREFIX, type ReminderPayload, scheduleReminder } from "./reminder.ts";
+export {
+  createReviewer,
+  parseVerdict,
+  REVIEWER_FIRST_LINE,
+  REVIEWER_PROMPT,
+  type Reviewer,
+  ReviewerFailure,
+  type ReviewerOptions,
+  type ReviewInput,
+  type ReviewVerdict,
+  reviewMessage,
+} from "./reviewer.ts";
 export {
   createRoutineTask,
   defineRoutine,
