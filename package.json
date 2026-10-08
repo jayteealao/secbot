@@ -1,6 +1,6 @@
 {
   "name": "secbot",
-  "version": "0.0.0",
+  "version": "0.1.0-beta.1",
   "private": true,
   "description": "A personal, always-on agent for one household, built on pi-durable and celld.",
   "type": "module",
