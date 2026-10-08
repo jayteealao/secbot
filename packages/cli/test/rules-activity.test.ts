@@ -427,8 +427,8 @@ describe("secbot activity", () => {
     const older = await secbot(environment, "activity", "--month", "2026-09", "--page", "2");
     expect(fake.calls.at(-1)?.path).toBe("/v1/cells/owner/activity?month=2026-09&before=70");
     expect(older.out.split("\n").slice(-3)).toEqual([
-      "showing 50 of 120 in September 2026; older: secbot activity --month 2026-09",
-      "--page 3",
+      "showing 50 of 120 in September 2026;",
+      "  older: secbot activity --month 2026-09 --page 3",
       "",
     ]);
     for (const result of [first, second, third, past, older]) {

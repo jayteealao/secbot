@@ -127,12 +127,10 @@ export async function activity(
     ...(month === undefined || answer.next === null ? [] : [`--month ${month}`]),
     answer.next === null ? `--month ${previousMonth(answer.month)}` : `--page ${number + 1}`,
   ].join(" ");
-  lines.push(
-    ...wrap(
-      `showing ${rows.length} of ${first.total + (first.live ?? []).length} ${when}; older: ${command}`,
-      0,
-    ),
-  );
+  // One line when it fits; else the command moves whole to an indented second line.
+  const shown = `showing ${rows.length} of ${first.total + (first.live ?? []).length} ${when};`;
+  const footer = `${shown} older: ${command}`;
+  lines.push(...(footer.length <= 80 ? [footer] : [shown, ...wrap(`older: ${command}`, 2)]));
   io.stdout(`${lines.join("\n")}\n`);
   return 0;
 }

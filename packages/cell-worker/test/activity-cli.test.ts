@@ -412,8 +412,8 @@ describe("the empty state, old months, and paging", () => {
     expect(rowsOf(page1.out)).toHaveLength(50);
     expect(page1.out).toContain("         call 119\n");
     expect(page1.out.split("\n").slice(-3, -1)).toEqual([
-      "showing 50 of 120 in September 2026; older: secbot activity --month 2026-09",
-      "--page 2",
+      "showing 50 of 120 in September 2026;",
+      "  older: secbot activity --month 2026-09 --page 2",
     ]);
     expect(rowsOf(page2.out)).toHaveLength(50);
     expect(page2.out).toContain("         call 69\n");

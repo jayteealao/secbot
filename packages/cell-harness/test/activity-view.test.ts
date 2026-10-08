@@ -9,8 +9,8 @@ import type { EntryRecord } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActivityRecord } from "../src/activity.ts";
 import { leadMessageOf } from "../src/delivery.ts";
-import { RosterDoc } from "../src/docs.ts";
-import { handoffWhat, jobLabel } from "../src/jobs.ts";
+import { BudgetWaitsDoc, RosterDoc } from "../src/docs.ts";
+import { handoffWhat, jobLabel, REPORTER_KIND } from "../src/jobs.ts";
 import { readMonth } from "../src/month-ledger.ts";
 import { defineRoutine } from "../src/routines.ts";
 import {
@@ -157,6 +157,44 @@ describe("hand-off jobs in activity", () => {
     const sum = (await jobs(t)).reduce((all, record) => all + record.cost, 0);
     expect(spend.person.byRole.research).toBeCloseTo(0.3, 10);
     expect(sum).toBeCloseTo(0.3, 10);
+  }, 30_000);
+
+  it("keeps a running job's cost when a waiting job to the same specialist is stopped", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const research = heldResearch();
+    test = await openTestCell({ gateway: createFauxGateway(research.responder) });
+    const t = test;
+    await (await t.cell.submit("Find out about fasting for me", "run-1")).wait(BACKGROUND_CONTEXT);
+    await until(() => t.gateway.requests.some((request) => request.role === "research"));
+    // Above the limit, a second hand-off to research waits before it starts.
+    await t.cell.setLimit(1, "owner");
+    await addSpend(t.cell, 1.2);
+    await (await t.cell.submit("More on fasting, please", "run-2")).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await t.cell.waiting()).length === 1);
+    // The running job's work so far, then the waiting job is stopped.
+    await addSpend(t.cell, 0.3, { role: "research" });
+    const waits = (await t.cell.harness.snapshot(BudgetWaitsDoc, BACKGROUND_CONTEXT))?.tasks ?? {};
+    const waiting = (await t.cell.harness.inspect(BACKGROUND_CONTEXT)).tasks.find(
+      ({ record }) => record.kind === REPORTER_KIND && Object.hasOwn(waits, String(record.id)),
+    );
+    if (waiting === undefined) throw new Error("no waiting hand-off");
+    await t.cell.harness.abortTask(waiting.record.id, BACKGROUND_CONTEXT);
+    await until(async () => (await jobs(t)).some((record) => record.reason === "stopped"));
+
+    await t.cell.setLimit(5, "owner");
+    research.release();
+    await until(async () => (await jobs(t)).length === 2);
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    const stored = await jobs(t);
+    const stopped = stored.find((record) => record.reason === "stopped");
+    const answered = stored.find((record) => record.reason === "answered the lead");
+    expect(stopped?.cost).toBe(0);
+    expect(answered?.cost).toBeCloseTo(0.3, 10);
+    const spend = await readMonth(t.cell.harness, Date.now(), "UTC", BACKGROUND_CONTEXT);
+    expect(stored.reduce((all, record) => all + record.cost, 0)).toBeCloseTo(
+      spend.person.byRole.research ?? 0,
+      10,
+    );
   }, 30_000);
 
   it("stores one done record when the cell restarts as the job ends", async () => {

@@ -96,7 +96,8 @@ function costSince(total: number, start: number | undefined, high: number | unde
 
 /**
  * Takes a finished hand-off job's cost and moves the specialist's mark to its total now. A rerun
- * that finds the cost taken returns it unchanged.
+ * that finds the cost taken returns it unchanged. A job stopped before it started costs nothing
+ * and leaves the mark alone: the specialist's spend since the mark belongs to its running jobs.
  */
 export async function takeJobCost(
   tx: Tx,
@@ -107,6 +108,10 @@ export async function takeJobCost(
   const jobs = await tx.doc(JobsDoc);
   const taken = Object.hasOwn(jobs.ends, taskId) ? jobs.ends[taskId] : undefined;
   if (taken !== undefined) return taken;
+  if (!Object.hasOwn(jobs.starts, taskId)) {
+    jobs.ends[taskId] = 0;
+    return 0;
+  }
   const total = conversationTotal(await tx.doc(UsageDoc, conversationId));
   const high = Object.hasOwn(jobs.high, role) ? jobs.high[role] : undefined;
   const cost = costSince(total, jobs.starts[taskId], high);
