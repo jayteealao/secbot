@@ -3,8 +3,9 @@
  * pages of a document family. An append is one small document change; a month lists without
  * reading older months; snapshots and restores carry the pages like every other document.
  *
- * Held calls add the record kinds held, answered, and lapsed; later work adds jobs and fields
- * (cost, mode) to the same record shape without a migration.
+ * Held calls add the record kinds held, answered, and lapsed; jobs add the kind job (a finished
+ * hand-off or routine run, with its cost); fields (cost, mode) join the same record shape without a
+ * migration.
  */
 import type { Context, JsonValue } from "@earendil-works/chord";
 import type { Usage } from "@earendil-works/pi-ai";
@@ -28,15 +29,20 @@ export type ActivityVerdict =
   | "lapsed"
   | "would block"
   | "would ask"
-  | "switched";
-export type ActivityLayer = "rule" | "guard" | "person" | "decision" | "reviewer";
+  | "switched"
+  | "running"
+  | "waiting"
+  | "done";
+export type ActivityLayer = "rule" | "guard" | "person" | "decision" | "reviewer" | "job";
 /**
  * `verdict`: the guard decided a call. `held`: a call waits for the person (key `<task id>:<call
  * id>`). `answered` and `lapsed`: what became of a held call (keys `approval:<n>:answer` and
  * `approval:<n>:lapse`, written only in the commit that changes the held call, so each exists once).
- * `mode`: the owner switched the guard mode (reason `mode: shadow -> enforce`).
+ * `mode`: the owner switched the guard mode (reason `mode: shadow -> enforce`). `job`: a hand-off
+ * or a routine run (jobs.ts): `verdict` holds its state, `tool` its label, `reason` its step or
+ * outcome, `cost` its cost; stored once it is done (key `job:<task id>`), listed live before.
  */
-export type ActivityKind = "verdict" | "held" | "answered" | "lapsed" | "mode";
+export type ActivityKind = "verdict" | "held" | "answered" | "lapsed" | "mode" | "job";
 
 /** What the decision model made of a call: passed, marked for the reviewer, or failed (fallback). */
 export type DecisionRecord = {
@@ -176,6 +182,14 @@ export interface ActivityPage {
   readonly next: number | null;
 }
 
+/** A page as the cell serves it: the month's spend and, on the first page of now, live jobs. */
+export interface ActivityView extends ActivityPage {
+  /** The person's spend in the month: the month ledger's, else the sum of the items' cost. */
+  readonly spentUsd: number;
+  /** Jobs running or waiting now, newest first; empty for an older month or a later page. */
+  readonly live: readonly ActivityRecord[];
+}
+
 /** A month's records, newest first. Each record's number is its place in the month, from 0. */
 export async function listActivity(
   reader: DocumentReader,
@@ -208,4 +222,19 @@ export async function listActivity(
     records,
     next: start > 0 ? start : null,
   };
+}
+
+/** The sum of the stored records' cost in `month`: the total of a month the ledger kept none for. */
+export async function monthItemCost(
+  reader: DocumentReader,
+  month: string,
+  context: Context,
+): Promise<number> {
+  const pages = (await reader.snapshot(ActivityDoc, context))?.months[month]?.pages ?? 0;
+  let total = 0;
+  for (let number = 1; number <= pages; number++) {
+    const page = await reader.snapshot(ActivityPageDoc, `${month}:${number}`, context);
+    for (const record of page?.records ?? []) total += record.cost;
+  }
+  return total;
 }

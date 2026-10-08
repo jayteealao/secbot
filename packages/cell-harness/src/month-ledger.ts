@@ -182,11 +182,16 @@ type Ledger = {
 const sum = (costs: Readonly<Record<string, number>>) =>
   Object.values(costs).reduce((all, cost) => all + cost, 0);
 
+/** One conversation's ledger total, in USD: every model and tool bucket, guard calls included. */
+export const conversationTotal = (state: Readonly<UsageState> | undefined): number =>
+  sum(costsOf(state));
+
 /**
  * The current month's ledger, rolled in one commit when `now` passed its end (or started at the
- * first read). A roll takes every conversation's totals as the new baseline and applies a time
- * zone the owner set during the closing month. The first month of a cell has no baseline: what its
- * conversations spent before counts in it.
+ * first read). A roll keeps the closing month's person spend in `closed`, takes every
+ * conversation's totals as the new baseline, and applies a time zone the owner set during the
+ * closing month. The first month of a cell has no baseline: what its conversations spent before
+ * counts in it.
  */
 export async function ensureMonth(
   harness: Harness,
@@ -209,11 +214,16 @@ export async function ensureMonth(
     const bounds = monthBounds(now, nextZone);
     const baseline: Record<string, Record<string, number>> = {};
     const seen: Record<string, number> = {};
-    for (const { id, conversationId } of conversations) {
+    let closing = 0;
+    for (const { id, conversationId, role } of conversations) {
       const costs = costsOf(await tx.doc(UsageDoc, id));
+      if (!first && budgetOf(role) === "person") {
+        closing += total(spendSince(costs, doc.baseline[conversationId]));
+      }
       if (!first) baseline[conversationId] = costs;
       seen[conversationId] = sum(costs);
     }
+    if (!first) doc.closed = { ...doc.closed, [doc.month]: Math.round(closing * 10_000) / 10_000 };
     Object.assign(doc, {
       month: bounds.month,
       zone: nextZone,

@@ -241,6 +241,8 @@ describe("secbot rules", () => {
     [["rules", "remove", "lead"], "usage: secbot rules remove"],
     [["rules", "list", "--owner"], "--owner and --person"],
     [["activity", "--month", "2026-13"], "--month takes YYYY-MM"],
+    [["activity", "--page", "0"], "--page takes a whole number from 1"],
+    [["activity", "--page", "two"], "--page takes a whole number from 1"],
   ])("exits 2 on %j", async (argv, message) => {
     const { environment } = await setup();
     const result = await secbot(environment, ...argv);
@@ -289,43 +291,174 @@ const RECORDS = [
   },
 ];
 
+const at = (hour: number, minute: number) => Date.UTC(2026, 9, 8, hour, minute);
+const row = (
+  time: number,
+  agent: string,
+  tool: string,
+  verdict: string,
+  layer: string,
+  reason: string,
+  extra: Record<string, unknown> = {},
+) => ({ at: time, agent, tool, verdict, layer, reason, arguments: {}, cost: 0, ...extra });
+
+// The designed `secbot activity` rows: answers, holds, shadow, rule refusals, lapses, the secrets
+// cell, and a running job (live, listed at its start time).
+const STORED = [
+  row(at(14, 2), "lead", "handoff", "allowed", "person", "allowed once by sam", {
+    arguments: { specialist: "research" },
+  }),
+  row(at(13, 58), "lead", "handoff", "held", "rule", "your rule: lead handoff (any) -> ask first", {
+    arguments: { specialist: "research" },
+  }),
+  row(
+    at(11, 20),
+    "lead",
+    "set_reminder",
+    "would block",
+    "reviewer",
+    "shadow: reminder text holds a card number; the call ran",
+    { cost: 0.0061 },
+  ),
+  row(
+    at(9, 15),
+    "household",
+    "pay_test",
+    "refused",
+    "rule",
+    "owner rule: any pay tool -> prohibit",
+  ),
+  row(at(6, 12), "lead", "household_change", "lapsed", "person", "no answer in 24 h; refused"),
+  row(at(3, 10), "health", "broker health-test", "refused", "secrets", "secrets cell unavailable"),
+];
+const LIVE = [
+  row(at(1, 5), "research", "job: train times", "running", "job", "step 2 of 4", {
+    kind: "job",
+    cost: 0.131,
+  }),
+];
+
 describe("secbot activity", () => {
-  it("lists the month's verdicts in the designed columns, newest first", async () => {
+  it("prints the designed list: every kind with its verdict or state, layer, reason, and cost, under the month's spend", async () => {
     const { environment, fake } = await setup();
     fake.activity = {
-      person: "owner",
+      person: "sam",
       month: "2026-10",
       timeZone: "UTC",
-      total: 214,
-      records: RECORDS,
-      next: 212,
+      total: 6,
+      records: STORED,
+      next: null,
+      spentUsd: 11.52,
+      live: LIVE,
     };
     const result = await secbot(environment, "activity");
     expect(result.code).toBe(0);
     expect(result.out).toBe(
       [
-        // The total ends at column 78, under the end of the dash rule.
-        `${"ACTIVITY  owner  October 2026".padEnd(62)}[ total: $0.00 ]`,
+        // The total ends at column 78, under the end of the dash rule (the design sample is one short).
+        `${"ACTIVITY  sam  October 2026".padEnd(61)}[ total: $11.52 ]`,
         "------------------------------------------------------------------------------",
         "TIME   AGENT      TOOL OR JOB              VERDICT       LAYER       COST",
-        "14:02  lead       handoff -> research      allowed       rule      $0.0000",
-        "         your rule: all handoff (any) -> permit",
+        "14:02  lead       handoff -> research      allowed       person    $0.0000",
+        "         allowed once by sam",
+        "13:58  lead       handoff -> research      held          rule      $0.0000",
+        "         your rule: lead handoff (any) -> ask first",
+        "11:20  lead       set_reminder             would block   reviewer  $0.0061",
+        "         shadow: reminder text holds a card number; the call ran",
         "09:15  household  pay_test                 refused       rule      $0.0000",
         "         owner rule: any pay tool -> prohibit",
-        "showing 2 of 214 this month; older: secbot activity --month 2026-09",
+        "06:12  lead       household_change         lapsed        person    $0.0000",
+        "         no answer in 24 h; refused",
+        "03:10  health     broker health-test       refused       secrets   $0.0000",
+        "         secrets cell unavailable",
+        "01:05  research   job: train times         running       job       $0.1310",
+        "         step 2 of 4",
+        "showing 7 of 7 this month; older: secbot activity --month 2026-09",
         "",
       ].join("\n"),
     );
     expect(everyLineFits(result.out)).toBe(true);
   });
 
+  it("totals the listed rows' cost when the cell sends no month spend", async () => {
+    const { environment, fake } = await setup();
+    fake.activity = { ...fake.activity, records: STORED, total: 6 };
+    const first = (await secbot(environment, "activity")).out.split("\n")[0];
+    expect(first).toBe(`${"ACTIVITY  owner  October 2026".padEnd(62)}[ total: $0.01 ]`);
+  });
+
+  it("pages a long month 50 at a time, then points at the month before", async () => {
+    const { environment, fake } = await setup();
+    const all = Array.from({ length: 120 }, (_, index) =>
+      row(at(0, 0) + index * 60_000, "lead", "search_history", "allowed", "rule", `call ${index}`),
+    );
+    fake.activityOf = (query) => {
+      const before = Number(query.get("before") ?? all.length);
+      const start = Math.max(0, before - 50);
+      return {
+        person: "owner",
+        month: query.get("month") ?? "2026-10",
+        timeZone: "UTC",
+        total: all.length,
+        records: all.slice(start, before).reverse(),
+        next: start > 0 ? start : null,
+        spentUsd: 1.5,
+        live: query.get("before") === null && query.get("month") === null ? LIVE : [],
+      };
+    };
+    const first = await secbot(environment, "activity");
+    const firstLines = first.out.split("\n");
+    expect(firstLines.filter((line) => /^\d\d:\d\d /.test(line))).toHaveLength(51);
+    expect(firstLines.at(-2)).toBe("showing 51 of 121 this month; older: secbot activity --page 2");
+    const second = await secbot(environment, "activity", "--page", "2");
+    expect(fake.calls.at(-1)?.path).toBe("/v1/cells/owner/activity?before=70");
+    expect(second.out).toContain("         call 69\n");
+    expect(second.out).not.toContain("job: train times");
+    expect(second.out.split("\n").at(-2)).toBe(
+      "showing 50 of 121 this month; older: secbot activity --page 3",
+    );
+    const third = await secbot(environment, "activity", "--page", "3");
+    expect(fake.calls.at(-1)?.path).toBe("/v1/cells/owner/activity?before=20");
+    expect(third.out.split("\n").at(-2)).toBe(
+      "showing 20 of 121 this month; older: secbot activity --month 2026-09",
+    );
+    const past = await secbot(environment, "activity", "--page", "4");
+    expect(past.out.split("\n").slice(-2)).toEqual(["no activity this month", ""]);
+    const older = await secbot(environment, "activity", "--month", "2026-09", "--page", "2");
+    expect(fake.calls.at(-1)?.path).toBe("/v1/cells/owner/activity?month=2026-09&before=70");
+    expect(older.out.split("\n").slice(-3)).toEqual([
+      "showing 50 of 120 in September 2026; older: secbot activity --month 2026-09",
+      "--page 3",
+      "",
+    ]);
+    for (const result of [first, second, third, past, older]) {
+      expect(everyLineFits(result.out)).toBe(true);
+    }
+  });
+
   it("says when the month has no activity, and passes --month on", async () => {
     const { environment, fake } = await setup();
-    expect((await secbot(environment, "activity")).out).toContain("\nno activity this month\n");
+    const empty = await secbot(environment, "activity");
+    expect(empty.out).toBe(
+      [
+        `${"ACTIVITY  owner  October 2026".padEnd(62)}[ total: $0.00 ]`,
+        "------------------------------------------------------------------------------",
+        "no activity this month",
+        "",
+      ].join("\n"),
+    );
     fake.activity = { ...fake.activity, month: "2026-09" };
     const older = await secbot(environment, "activity", "--month", "2026-09");
     expect(older.out).toContain("no activity in September 2026");
     expect(fake.calls.at(-1)?.path).toBe("/v1/cells/owner/activity?month=2026-09");
+  });
+
+  it("lists a month with only live jobs, so it is not empty", async () => {
+    const { environment, fake } = await setup();
+    fake.activity = { ...fake.activity, live: LIVE };
+    const result = await secbot(environment, "activity");
+    expect(result.out).toContain("01:05  research   job: train times         running");
+    expect(result.out).not.toContain("no activity");
   });
 });
 

@@ -23,8 +23,10 @@ import {
   type TaskRuntime,
   type Tx,
 } from "@earendil-works/pi-durable";
+import { appendRecord } from "./activity.ts";
 import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
+import { doneRecord, jobLabel } from "./jobs.ts";
 import { ROUTINE_KIND_PREFIX } from "./wake-times.ts";
 
 /** A failed one-off routine (a reminder whose delivery threw) tries again after this long. */
@@ -78,11 +80,18 @@ export interface RoutineHooks {
   readonly onWakeChange?: () => void;
   /** The cell's budget gate; spending routines wait on it above the person's limit. */
   readonly gate?: () => BudgetWaiter | undefined;
+  /**
+   * The cell's time zone. When set, each run of a routine that spends leaves one done job record
+   * in activity (jobs.ts), in the run's own commit.
+   */
+  readonly timeZone?: string;
 }
 
 export interface Routine<P extends JsonObject = JsonObject> {
   readonly name: string;
   readonly every: number | undefined;
+  /** False for a routine that spends nothing (the heartbeat); activity does not list it. */
+  readonly spends: boolean;
   readonly task: Task<RoutineInput<P>, RoutineState, null, object>;
 }
 
@@ -95,6 +104,8 @@ export function defineRoutine<P extends JsonObject>(
   if (spec.every !== undefined && !(spec.every >= 1_000)) {
     throw new Error(`routine ${spec.name}: every must be at least 1000 ms`);
   }
+  const what = (payload: P) =>
+    spec.describe?.(payload) ?? `routine ${spec.name.replace(/-/g, " ")}`;
   const task = defineTask<RoutineInput<P>, RoutineState, null>({
     name: `${ROUTINE_KIND_PREFIX}${spec.name}`,
     version: 1,
@@ -108,8 +119,7 @@ export function defineRoutine<P extends JsonObject>(
             {
               budget: "person",
               taskId: String(routine.id),
-              what:
-                spec.describe?.(routine.input.payload) ?? `routine ${spec.name.replace(/-/g, " ")}`,
+              what: what(routine.input.payload),
             },
             context,
           );
@@ -142,6 +152,25 @@ export function defineRoutine<P extends JsonObject>(
               : undefined;
         await runtime.commit(async (tx) => {
           if (!retry) await result.record?.(tx);
+          if (!retry && spec.spends !== false && hooks.timeZone !== undefined) {
+            await appendRecord(
+              tx,
+              doneRecord({
+                key: `job:${routine.id}:${wakeAt}`,
+                at: firedAt,
+                agent: "lead",
+                label: jobLabel(what(routine.input.payload)),
+                reason:
+                  result.outcome === "delivered"
+                    ? "delivered to the lead"
+                    : result.outcome === "failed"
+                      ? "failed"
+                      : result.outcome,
+                cost: 0,
+              }),
+              hooks.timeZone,
+            );
+          }
           return next === undefined
             ? { status: "terminal", outcome: { status: "completed", result: null } }
             : { status: "running", checkpoint: { phase: "wait", wakeAt: next } };
@@ -161,7 +190,7 @@ export function defineRoutine<P extends JsonObject>(
     abort: (_routine, runtime, context) =>
       runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
   });
-  return { name: spec.name, every: spec.every, task };
+  return { name: spec.name, every: spec.every, spends: spec.spends !== false, task };
 }
 
 /** Creates one routine task, owned by the root conversation in the background. */

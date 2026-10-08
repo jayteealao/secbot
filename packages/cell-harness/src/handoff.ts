@@ -17,9 +17,19 @@ import {
   defineTool,
   type Extension,
 } from "@earendil-works/pi-durable";
-import { type BudgetWaiter, shortText } from "./budget-gate.ts";
+import { appendRecord } from "./activity.ts";
+import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
 import { RosterDoc } from "./docs.ts";
+import {
+  doneRecord,
+  endJob,
+  handoffWhat,
+  jobLabel,
+  markJobStart,
+  REPORTER_KIND,
+  takeJobCost,
+} from "./jobs.ts";
 import { budgetOf } from "./month-ledger.ts";
 
 /** A follow-up the lead receives starts with this, then the specialist's name and the outcome. */
@@ -64,13 +74,38 @@ type ReporterState = { phase: "deliver" } | { phase: "report"; report?: string; 
  * Above a limit both phases wait first (budget-gate.ts): the brief waits on the specialist's budget
  * (the developer budget for the developer specialist, the person's limit for the others), and the
  * report waits on the person's limit. A restart reruns the phase, which checks again.
+ *
+ * The job in activity (jobs.ts): the delivery marks the specialist's ledger total, the settle
+ * commit takes the job's cost, and the commit that ends the task writes the done record (key
+ * `job:<task id>`) in the cell's time zone, so a finished job is recorded once.
  */
 export function createReporter(
   person: string,
   gate: () => BudgetWaiter | undefined = () => undefined,
+  timeZone = "UTC",
 ) {
+  const done = async (
+    tx: Parameters<typeof appendRecord>[0],
+    reporter: { readonly id: unknown; readonly input: ReporterInput },
+    at: number,
+    reason: string,
+  ) => {
+    const taskId = String(reporter.id);
+    await appendRecord(
+      tx,
+      doneRecord({
+        key: `job:${taskId}`,
+        at,
+        agent: reporter.input.name,
+        label: jobLabel(handoffWhat(reporter.input.name, reporter.input.brief)),
+        reason,
+        cost: await endJob(tx, taskId),
+      }),
+      timeZone,
+    );
+  };
   return defineTask<ReporterInput, ReporterState, null>({
-    name: "secbot.handoff-reporter",
+    name: REPORTER_KIND,
     version: 1,
     initial: () => ({ phase: "deliver" }),
     phases: {
@@ -80,7 +115,7 @@ export function createReporter(
           {
             budget: budgetOf(name),
             taskId: String(reporter.id),
-            what: `handoff ${name} ${shortText(brief)}`,
+            what: handoffWhat(name, brief),
           },
           context,
         );
@@ -99,6 +134,10 @@ export function createReporter(
           );
           return;
         }
+        await runtime.commit(async (tx) => {
+          await markJobStart(tx, String(reporter.id), conversationId);
+          return undefined;
+        }, context);
         const submission = await specialist.submit(
           {
             type: "input",
@@ -110,6 +149,7 @@ export function createReporter(
         );
         const settled = await submission.wait(context);
         await runtime.commit(async (tx) => {
+          await takeJobCost(tx, String(reporter.id), name, conversationId);
           const next = (outcome: string, report?: string) => {
             const checkpoint: ReporterState =
               report === undefined
@@ -155,10 +195,10 @@ export function createReporter(
             context,
           );
         }
-        await runtime.commit(
-          () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
-          context,
-        );
+        await runtime.commit(async (tx) => {
+          await done(tx, reporter, runtime.now(), outcomeText(outcome, report));
+          return { status: "terminal", outcome: { status: "completed", result: null } };
+        }, context);
         logEvent("handoff.reported", {
           cell: person,
           specialist: reporter.input.name,
@@ -168,9 +208,25 @@ export function createReporter(
         });
       },
     },
-    abort: (_reporter, runtime, context) =>
-      runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
+    abort: (reporter, runtime, context) =>
+      runtime.commit(async (tx) => {
+        const { name, conversationId } = reporter.input;
+        await takeJobCost(tx, String(reporter.id), name, conversationId);
+        await done(tx, reporter, runtime.now(), "stopped");
+        return { status: "terminal", outcome: { status: "aborted" } };
+      }, context),
   });
+}
+
+/** A finished hand-off's outcome, as its done record says it. */
+function outcomeText(outcome: string, report: string | undefined): string {
+  if (outcome === "reported") return "answered the lead";
+  if (outcome === "aborted") return "stopped";
+  if (outcome === "failed") {
+    const why = /failed: (.*)\]$/.exec(report ?? "")?.[1];
+    return why === undefined ? "failed" : `failed: ${why}`;
+  }
+  return "no answer";
 }
 
 /** The lead's note when the brief waits above a limit. */
@@ -184,8 +240,9 @@ export const WAITS_NOTE =
 export function createHandoffExtension(
   person: string,
   gate: () => BudgetWaiter | undefined = () => undefined,
+  timeZone = "UTC",
 ): Extension {
-  const Reporter = createReporter(person, gate);
+  const Reporter = createReporter(person, gate, timeZone);
   const handoff = defineTool({
     name: "handoff",
     description:

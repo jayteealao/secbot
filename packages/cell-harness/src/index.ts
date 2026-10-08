@@ -3,9 +3,11 @@ export {
   type ActivityPage,
   type ActivityQuery,
   type ActivityRecord,
+  type ActivityView,
   type DecisionRecord,
   type GuardModelFields,
   MONTH,
+  monthItemCost,
   monthOf,
 } from "./activity.ts";
 export {
@@ -121,6 +123,7 @@ export {
   type ReportSpendResult,
   type SpendReport,
 } from "./household-contract.ts";
+export { doneRecord, jobLabel, liveJobs } from "./jobs.ts";
 export {
   type BudgetLine,
   type BudgetState,
@@ -137,6 +140,7 @@ export {
 export type { RoleModel } from "./model-map.ts";
 export {
   addGuardUsage,
+  conversationTotal,
   type LayerSpend,
   localMonthStart,
   type MonthSpend,

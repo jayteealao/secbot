@@ -4,6 +4,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ROOT_CONVERSATION_ID, UsageDoc } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { MonthLedgerDoc } from "../src/docs.ts";
 import {
   addGuardUsage,
   costOnlyUsage,
@@ -14,7 +15,7 @@ import {
   zoneOffsetMs,
 } from "../src/month-ledger.ts";
 import { GUARD_USAGE_KEYS } from "../src/release-defaults.ts";
-import { openTestCell, type TestCell } from "./fixtures.ts";
+import { addSpend, openTestCell, type TestCell } from "./fixtures.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -88,5 +89,23 @@ describe("the ledger", () => {
       reviewer: 0.5,
     });
     expect(spendSince({ "m:a": 1 }, undefined)).toEqual({ agent: 1, decision: 0, reviewer: 0 });
+  });
+
+  it("keeps the closing month's person spend when the month rolls", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    let clock = Date.UTC(2026, 8, 20, 12, 0);
+    test = await openTestCell({ now: () => clock });
+    const t = test;
+    await readMonth(t.cell.harness, clock, "UTC", BACKGROUND_CONTEXT);
+    await addSpend(t.cell, 1.25);
+    await addSpend(t.cell, 0.5, { role: "research" });
+    await addSpend(t.cell, 4, { role: "developer" });
+    clock = Date.UTC(2026, 9, 2, 8, 0);
+    const october = await readMonth(t.cell.harness, clock, "UTC", BACKGROUND_CONTEXT);
+    expect(october.month).toBe("2026-10");
+    expect(october.person.spentUsd).toBe(0);
+    const ledger = await t.cell.harness.snapshot(MonthLedgerDoc, BACKGROUND_CONTEXT);
+    // The person's spend only: the developer budget is not the person's.
+    expect(ledger?.closed).toEqual({ "2026-09": 1.75 });
   });
 });

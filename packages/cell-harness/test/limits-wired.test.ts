@@ -181,6 +181,8 @@ describe("the month's spend from the ledger (AC-25)", () => {
     const activity = await t.cell.activity();
     const guardByRole: Record<string, number> = {};
     for (const item of activity.records) {
+      // A job record carries the specialist's spend for the job, not a guard cost.
+      if (item.kind === "job") continue;
       guardByRole[item.agent] = (guardByRole[item.agent] ?? 0) + item.cost;
     }
     for (const role of Object.keys(tally.agent)) {

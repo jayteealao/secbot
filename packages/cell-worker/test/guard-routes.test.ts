@@ -131,6 +131,8 @@ describe("the person's guard routes (device key)", () => {
       total: 0,
       records: [],
       next: null,
+      spentUsd: 0,
+      live: [],
     });
   });
 });

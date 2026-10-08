@@ -72,8 +72,9 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
+/** The guard's records (a finished hand-off also writes a job record, not counted here). */
 async function records(t: TestCell): Promise<ActivityRecord[]> {
-  return [...(await t.cell.activity({ limit: 200 })).records];
+  return (await t.cell.activity({ limit: 200 })).records.filter((record) => record.kind !== "job");
 }
 
 async function chat(t: TestCell, text: string, id: string) {

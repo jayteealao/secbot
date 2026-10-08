@@ -25,7 +25,13 @@ import {
   type CelldStorage,
   openCelldStorageWithDatabase,
 } from "@secbot/cell-storage";
-import { type ActivityPage, type ActivityQuery, listActivity } from "./activity.ts";
+import {
+  type ActivityQuery,
+  type ActivityView,
+  listActivity,
+  monthItemCost,
+  monthOf,
+} from "./activity.ts";
 import { type AlertEnv, createAlerts } from "./alerts.ts";
 import {
   type AnswerChoice,
@@ -47,6 +53,7 @@ import {
   type GuardMode,
   GuardModeDoc,
   HouseholdBudgetDoc,
+  JobsDoc,
   type LimitNotice,
   LimitNoticesDoc,
   LimitsDoc,
@@ -68,6 +75,7 @@ import { createHandoffExtension } from "./handoff.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import { createHistoryExtension } from "./history-search.ts";
 import { createHouseholdExtension, type HouseholdClient } from "./household-tools.ts";
+import { liveJobs } from "./jobs.ts";
 import {
   type BudgetState,
   budgetState,
@@ -184,6 +192,8 @@ export class CellHarness implements CellParts {
     readonly timeZone: string,
     /** The limit watch and the budget gate. */
     readonly budget: CellBudget,
+    /** Routines that spend nothing (the heartbeat): activity does not list them as jobs. */
+    readonly quietRoutines: ReadonlySet<string> = new Set(),
   ) {}
 
   private limitParts() {
@@ -279,16 +289,44 @@ export class CellHarness implements CellParts {
     return removeRule(this, level, input, context);
   }
 
-  /** One month of guard records, newest first. */
-  activity(
+  /**
+   * One month of activity, newest first: the stored records (guard verdicts, held calls and their
+   * answers and lapses, finished jobs), the person's spend in the month, and, on the first page of
+   * the current month, the jobs running or waiting now.
+   */
+  async activity(
     query: ActivityQuery = {},
     context: Context = BACKGROUND_CONTEXT,
-  ): Promise<ActivityPage> {
-    return listActivity(
+  ): Promise<ActivityView> {
+    const now = this.now();
+    const page = await listActivity(
       this.harness,
-      { ...query, now: this.now(), timeZone: this.timeZone },
+      { ...query, now, timeZone: this.timeZone },
       context,
     );
+    const current = page.month === monthOf(now, this.timeZone) && query.before === undefined;
+    const live = current
+      ? await liveJobs(
+          this.harness,
+          { now, timeZone: this.timeZone, quiet: this.quietRoutines },
+          context,
+        )
+      : [];
+    return { ...page, spentUsd: await this.monthSpent(page.month, context), live };
+  }
+
+  /**
+   * The person's spend in `month`: the month ledger's month to date when the months agree, the
+   * total the ledger kept when the month ended, else the sum of the month's stored item costs (a
+   * month before the ledger kept totals, or a month key that differs because activity months use
+   * the cell's zone and the ledger the household zone).
+   */
+  private async monthSpent(month: string, context: Context): Promise<number> {
+    const { spend, person } = await this.budgetState(context);
+    if (spend.month === month) return person.spentUsd;
+    const closed = (await this.harness.snapshot(MonthLedgerDoc, context))?.closed;
+    const kept = closed !== undefined && Object.hasOwn(closed, month) ? closed[month] : undefined;
+    return kept ?? monthItemCost(this.harness, month, context);
   }
 
   /** The guard mode (shadow or enforce), since when, and the decision model's adapter. */
@@ -459,12 +497,13 @@ export async function openCellHarness(
   const hooks = {
     cell: person,
     gate: () => gate,
+    timeZone,
     ...(options.onWakeChange === undefined ? {} : { onWakeChange: options.onWakeChange }),
   };
   const heartbeat = createHeartbeatRoutine(env, hooks, options.fetch);
   const reminders = createReminderRoutine(hooks);
   const lead = createLeadExtension({ now, timeZone });
-  const handoff = createHandoffExtension(person, () => gate);
+  const handoff = createHandoffExtension(person, () => gate, timeZone);
   const history = createHistoryExtension(current);
   const household = createHouseholdExtension(person, () => options.household);
   const reminder = createReminderExtension(reminders, { ...hooks, now, timeZone });
@@ -611,6 +650,11 @@ async function finishOpen(
     now,
     parts.timeZone,
     { watch, gate: parts.gate, stop: () => stopWatches() },
+    new Set(
+      [...recurring.map(({ routine }) => routine), reminders]
+        .filter((routine) => !routine.spends)
+        .map((routine) => routine.name),
+    ),
   );
   // What the last run left: live work, and routines whose time passed while the cell was down.
   // Read before this open creates anything and before resume(), so nothing has run yet.
@@ -632,6 +676,8 @@ async function finishOpen(
     await tx.doc(NoticeDeliveryDoc);
     await tx.doc(BudgetWaitsDoc);
     await tx.doc(HouseholdBudgetDoc);
+    // The cost marks of hand-off jobs (activity).
+    await tx.doc(JobsDoc);
     // Each conversation's ledger exists, so the limit watch can watch it from the start.
     await tx.doc(UsageDoc, ROOT_CONVERSATION_ID);
     for (const record of Object.values((await tx.doc(RosterDoc)).specialists)) {

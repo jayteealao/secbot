@@ -63,6 +63,8 @@ export async function guardSetup(
     readonly cellEnv?: CellEnv;
     /** The fetch the person cells use for alerts. */
     readonly fetch?: typeof fetch;
+    /** The person cells' clock (Date.now when absent). */
+    readonly now?: () => number;
   } = {},
 ): Promise<GuardSetup> {
   const household =
@@ -97,6 +99,7 @@ export async function guardSetup(
             models: gateway.models,
             ...(extras.household === undefined ? {} : { household: extras.household }),
             ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+            ...(options.now === undefined ? {} : { now: options.now }),
             // A passing decision model unless a test gives its own: the suites that are not about
             // the model layers keep their request counts.
             guard: { decision: passingDecision, ...options.guard },

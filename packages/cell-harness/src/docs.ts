@@ -178,7 +178,8 @@ export const ApprovalKeyDoc = defineDocFamily<{ numbers: number[] }, null>({
  * conversation when the month began (`m:<provider/model>` or `t:<tool>`). A conversation with no
  * baseline counts whole. `hours` is the month's spend by local hour and role (the app's heat
  * chart), `seen` each conversation's total the hour chart last counted. `nextZone` is a household
- * time zone that applies from the next month.
+ * time zone that applies from the next month. `closed` keeps each ended month's person spend, taken
+ * at the roll (absent in documents written before it existed).
  */
 export const MonthLedgerDoc = defineDoc<{
   month: string;
@@ -189,6 +190,7 @@ export const MonthLedgerDoc = defineDoc<{
   baseline: Record<string, Record<string, number>>;
   hours: Record<string, Record<string, number>>;
   seen: Record<string, number>;
+  closed?: Record<string, number>;
 }>({
   kind: "secbot.month-ledger",
   version: 1,
@@ -236,6 +238,22 @@ export const BudgetWaitsDoc = defineDoc<{
   version: 1,
   scope: "session",
   initial: () => ({ tasks: {} }),
+});
+
+/**
+ * `secbot.jobs`: the cost marks of hand-off jobs. `starts` is the specialist conversation's ledger
+ * total when a job's brief was delivered, `ends` a finished job's cost until its done record is
+ * written (both by reporter task id), and `high` each specialist's total when its last job ended.
+ */
+export const JobsDoc = defineDoc<{
+  starts: Record<string, number>;
+  ends: Record<string, number>;
+  high: Record<string, number>;
+}>({
+  kind: "secbot.jobs",
+  version: 1,
+  scope: "session",
+  initial: () => ({ starts: {}, ends: {}, high: {} }),
 });
 
 /** One limit notice: a line of a budget reached in a month. */

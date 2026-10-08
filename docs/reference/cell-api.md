@@ -26,7 +26,7 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | GET | `/rules` | none | `{owner: [Rule], person: [Rule], timeZone}`: the owner's rules (read only here) and the person's own rules | 200 |
 | POST | `/rules` | one rule without an id: `{agent, tool, verdict, match?}` (at most 16 KiB) | `{rule: Rule}` | 201, 400 (`refused: …`), 413 |
 | DELETE | `/rules` | the rule's `{agent, tool, match?}` as it was added | `{removed: Rule}` | 200, 400 (`refused: …`), 404 (no such rule), 413 |
-| GET | `/activity?month=YYYY-MM&before=<n>&limit=<1-200>` | none; `month` defaults to the current month in the cell's time zone, `limit` to 50 | `{person, month, timeZone, total, records: [ActivityRecord], next}`, newest first; pass `next` as `before` for the next older page (`null` when none is left) | 200, 400 (a bad parameter) |
+| GET | `/activity?month=YYYY-MM&before=<n>&limit=<1-200>` | none; `month` defaults to the current month in the cell's time zone, `limit` to 50 | `{person, month, timeZone, total, records: [ActivityRecord], next, spentUsd, live: [ActivityRecord]}`, newest first; pass `next` as `before` for the next older page (`null` when none is left); `spentUsd` is the person's spend in the month; `live` holds the jobs running or waiting now (first page of the current month only, otherwise empty) | 200, 400 (a bad parameter) |
 | GET | `/approvals` | none | `{held: [HeldCall]}`: the calls waiting for an answer, oldest first | 200 |
 | POST | `/approvals/{n}` | `{"answer": "allow" \| "always" \| "deny"}` (at most 16 KiB) | `{number, status, answer, agent, tool, summary, answeredBy, rule}` (`rule` is the person rule allow always added, or `null`) | 200, 400 (a bad body, or `refused: …`), 404 (`no held call #n`), 409 (`{"error": "lapsed"}` or `{"error": "answered"}`), 413 |
 
@@ -142,10 +142,31 @@ ruleLevel, arguments, cost, mode?, decision?, fallback?}`, written before the ca
   `reason` `allowed once by <person>`, `allowed always by <person>`, or `denied by <person>`.
 - `kind: "lapsed"`: nobody answered in 24 hours (`no answer in 24 h; refused`) or the agent's job
   was aborted (`the agent's job was aborted; refused`); `verdict` `lapsed`, `layer` `person`.
+- `kind: "job"`: a hand-off or a routine run (each reminder included); `layer` `job`, `verdict`
+  its state, `tool` its label (`job: <first words of the brief>`, `reminder: <text>`,
+  `routine: <name>`), `agent` the specialist (a hand-off) or `lead` (a routine), `cost` its cost.
+  A job is stored once, as `done`, in the commit that ends it (key `job:<task id>`), with `reason`
+  `answered the lead`, `failed: <why>`, `no answer`, `stopped`, or `delivered to the lead`. While
+  it runs or waits it is listed in `live` instead (key `live:<task id>`): `running` with `step 1
+  of 2: <specialist> is working` or `step 2 of 2: reporting to the lead`, or `waiting` with
+  `waits above your limit since HH:MM` (`... the developer budget ...`) or `due <d Mon HH:MM>`.
+  A routine that spends nothing (the heartbeat) is not listed.
 
 `arguments` are the call's arguments with secret-looking fields and values replaced by
 `[redacted]` and capped at 2 KiB (the fields a rule matched are kept). Records are kept forever.
 Later releases add record kinds and fields; a client ignores what it does not know.
+
+A job's cost: a hand-off costs the specialist conversation's ledger growth since the later of the
+job's start and the end of that specialist's previous job, so one specialist's job costs add up
+to its spend (the guard cost of the specialist's own calls included, which also shows on those
+calls' rows). A routine run costs `0`: it only sends a message to the lead, whose answer is chat
+spend. A running job's `cost` is its cost so far.
+
+`spentUsd`: for the month the spending ledger is in, the month to date (the same number as the
+usage line and `GET /cost`); for an ended month, the total the ledger kept when that month ended;
+for a month with neither (before this release, or a month that differs because activity months
+use the cell's time zone and the ledger the household time zone), the sum of the month's stored
+records' `cost`.
 
 The model layers' fields:
 

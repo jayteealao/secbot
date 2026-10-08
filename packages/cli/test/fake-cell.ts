@@ -82,6 +82,8 @@ export interface FakeCell {
   /** The guard routes: both rule levels, the activity answer, and a refusal for the next add. */
   rules: { owner: Record<string, unknown>[]; person: Record<string, unknown>[]; timeZone: string };
   activity: Record<string, unknown>;
+  /** When set, answers the activity route from its query (month, before) in place of `activity`. */
+  activityOf: ((query: URLSearchParams) => Record<string, unknown>) | undefined;
   refuseNextAdd: string | undefined;
   /** The operator key the /ops routes accept. */
   operatorKey: string;
@@ -118,6 +120,7 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     answers: {},
     rules: { owner: [], person: [], timeZone: "UTC" },
     activity: { person, month: "2026-10", timeZone: "UTC", total: 0, records: [], next: null },
+    activityOf: undefined,
     refuseNextAdd: undefined,
     operatorKey: "operator-key-0123456789abcdef", // gitleaks:allow (fake test key)
     guardMode: {
@@ -158,7 +161,10 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       };
       const guard = (level: "owner" | "person", route: string) => {
         if (route === "rules" && request.method === "GET") return reply(200, cell.rules);
-        if (route === "activity" && request.method === "GET") return reply(200, cell.activity);
+        if (route === "activity" && request.method === "GET") {
+          const query = new URL(path, "http://cell").searchParams;
+          return reply(200, cell.activityOf?.(query) ?? cell.activity);
+        }
         const given = (body ?? {}) as Record<string, unknown>;
         if (route === "rules" && request.method === "POST") {
           if (cell.refuseNextAdd !== undefined) {

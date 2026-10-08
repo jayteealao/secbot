@@ -106,9 +106,9 @@ const toolResults = (t: TestCell) =>
     .filter((r) => r.role === "lead" && r.last?.role === "toolResult")
     .map((r) => r.lastText);
 
-const records = async (t: TestCell): Promise<ActivityRecord[]> => [
-  ...(await t.cell.activity({ limit: 200 })).records,
-];
+// The guard's records: finished hand-off jobs also write a record (kind job), not counted here.
+const records = async (t: TestCell): Promise<ActivityRecord[]> =>
+  (await t.cell.activity({ limit: 200 })).records.filter((record) => record.kind !== "job");
 
 const events = (spy: { mock: { calls: unknown[][] } }, name: string) =>
   loggedEvents(spy.mock.calls).filter((event) => event.event === name);

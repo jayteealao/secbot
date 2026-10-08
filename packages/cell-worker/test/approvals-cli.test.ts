@@ -168,8 +168,12 @@ describe("the charter scenario, steps 1-6, against the cell routes", () => {
     expect(heldFrames()).toHaveLength(1);
     const activity4 = await secbot("activity");
     const rows4 = activity4.out.split("\n");
-    expect(rows4[3]).toMatch(/lead {7}handoff -> research {6}allowed {7}rule/);
-    expect(rows4[4]).toBe("         your rule: lead handoff (specialist = research) -> permit");
+    // The newest hand-off verdict; the hand-off's running job may list above it.
+    const newest = rows4.findIndex((row) => /lead {7}handoff -> research {6}allowed/.test(row));
+    expect(rows4[newest]).toMatch(/lead {7}handoff -> research {6}allowed {7}rule/);
+    expect(rows4[newest + 1]).toBe(
+      "         your rule: lead handoff (specialist = research) -> permit",
+    );
 
     // 5. The owner's ask-first rule on hand-offs to the developer: only /allow and /deny.
     expect(

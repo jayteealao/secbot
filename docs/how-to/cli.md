@@ -42,7 +42,7 @@ device key is what proves the caller.
 | `secbot rules list` | The owner's rules (you cannot loosen these), then your own rules: agent, tool, argument match, verdict. |
 | `secbot rules add <agent> <tool> <permit\|ask-first\|prohibit> [match]` | Adds one of your rules. A rule looser than an owner rule is refused on stderr, naming the owner rule (exit 1). |
 | `secbot rules remove <agent> <tool> [match]` | Removes the rule with that agent, tool, and match (give the match it was added with). |
-| `secbot activity [--month YYYY-MM]` | This month's guard verdicts, newest first: time, agent, tool, verdict, the layer that decided, the cost, and the reason on the line below. |
+| `secbot activity [--month YYYY-MM] [--page N]` | This month's activity under the month's spend, newest first, 50 to a page: each guard verdict, held call, answer, and lapse, and each hand-off, routine, and reminder with its state (running, waiting, done); time, agent, tool or job, verdict or state, the layer, the cost, and the reason or step on the line below. |
 
 The match option is one of `--exact`, `--prefix`, `--email-domain`, `--web-domain`, or `--regex`,
 each followed by `<argument>=<value>`, for example
@@ -137,6 +137,31 @@ the household time zone is now Europe/London from the next month
 shows every person, the developer budget, and when each shadow cell has a week of logs. A device
 key cannot change a limit.
 
+### Read your activity
+
+`secbot activity` lists the current month, newest first, under the month's spend (the same
+number as the usage line and `secbot cost`):
+
+```
+ACTIVITY  sam  October 2026                                  [ total: $11.52 ]
+------------------------------------------------------------------------------
+TIME   AGENT      TOOL OR JOB              VERDICT       LAYER       COST
+14:02  lead       handoff -> research      allowed       person    $0.0000
+         allowed once by sam
+13:58  lead       handoff -> research      held          rule      $0.0000
+         your rule: lead handoff (any) -> ask first
+01:05  research   job: train times         running       job       $0.1310
+         step 1 of 2: research is working
+showing 3 of 3 this month; older: secbot activity --month 2026-09
+```
+
+A job is a hand-off to a specialist, a routine run, or a reminder. It shows `running` or
+`waiting` (above your limit, or a reminder before its time) while it lasts, and `done` once it
+ended, with its cost: a hand-off costs what the specialist spent on it; a routine or reminder
+costs nothing itself (the lead's answer counts as chat). A month lists 50 rows a page; while older
+rows of the month remain the last line says `older: secbot activity --page 2`, and on the last
+page it names the month before. `--month` and `--page` combine. Activity is kept with no pruning.
+
 ### Read shadow verdicts
 
 Every cell starts in shadow mode. Rules, ask-first rules, and approvals always apply; the decision
@@ -178,6 +203,11 @@ activity (the header then says `(operator key)`). These use the operator key, fr
 `SECBOT_OPERATOR_KEY` in your shell or `{"key": "..."}` in `~/.config/secbot/operator.json`
 (mode 0600). The key is sent only to the operator routes and never printed. A device key cannot
 read another person's rules or activity.
+
+The operator routes serve the people of the fleet they run in. To read a person served by the
+other fleet, point `SECBOT_CELL_URL` at that fleet's address for the one command, for example
+`SECBOT_CELL_URL=$OTHER_FLEET_URL secbot activity --person <name>`, with `OTHER_FLEET_URL` set in
+your own shell.
 
 If the connection drops, `chat` reconnects and resends every line the cell has not acknowledged,
 under the same request id, so nothing is submitted twice. When a session opens, what the lead

@@ -11,7 +11,7 @@
  *   secbot specialist add <name> --instruction "<text>" [--model <model-id>]
  *   secbot device new <name>
  *   secbot rules list | add | remove        (owner rules: --owner --person <name>)
- *   secbot activity [--month YYYY-MM]       (another person: --person <name>)
+ *   secbot activity [--month YYYY-MM] [--page N]   (another person: --person <name>)
  *   secbot mode show | set | decision <person>   (operator key)
  *   secbot cost [--person <name> | --owner]  (another person or the household: operator key)
  *   secbot limits show | set <person> <usd> | developer <usd> | zone <IANA>   (operator key)
@@ -58,7 +58,7 @@ const USAGE = `usage:
   secbot rules remove <agent> <tool> [match]
       match: --exact | --prefix | --email-domain | --web-domain | --regex <argument>=<value>
       owner rules for a person: --owner --person <name> (operator key)
-  secbot activity [--month YYYY-MM] [--person <name> (operator key)]
+  secbot activity [--month YYYY-MM] [--page N] [--person <name> (operator key)]
   secbot mode show <person>                         (operator key)
   secbot mode set <person> shadow|enforce           (operator key)
   secbot mode decision <person> clef|jev            (operator key)
@@ -112,6 +112,7 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
         owner: { type: "boolean" },
         person: { type: "string" },
         month: { type: "string" },
+        page: { type: "string" },
       },
     });
     const [command, sub, ...rest] = positionals;
@@ -179,7 +180,7 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
     if (command === "activity" && sub === undefined) {
       const target =
         values.person === undefined ? deviceTarget(await client()) : await operator(values.person);
-      return await activity(target, io, values.month);
+      return await activity(target, io, values.month, values.page);
     }
     io.stderr(USAGE);
     return 2;
