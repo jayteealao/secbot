@@ -364,3 +364,57 @@ test("the step runner passes, marks a model miss not run, a wrong command fail, 
   assert.match(evidence["charter-part1.txt"], /## one/);
   assert.match(evidence["cleanup.txt"], /limits set \{person\} 40\.00/);
 });
+
+test("a command with a wait reruns until a row that lands after the chat turn appears", async () => {
+  let reads = 0;
+  const deps = fakeDeps({ answers: {}, chatReplies: () => "", spends: [1] });
+  const plain = deps.cli.bind(deps);
+  deps.cli = async (argv, options) => {
+    if (argv[0] !== "activity") return plain(argv, options);
+    reads += 1;
+    return {
+      code: 0,
+      out: reads < 3 ? "nothing yet\n" : "lead  search_history  refused\n",
+      err: "",
+    };
+  };
+  const steps = [
+    {
+      id: "late",
+      part: 1,
+      checks: ["check-late"],
+      evidence: "charter-part1.txt",
+      actions: [{ kind: "cmd", argv: ["activity"], expect: [/refused/], waitMs: 60_000 }],
+    },
+    {
+      id: "never",
+      part: 1,
+      checks: ["check-never"],
+      evidence: "charter-part1.txt",
+      actions: [{ kind: "cmd", argv: ["activity"], expect: [/allowed/], waitMs: 1_000 }],
+    },
+  ];
+  const { results } = await executeSteps(
+    steps,
+    deps,
+    { person: "owner", values: {} },
+    { startSpend: 1 },
+    5,
+  );
+  assert.equal(results.late.status, "pass");
+  assert.equal(reads >= 3, true);
+  assert.equal(results.never.status, "fail");
+});
+
+test("in shadow mode the secret read and the brokered call pass whatever the reviewer would say", () => {
+  const c8 = STEPS.find((step) => step.id === "c8");
+  const activity = c8.actions.at(-1);
+  const row = (agent, tool, verdict) => `09:46  ${agent.padEnd(9)}  ${tool.padEnd(23)}  ${verdict}`;
+  const text = [
+    row("lead", "secret live-test-secret", "refused       secrets"),
+    row("research", "secret_get", "would ask     reviewer"),
+    row("health", "broker_call", "allowed       decision"),
+  ].join("\n");
+  assert.equal(check(text, { expect: activity.expect, reject: [] }).missing.length, 0);
+  assert.ok(activity.waitMs > 0);
+});

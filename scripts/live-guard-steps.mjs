@@ -13,6 +13,8 @@ export const MODEL_TURN_MS = 120_000;
 export const FOLLOWUP_MS = 240_000;
 /** The run stops itself, with cleanup, when the month's spend rises by more than this. */
 export const DEFAULT_MAX_USD = 5;
+/** How long an activity check waits for a tool call that lands after its chat turn printed. */
+export const ACTIVITY_WAIT_MS = 120_000;
 /** The test limit the run starts from. */
 export const TEST_LIMIT_USD = 1;
 /** The limit the cleanup restores. */
@@ -167,7 +169,12 @@ export const STEPS = [
         script: handoffScript("research", RESEARCH_BRIEF),
       },
       { kind: "pause", ms: 5_000 },
-      { kind: "cmd", argv: ["activity"], expect: [/handoff -> research {6}allowed {7}rule/] },
+      {
+        kind: "cmd",
+        argv: ["activity"],
+        expect: [/handoff -> research {6}allowed {7}rule/],
+        waitMs: ACTIVITY_WAIT_MS,
+      },
     ],
   },
   {
@@ -220,7 +227,12 @@ export const STEPS = [
         expect: [CONTRACT.usage],
         script: { tool: "search_history", args: { query: "bank" } },
       },
-      { kind: "cmd", argv: ["activity"], expect: [/search_history {11}refused {7}rule/] },
+      {
+        kind: "cmd",
+        argv: ["activity"],
+        expect: [/search_history {11}refused {7}rule/],
+        waitMs: ACTIVITY_WAIT_MS,
+      },
     ],
   },
   {
@@ -242,7 +254,12 @@ export const STEPS = [
         },
       },
       { kind: "pause", ms: 5_000 },
-      { kind: "cmd", argv: ["activity"], expect: [/set_reminder +\S.* reviewer /] },
+      {
+        kind: "cmd",
+        argv: ["activity"],
+        expect: [/set_reminder +\S.* reviewer /],
+        waitMs: ACTIVITY_WAIT_MS,
+      },
     ],
   },
   {
@@ -344,9 +361,12 @@ export const STEPS = [
         argv: ["activity"],
         expect: [
           /lead {7}secret live-test-secret +refused +secrets/,
-          /research +secret_get +allowed/,
-          /health +broker_call +allowed/,
+          /research +secret_get +(allowed|would ask|would block) /,
+          /health +broker_call +(allowed|would ask|would block) /,
         ],
+        // The rows can land after the chat turns; in shadow mode the verdict of a call that ran
+        // is the reviewer's word (allowed, would ask, or would block).
+        waitMs: ACTIVITY_WAIT_MS,
       },
     ],
   },

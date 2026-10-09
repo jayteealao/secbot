@@ -235,8 +235,20 @@ async function runStep(step, deps, context, state) {
 
   const commandAction = async (action, patterns) => {
     const stdin = action.kind === "stdin" ? context.values[action.value] : undefined;
-    const result = await cmd(action.argv, stdin);
-    const found = check(`${result.out}${result.err}`, patterns);
+    // A live model's tool call can land after its chat turn printed: a command with `waitMs`
+    // runs again every 5 s until its patterns match or the wait ends.
+    const deadline = deps.now() + (action.waitMs ?? 0) * scale;
+    let result = await cmd(action.argv, stdin);
+    let found = check(`${result.out}${result.err}`, patterns);
+    while (
+      action.waitMs !== undefined &&
+      !(result.code === 0 && found.missing.length === 0 && found.present.length === 0) &&
+      deps.now() < deadline
+    ) {
+      await deps.sleep(5_000 * scale);
+      result = await cmd(action.argv, stdin);
+      found = check(`${result.out}${result.err}`, patterns);
+    }
     if (result.code === 0 && found.missing.length === 0 && found.present.length === 0) {
       return { ok: true };
     }
