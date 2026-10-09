@@ -37,7 +37,9 @@ const NO_PERSON_CELL: DurableObjectNamespaceLike = {
   }),
 };
 
-export const FAKE_TARGET_PREFIX = "/fake-target";
+// Not exported: the cell runtime loads every named export of this module as an entry point and
+// refuses a string.
+const FAKE_TARGET_PREFIX = "/fake-target";
 
 /**
  * The fake health target (test cell only): it refuses a call without an `authorization` header
