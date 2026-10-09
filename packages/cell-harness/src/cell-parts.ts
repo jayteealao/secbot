@@ -38,6 +38,27 @@ export function logEvent(
   if (level === "error") console.error(line);
   else if (level === "warn") console.warn(line);
   else console.log(line);
+  for (const listener of listeners) {
+    try {
+      listener(event, fields);
+    } catch {
+      // A listener never changes what the cell does.
+    }
+  }
+}
+
+export type LogListener = (event: string, fields: Readonly<Record<string, unknown>>) => void;
+const listeners = new Set<LogListener>();
+
+/**
+ * Observes every event this process logs, as fields (the test cell's guard bench reads its
+ * `guard.verdict` events this way instead of parsing log text). Returns the function that stops it.
+ */
+export function onLogEvent(listener: LogListener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 /**

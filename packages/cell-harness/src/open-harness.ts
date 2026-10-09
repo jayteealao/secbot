@@ -44,7 +44,7 @@ import {
 } from "./approvals.ts";
 import { BudgetGate, createBudgetExtension } from "./budget-gate.ts";
 import { type CellParts, errorFields, logEvent } from "./cell-parts.ts";
-import { createDecisionModels, type DecisionModels } from "./decision-model.ts";
+import { createDecisionModels, type DecisionModels, parseThresholdCaps } from "./decision-model.ts";
 import { type MissedPage, markDelivered, missedPage } from "./delivery.ts";
 import {
   ApprovalsDoc,
@@ -116,7 +116,10 @@ import {
   wakesOf,
 } from "./wake-times.ts";
 
-export interface CellEnv extends GatewayEnv, AlertEnv, HeartbeatEnv, TimeEnv {}
+export interface CellEnv extends GatewayEnv, AlertEnv, HeartbeatEnv, TimeEnv {
+  /** Test cell only: per-tool caps on the mark threshold, as JSON (parseThresholdCaps). */
+  readonly SECBOT_MARK_THRESHOLD_CAPS?: string;
+}
 
 /** The cell's limit watch and budget gate (limits.ts, budget-gate.ts). */
 export interface CellBudget {
@@ -540,6 +543,7 @@ export async function openCellHarness(
       createDecisionModels({
         apiKey: env.OPENROUTER_API_KEY,
         baseUrl: env.OPENROUTER_BASE_URL,
+        thresholdCaps: parseThresholdCaps(env.SECBOT_MARK_THRESHOLD_CAPS),
       }),
     reviewer:
       reviewerOption ??

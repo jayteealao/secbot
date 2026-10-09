@@ -156,3 +156,39 @@ test("no master key file is in the repo", () => {
     [],
   );
 });
+
+// The release tool's guard-bench lab routes: test cell only, like the durability lab's routes.
+const releaseTool = read(
+  root,
+  "infra",
+  "ansible",
+  "roles",
+  "deploy_users",
+  "files",
+  "secbot-release",
+);
+
+/** The body of one shell function of the release tool, up to its closing brace. */
+function shellFunction(name) {
+  const start = releaseTool.indexOf(`\n${name}() {\n`);
+  assert.ok(start >= 0, `${name} is defined`);
+  return releaseTool.slice(start, releaseTool.indexOf("\n}\n", start));
+}
+
+test("the release tool allows the guard-bench routes and checks --calls", () => {
+  const routes = /\[\[ "\$lab_route" =~ \^\(([^)]*)\)\$ \]\]/.exec(releaseTool)?.[1].split("|");
+  assert.ok(routes?.includes("guard-bench") && routes.includes("guard-bench-state"));
+  // The durability lab's routes stay as they were.
+  for (const route of ["arm", "state", "load", "load-state"]) assert.ok(routes.includes(route));
+  assert.match(releaseTool, /--calls\) calls="\$value"/);
+  assert.match(releaseTool, /\[\[ "\$calls" =~ \^\[0-9\]\{1,3\}\$ \]\] \|\| die "bad --calls/);
+});
+
+test("the guard-bench routes run only on the test cell, as POST with calls and GET for the state", () => {
+  const lab = shellFunction("do_lab");
+  // test_cell_only comes before any other step, so production never reaches the bench.
+  assert.match(lab, /^\s*do_lab\(\) \{\s*test_cell_only\n/);
+  assert.match(lab, /guard-bench\) path="\/lab\/guard-bench\?calls=\$\{calls:-100\}" ;;/);
+  assert.match(lab, /guard-bench-state\) method=GET ;;/);
+  assert.match(shellFunction("test_cell_only"), /\[ "\$env" = "test-cell" \] \|\| die/);
+});

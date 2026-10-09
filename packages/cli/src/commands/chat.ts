@@ -15,7 +15,7 @@ import type { Io } from "../io.ts";
 import { answerHeld, answerOf, type HeldCall, heldBlock, NOT_SENT } from "./held.ts";
 import { type Notice, noticeBlock, type Usage, usageLine, type Waiting } from "./usage.ts";
 
-type Frame =
+export type Frame =
   | { type: "connected"; lead: string }
   | { type: "accepted"; requestId: string }
   | { type: "delta"; text: string }
@@ -37,22 +37,20 @@ export interface ChatOptions {
   readonly reconnectMs?: number;
 }
 
-export async function chat(client: CellClient, io: Io, options: ChatOptions = {}): Promise<number> {
-  // Fails fast, with the cell's reason, when the device is refused.
-  await client.request("GET", "/status");
-  const pending = new Map<string, string>();
-  let socket: WebSocket | undefined;
-  let open = false;
-  let closing = false;
+/**
+ * Prints the cell's session frames as `secbot chat` shows them: the held-call block once per call,
+ * the usage line, each limit notice once, the lead's answer as it streams, and follow-ups. Shared
+ * with the stand-in rehearsal of the live guard check, so both print the same lines. `settled` is
+ * told each request id the cell accepted or refused.
+ */
+export function frameRenderer(
+  io: Io,
+  settled: (requestId: string) => void = () => {},
+): { handle: (frame: Frame) => void; print: (text: string) => void } {
   let midAnswer = false;
   let noted = false;
   const shown = new Set<number>();
   const noticed = new Set<number>();
-  let delay = options.reconnectMs ?? 1_000;
-  let ready!: () => void;
-  let connected = new Promise<void>((resolve) => {
-    ready = resolve;
-  });
 
   const print = (text: string) => {
     if (midAnswer) io.stdout("\n");
@@ -66,7 +64,7 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
         print(`connected to ${frame.lead} lead\n`);
         break;
       case "accepted":
-        pending.delete(frame.requestId);
+        settled(frame.requestId);
         break;
       case "delta":
         io.stdout(frame.text);
@@ -93,7 +91,7 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
         break;
       case "rejected":
         // The cell refused this line; resending it would be refused the same way.
-        pending.delete(frame.requestId);
+        settled(frame.requestId);
         io.stderr(`cell refused a message: ${frame.message}\n`);
         break;
       case "error":
@@ -116,6 +114,24 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
         break;
     }
   };
+
+  return { handle, print };
+}
+
+export async function chat(client: CellClient, io: Io, options: ChatOptions = {}): Promise<number> {
+  // Fails fast, with the cell's reason, when the device is refused.
+  await client.request("GET", "/status");
+  const pending = new Map<string, string>();
+  let socket: WebSocket | undefined;
+  let open = false;
+  let closing = false;
+  let delay = options.reconnectMs ?? 1_000;
+  let ready!: () => void;
+  let connected = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+
+  const { handle, print } = frameRenderer(io, (requestId) => pending.delete(requestId));
 
   const send = (requestId: string, text: string) => {
     if (open) socket?.send(JSON.stringify({ type: "input", text, requestId }));

@@ -20,6 +20,7 @@
 //   node scripts/vps.mjs lease acquire|release --holder H [--seconds N]
 //   node scripts/vps.mjs measure-heap --env test-cell [--seconds 180]
 //   node scripts/vps.mjs measure-write-delay --env test-cell [--writes 200]
+//   node scripts/vps.mjs measure-guard --env test-cell [--calls 100]
 //
 // Cell names follow the release workflows: owner, person (the second person's cell), household,
 // and secrets. With no --cells, a command covers every cell of the environment. The secrets cell
@@ -138,6 +139,7 @@ const flags = (argv) =>
       holder: { type: "string" },
       seconds: { type: "string" },
       writes: { type: "string" },
+      calls: { type: "string" },
     },
     allowPositionals: true,
   }).values;
@@ -907,6 +909,70 @@ export async function measureHeap({ env, seconds = "180" }) {
   });
 }
 
+export const GUARD_BUDGET_MS = 500;
+export const MAX_GUARD_CALLS = 200;
+
+/** The `--calls` value as a whole number from 1 to 200, or an error. Pure. */
+export function guardCalls(calls = "100") {
+  const value = /^\d{1,3}$/.test(String(calls)) ? Number(calls) : Number.NaN;
+  if (!(value >= 1 && value <= MAX_GUARD_CALLS)) {
+    throw new Error(`measure-guard needs --calls 1-${MAX_GUARD_CALLS}`);
+  }
+  return value;
+}
+
+/**
+ * The guard bench's verdict line: the rules plus the decision model must add
+ * under 500 ms at p95 over every requested call, the reviewer excluded. A run where the decision
+ * model fell back on most calls (the endpoint down or changed) is not a measurement. Pure.
+ */
+export function judgeGuardBench(results, calls, budgetMs = GUARD_BUDGET_MS) {
+  const measured = Number(results?.measured ?? 0);
+  const fallbacks = Object.entries(results?.fallbacks ?? {});
+  const fellBack = fallbacks.reduce((sum, [, count]) => sum + Number(count), 0);
+  if (measured === 0) return { ok: false, line: "not measured: no call was measured" };
+  if (fellBack * 2 >= measured) {
+    const causes = fallbacks.map(([cause, count]) => `${cause} ${count}`).join(", ");
+    return {
+      ok: false,
+      line: `not measured: the decision model fell back on ${fellBack} of ${measured} calls (${causes})`,
+    };
+  }
+  if (measured < calls) {
+    return {
+      ok: false,
+      line: `not measured: only ${measured} of ${calls} calls were measured before the deadline`,
+    };
+  }
+  const p95 = Number(results.p95Ms);
+  const head = `guard added time p95 ${p95} ms over ${measured} calls (rules and decision model; reviewer excluded)`;
+  return p95 < budgetMs
+    ? { ok: true, line: `${head}: pass` }
+    : { ok: false, line: `${head}: over the ${budgetMs} ms budget` };
+}
+
+/** The test cell's guard bench: starts it, waits for its result (up to 10 minutes), and judges it. */
+export async function measureGuard({ env, calls = "100" }) {
+  if (env !== "test-cell") throw new Error("measure-guard runs only with --env test-cell");
+  const count = guardCalls(calls);
+  await withLease("guard-bench", async () => {
+    await lab(env, "guard-bench", ["--calls", String(count)]);
+    const deadline = Date.now() + 10 * 60_000;
+    let state = {};
+    for (;;) {
+      await pause(5_000);
+      state = await lab(env, "guard-bench-state");
+      if (state.done === true || Date.now() > deadline) break;
+    }
+    if (state.done !== true)
+      throw new Error("not measured: the guard bench did not finish in 10 minutes");
+    console.log(JSON.stringify(state.results));
+    const verdict = judgeGuardBench(state.results, count);
+    console.log(verdict.line);
+    if (!verdict.ok) throw new Error(verdict.line);
+  });
+}
+
 const main = async () => {
   const [command, ...rest] = process.argv.slice(2);
   const values = () => flags(rest);
@@ -922,6 +988,7 @@ const main = async () => {
   else if (command === "lease") await lease(values(), rest[0]);
   else if (command === "measure-heap") await measureHeap(values());
   else if (command === "measure-write-delay") await measureWriteDelay(values());
+  else if (command === "measure-guard") await measureGuard(values());
   else if (command === "deploy") await deploy(flags(rest));
   else if (command === "dry-run") await dryRun();
   else if (command === "check-cells") await checkCells(flags(rest));
@@ -929,7 +996,7 @@ const main = async () => {
   else if (command === "durability") await durability(flags(rest));
   else
     throw new Error(
-      "usage: vps.mjs stage|deploy|dry-run|check-cells|check-alarms|check-heartbeats|alert-drill|durability|snapshot|ledger-record|ledger-verify|restore|drill|integration|lease|measure-heap|measure-write-delay [flags]",
+      "usage: vps.mjs stage|deploy|dry-run|check-cells|check-alarms|check-heartbeats|alert-drill|durability|snapshot|ledger-record|ledger-verify|restore|drill|integration|lease|measure-heap|measure-write-delay|measure-guard [flags]",
     );
 };
 

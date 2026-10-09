@@ -7,6 +7,7 @@ import {
   createDecisionModel,
   DecisionFailure,
   markScore,
+  parseThresholdCaps,
   RISK_QUESTION,
   thresholdFor,
   UNTRUSTED_NOTE,
@@ -16,6 +17,7 @@ import { DECISION_EXAMPLES } from "./decision-examples.ts";
 import {
   DECISIONS_ROUTE,
   riskyAt,
+  routineAt,
   STUB_STATUSES,
   type StubMode,
   type StubOpenRouter,
@@ -95,6 +97,41 @@ describe("the Decisions API client", () => {
     const failure = await model.ask(state, "handoff").catch((error: unknown) => error);
     expect((failure as DecisionFailure).cause).toBe("no-key");
     expect(stub.seen).toHaveLength(0);
+  });
+});
+
+describe("the threshold caps (test cell only)", () => {
+  it("a cap of 0 marks a score of 0; a cap above the release value changes nothing", async () => {
+    stub.decision = routineAt(0);
+    const capped = createDecisionModel("clef", {
+      apiKey: KEY,
+      baseUrl: stub.origin,
+      thresholdCaps: { set_reminder: 0 },
+    });
+    const reminder = await capped.ask(state, "set_reminder");
+    expect(reminder.score).toBe(0);
+    expect(reminder.outcome).toBe("mark");
+    // Another tool keeps its release threshold.
+    expect((await capped.ask(state, "handoff")).outcome).toBe("pass");
+    stub.decision = riskyAt(0.6);
+    const loose = createDecisionModel("clef", {
+      apiKey: KEY,
+      baseUrl: stub.origin,
+      thresholdCaps: { set_reminder: 0.9 },
+    });
+    // The release threshold for set_reminder is 0.5: a cap of 0.9 never raises it.
+    expect((await loose.ask(state, "set_reminder")).outcome).toBe("mark");
+  });
+
+  it("parses a JSON object of tool to 0..1 and ignores anything else", () => {
+    expect(parseThresholdCaps('{"set_reminder":0,"handoff":0.25}')).toEqual({
+      set_reminder: 0,
+      handoff: 0.25,
+    });
+    expect(parseThresholdCaps('{"a":"x","b":-1,"c":2,"d":0.5}')).toEqual({ d: 0.5 });
+    for (const bad of [undefined, "", "  ", "x", "{not json", "[0.1]", "null", "3"]) {
+      expect(parseThresholdCaps(bad)).toEqual({});
+    }
   });
 });
 

@@ -25,7 +25,7 @@ import { HouseholdCell } from "@secbot/household-cell";
 import { type KeyCustody, SecretsCell, testCustody } from "@secbot/secrets-cell";
 import { sha256Hex } from "../src/device-auth.ts";
 import { route, type WorkerEnv } from "../src/index.ts";
-import { type HouseholdStubLike, PersonCell } from "../src/person-cell.ts";
+import { type HouseholdStubLike, PersonCell, type SocketLike } from "../src/person-cell.ts";
 import type { SecretsStubLike } from "../src/secrets-client.ts";
 
 export const KEY = "owner-laptop-key-0123456789abcdef0123456789abcdef";
@@ -54,6 +54,11 @@ export interface GuardSetup {
   readonly secrets?: SecretsCell;
   /** The open harness of a person (opened by its first request). */
   harness(person: string): CellHarness;
+  /**
+   * The stand-in restart: closes the person's harness and drops its cell; the next request opens
+   * a new cell on the same storage, as a restarted process does.
+   */
+  restart(person: string): Promise<void>;
 }
 
 export async function guardSetup(
@@ -74,6 +79,11 @@ export async function guardSetup(
      * custody and the fetch its broker calls use.
      */
     readonly secrets?: true | { readonly custody?: KeyCustody; readonly fetch?: typeof fetch };
+    /**
+     * Person cells that accept a session socket (as celld's hibernatable sockets): the test stubs
+     * the global WebSocketPair and reads the frames from its server socket.
+     */
+    readonly sockets?: boolean;
   } = {},
 ): Promise<GuardSetup> {
   const household =
@@ -116,11 +126,27 @@ export async function guardSetup(
   const opened: CellHarness[] = [];
   const cells = new Map<string, PersonCell>();
   const byPerson = new Map<string, CellHarness>();
+  const storages = new Map<string, FakeCelldStorage>();
   const cellFor = (person: string) => {
     let cell = cells.get(person);
     if (cell === undefined) {
+      const storage = storages.get(person) ?? new FakeCelldStorage();
+      storages.set(person, storage);
+      const sockets: SocketLike[] = [];
+      const tags = new Map<SocketLike, string[]>();
+      const socketState =
+        options.sockets === true
+          ? {
+              acceptWebSocket: (socket: SocketLike, given?: string[]) => {
+                sockets.push(socket);
+                tags.set(socket, given ?? []);
+              },
+              getWebSockets: () => sockets,
+              getTags: (socket: SocketLike) => tags.get(socket) ?? [],
+            }
+          : {};
       cell = new PersonCell(
-        { storage: new FakeCelldStorage() },
+        { storage, ...socketState },
         { ...householdBinding, ...secretsBinding },
         async (storage, name, extras) => {
           const harness = await openCellHarness(storage, {
@@ -165,6 +191,14 @@ export async function guardSetup(
       const found = byPerson.get(person);
       if (found === undefined) throw new Error(`${person} is not open`);
       return found;
+    },
+    restart: async (person) => {
+      const harness = byPerson.get(person);
+      byPerson.delete(person);
+      cells.delete(person);
+      if (harness === undefined) return;
+      opened.splice(opened.indexOf(harness), 1);
+      await harness.close();
     },
   };
 }

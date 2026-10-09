@@ -5,7 +5,9 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseThresholdCaps } from "@secbot/cell-harness";
 import { describe, expect, it } from "vitest";
+import * as conformance from "../src/conformance-entry.ts";
 import * as entry from "../src/index.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -76,5 +78,45 @@ describe("the production worker config", () => {
     const names = releaseToolVars();
     expect(names.length).toBeGreaterThan(5);
     for (const name of names) expect(config.vars[name], name).toBe("");
+  });
+
+  it("has no guard bench and no mark-threshold cap (both are test-cell only)", () => {
+    const bound = config.durable_objects.bindings.map((binding) => binding.class_name);
+    expect(bound).not.toContain("GuardBenchCell");
+    expect(Object.keys(config.vars)).not.toContain("SECBOT_MARK_THRESHOLD_CAPS");
+  });
+});
+
+describe("the test-cell worker config", () => {
+  const config = readConfig("wrangler.conformance.jsonc");
+  const exported = conformance as unknown as Record<string, unknown>;
+
+  it("binds and migrates only classes the test-cell entry exports, each created once", () => {
+    const bound = config.durable_objects.bindings.map((binding) => binding.class_name);
+    const created = config.migrations.flatMap((step) => [
+      ...(step.new_sqlite_classes ?? []),
+      ...(step.new_classes ?? []),
+    ]);
+    for (const name of [...bound, ...created]) {
+      expect(typeof exported[name], `${name} is exported by src/conformance-entry.ts`).toBe(
+        "function",
+      );
+    }
+    for (const name of bound) expect(created).toContain(name);
+    expect(new Set(created).size).toBe(created.length);
+    const tags = config.migrations.map((step) => step.tag);
+    expect(new Set(tags).size).toBe(tags.length);
+  });
+
+  it("binds the guard bench and caps the reminder tool's mark threshold at 0", () => {
+    expect(config.durable_objects.bindings).toContainEqual({
+      name: "GUARD_BENCH",
+      class_name: "GuardBenchCell",
+    });
+    expect(parseThresholdCaps(config.vars.SECBOT_MARK_THRESHOLD_CAPS)).toEqual({ set_reminder: 0 });
+  });
+
+  it("declares every runtime var the release tool fills, each empty", () => {
+    for (const name of releaseToolVars()) expect(config.vars[name], name).toBe("");
   });
 });

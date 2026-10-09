@@ -7,16 +7,21 @@ import {
   DEFAULT_ALARM_CELLS,
   DEFAULT_CELLS,
   expandCells,
+  GUARD_BUDGET_MS,
+  guardCalls,
   HEAP_LIMIT_BYTES,
   heartbeatCells,
   judgeCrash,
+  judgeGuardBench,
   judgeHeap,
   judgeLateAlarm,
   judgeLedger,
   judgeRestore,
   judgeTool,
+  measureGuard,
   normalizeCells,
   printResults,
+  remoteCommand,
   reportAlarms,
   reportCells,
   reportHeartbeats,
@@ -430,4 +435,87 @@ test("ssh ends a session on a dropped link instead of holding the VPS lock", () 
     "-o",
     "ServerAliveCountMax=4",
   ]);
+});
+
+// ---- the guard bench (measure-guard) --------------------------------------------------------------
+
+const benchResults = (extra = {}) => ({
+  measured: 100,
+  warmup: 5,
+  p50Ms: 180,
+  p95Ms: 310,
+  p99Ms: 420,
+  passedP95Ms: 300,
+  ruleP95Ms: 0.02,
+  marks: 3,
+  fallbacks: {},
+  models: ["cloudflare/clef-20261001"],
+  costUsd: 0.0123,
+  timedOut: false,
+  ...extra,
+});
+
+test("measure-guard passes under 500 ms at p95 over every requested call", () => {
+  assert.deepEqual(judgeGuardBench(benchResults(), 100), {
+    ok: true,
+    line: "guard added time p95 310 ms over 100 calls (rules and decision model; reviewer excluded): pass",
+  });
+  assert.equal(GUARD_BUDGET_MS, 500);
+});
+
+test("measure-guard fails at or over the budget", () => {
+  assert.deepEqual(judgeGuardBench(benchResults({ p95Ms: 500 }), 100), {
+    ok: false,
+    line: "guard added time p95 500 ms over 100 calls (rules and decision model; reviewer excluded): over the 500 ms budget",
+  });
+});
+
+test("measure-guard reports a fallback majority as not measured, with each cause", () => {
+  const verdict = judgeGuardBench(
+    benchResults({ fallbacks: { "http-503": 100 }, models: [] }),
+    100,
+  );
+  assert.deepEqual(verdict, {
+    ok: false,
+    line: "not measured: the decision model fell back on 100 of 100 calls (http-503 100)",
+  });
+  assert.equal(
+    judgeGuardBench(benchResults({ fallbacks: { timeout: 30, "http-429": 20 } }), 100).line,
+    "not measured: the decision model fell back on 50 of 100 calls (timeout 30, http-429 20)",
+  );
+  // A few fallbacks are part of the measurement.
+  assert.equal(judgeGuardBench(benchResults({ fallbacks: { timeout: 2 } }), 100).ok, true);
+});
+
+test("measure-guard needs every requested call measured, and at least one", () => {
+  assert.deepEqual(judgeGuardBench(benchResults({ measured: 60, timedOut: true }), 100), {
+    ok: false,
+    line: "not measured: only 60 of 100 calls were measured before the deadline",
+  });
+  assert.deepEqual(judgeGuardBench({ measured: 0, fallbacks: {} }, 100), {
+    ok: false,
+    line: "not measured: no call was measured",
+  });
+});
+
+test("measure-guard takes --calls 1-200 and sends only safe words to the VPS", () => {
+  assert.equal(guardCalls(), 100);
+  assert.equal(guardCalls("1"), 1);
+  assert.equal(guardCalls("200"), 200);
+  for (const bad of ["0", "201", "x", "-5", "1e2", "12.5"]) {
+    assert.throws(() => guardCalls(bad), /--calls 1-200/);
+  }
+  assert.equal(
+    remoteCommand(["lab", "--env", "test-cell", "--route", "guard-bench", "--calls", "100"]),
+    "lab --env test-cell --route guard-bench --calls 100",
+  );
+  assert.equal(
+    remoteCommand(["lab", "--env", "test-cell", "--route", "guard-bench-state"]),
+    "lab --env test-cell --route guard-bench-state",
+  );
+});
+
+test("measure-guard runs only on the test cell", async () => {
+  await assert.rejects(measureGuard({ env: "production" }), /only with --env test-cell/);
+  await assert.rejects(measureGuard({ env: "test-cell", calls: "500" }), /--calls 1-200/);
 });

@@ -172,6 +172,14 @@ run = "node scripts/vps.mjs measure-heap"
 description = "Median and 95th percentile of committed single-row writes on the test cell (--env test-cell [--writes 200])"
 run = "node scripts/vps.mjs measure-write-delay"
 
+[tasks."measure:guard"]
+description = "The time the rules plus the decision model add per tool call on the test cell, reviewer excluded (--env test-cell [--calls 100]); live OpenRouter calls: run only after the owner's yes"
+run = "node scripts/vps.mjs measure-guard"
+
+[tasks."live:guard"]
+description = "The live guard check on the test cell (preflight | charter --part 1|2 --out <dir> [--max-usd 5] | report --out <dir>); live OpenRouter and Better Stack calls: run only after the owner's yes"
+run = "node scripts/live-guard.mjs"
+
 [tasks."measure:cost"]
 description = "Monthly model and fixed cost per person with the arithmetic (--assumptions <json> [--log <cell log> --log-days N] [--out <md>])"
 run = "node scripts/measure-cost.mjs"

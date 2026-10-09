@@ -105,6 +105,30 @@ export const thresholdFor = (tool: string): number =>
     ? (MARK_THRESHOLDS[tool] ?? DEFAULT_MARK_THRESHOLD)
     : DEFAULT_MARK_THRESHOLD;
 
+/** Per-tool caps on the mark threshold (test cell only): a cap can only lower a threshold. */
+export type ThresholdCaps = Readonly<Record<string, number>>;
+
+/**
+ * The caps in `SECBOT_MARK_THRESHOLD_CAPS`, a JSON object of tool name to a number from 0 to 1.
+ * Anything else (malformed JSON, a value out of range or not a number) is ignored, so a bad value
+ * leaves the release thresholds in force.
+ */
+export function parseThresholdCaps(text: string | undefined): ThresholdCaps {
+  if (text === undefined || text.trim() === "") return {};
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return {};
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return {};
+  const caps: Record<string, number> = {};
+  for (const [tool, cap] of Object.entries(value)) {
+    if (typeof cap === "number" && Number.isFinite(cap) && cap >= 0 && cap <= 1) caps[tool] = cap;
+  }
+  return caps;
+}
+
 /** The mark score: the probability of "risky" plus "unclear". */
 export function markScore(probabilities: Readonly<Record<string, number>>): number {
   return (probabilities.risky ?? 0) + (probabilities.unclear ?? 0);
@@ -149,6 +173,11 @@ export interface DecisionsClientOptions {
   readonly baseUrl?: string | undefined;
   readonly fetch?: typeof fetch;
   readonly timeoutMs?: number;
+  /**
+   * Test cell only: a tool's threshold becomes the smaller of its release value and its cap, so a
+   * cap can only send more calls to the reviewer, never fewer.
+   */
+  readonly thresholdCaps?: ThresholdCaps;
 }
 
 /** How a pi-ai error message maps to a failure cause (system-one-shared.js, error-body.js). */
@@ -177,6 +206,9 @@ export function createDecisionModel(
 ): DecisionModel {
   const model = modelOf(adapter);
   const origin = options.baseUrl ? options.baseUrl : "https://openrouter.ai";
+  const caps = options.thresholdCaps ?? {};
+  const threshold = (tool: string) =>
+    Math.min(thresholdFor(tool), Object.hasOwn(caps, tool) ? (caps[tool] ?? 1) : 1);
   return {
     adapter,
     async ask(state, tool, signal) {
@@ -224,7 +256,7 @@ export function createDecisionModel(
       }
       const score = markScore(answer.probabilities);
       return {
-        outcome: score >= thresholdFor(tool) ? "mark" : "pass",
+        outcome: score >= threshold(tool) ? "mark" : "pass",
         choice: answer.choice as DecisionChoice,
         score,
         model: returned ?? model.id,

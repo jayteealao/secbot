@@ -52,7 +52,9 @@ export {
   type CellParts,
   errorFields,
   type LogLevel,
+  type LogListener,
   logEvent,
+  onLogEvent,
   RefusedChange,
   safeErrorText,
 } from "./cell-parts.ts";
@@ -69,7 +71,9 @@ export {
   type DecisionModels,
   type DecisionsClientOptions,
   markScore,
+  parseThresholdCaps,
   RISK_QUESTION,
+  type ThresholdCaps,
   thresholdFor,
   UNTRUSTED_NOTE,
 } from "./decision-model.ts";
