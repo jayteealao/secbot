@@ -55,6 +55,7 @@ import {
   type CelldAlarmInfo,
   type CelldCellStorage,
   CellSnapshots,
+  needsReopen,
 } from "@secbot/cell-storage";
 import { HOUSEHOLD_CELL_NAME } from "@secbot/household-cell";
 import { releaseVersion } from "./health.ts";
@@ -95,7 +96,12 @@ export interface OpenExtras {
   readonly household?: HouseholdClient;
   readonly secrets?: SecretsClient;
   readonly onWakeChange: () => void;
+  /** Background work of the harness failed; the cell reopens a harness whose session broke. */
+  readonly onReport?: (error: unknown) => void;
 }
+
+/** How long a reopen waits for the broken harness to close before it opens the new one. */
+export const REOPEN_CLOSE_WAIT_MS = 10_000;
 
 export interface PersonCellOptions {
   /** Tests: how often a settling cell looks at its tasks (2 s in a cell). */
@@ -249,6 +255,10 @@ async function readJson(request: Request): Promise<Record<string, unknown> | und
 
 export class PersonCell {
   private opening: Promise<CellHarness> | undefined;
+  /** Counts harness opens, so a late report from a closed harness cannot close its successor. */
+  private generation = 0;
+  /** A broken harness that is closing; the next open waits for it (at most REOPEN_CLOSE_WAIT_MS). */
+  private closing: Promise<void> | undefined;
   private streaming: Promise<SessionStream> | undefined;
   private readonly framesSent = new Map<string, number>();
   /**
@@ -333,14 +343,18 @@ export class PersonCell {
       this.rememberName(person);
       const household = householdClientOf(this.env);
       const secrets = secretsClientOf(this.env);
-      // A restore or wipe in progress finishes first, so the harness opens on the new database.
-      this.opening = this.snapshots()
-        .idle()
+      const generation = ++this.generation;
+      const closing = this.closing ?? Promise.resolve();
+      // A broken harness closes first, then a restore or wipe in progress finishes, so the harness
+      // opens alone on the current database.
+      this.opening = closing
+        .then(() => this.snapshots().idle())
         .then(() =>
           this.open(this.state.storage, person, {
             ...(household === undefined ? {} : { household }),
             ...(secrets === undefined ? {} : { secrets }),
             onWakeChange: () => this.rearmSoon(person),
+            onReport: (error) => this.reopenAfter(error, person, generation),
           }),
         )
         .then(async (cell) => {
@@ -364,6 +378,29 @@ export class PersonCell {
     return this.opening;
   }
 
+  /**
+   * A poisoned session never heals, and every request on it fails. When `error` shows one, this
+   * closes the harness (waiting at most REOPEN_CLOSE_WAIT_MS) so the next event opens a new one on
+   * the same storage, which resumes the stored tasks. `generation` names the harness the error came
+   * from; an error from an older harness changes nothing.
+   */
+  private reopenAfter(error: unknown, person: string, generation = this.generation): void {
+    if (!needsReopen(error)) return;
+    if (generation !== this.generation || this.opening === undefined) return;
+    logEvent("cell.reopen", { cell: person, ...errorFields(error) }, "warn");
+    const closed = this.closeHarness().catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const waited = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, REOPEN_CLOSE_WAIT_MS);
+    });
+    const closing: Promise<void> = Promise.race([closed, waited]).then(() => {
+      clearTimeout(timer);
+      if (this.closing === closing) this.closing = undefined;
+    });
+    this.closing = closing;
+    this.state.waitUntil?.(closing);
+  }
+
   private rearmSoon(person: string): void {
     const opening = this.opening;
     if (opening === undefined) return;
@@ -372,6 +409,7 @@ export class PersonCell {
       .catch((error: unknown) => {
         // The wake path: a cell with no alarm sleeps through its timers, so the failure is logged.
         logEvent("alarm.rearm_failed", { cell: person, ...errorFields(error) }, "error");
+        this.reopenAfter(error, person);
       });
     this.state.waitUntil?.(work);
   }
@@ -441,6 +479,7 @@ export class PersonCell {
       streaming.catch((error: unknown) => {
         if (this.streaming === streaming) this.streaming = undefined;
         logEvent("cli.stream_failed", { cell: cell.person, ...errorFields(error) }, "error");
+        this.reopenAfter(error, cell.person);
       });
     }
     return this.streaming;
@@ -461,6 +500,7 @@ export class PersonCell {
     const work = alarms.settle(cell).catch((error: unknown) => {
       // Due routines and hand-offs may be left unrun; the next event or alarm settles again.
       logEvent("cell.settle_failed", { cell: cell.person, ...errorFields(error) }, "error");
+      this.reopenAfter(error, cell.person);
     });
     if (this.state.waitUntil === undefined) return;
     this.state.waitUntil(work);
@@ -472,10 +512,15 @@ export class PersonCell {
     if (person === undefined) return;
     const alarms = this.alarmFor(person);
     alarms.fired(info, undefined);
-    const cell = await this.cell(person);
-    // Wait while the due work runs: a routine fires, a reminder reaches the lead and is relayed.
-    if (this.sockets().length > 0) await this.ensureStream(cell);
-    await alarms.settle(cell);
+    try {
+      const cell = await this.cell(person);
+      // Wait while the due work runs: a routine fires, a reminder reaches the lead and is relayed.
+      if (this.sockets().length > 0) await this.ensureStream(cell);
+      await alarms.settle(cell);
+    } catch (error) {
+      this.reopenAfter(error, person);
+      throw error;
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -567,6 +612,8 @@ export class PersonCell {
       return json({ error: "not found" }, 404);
     } catch (error) {
       if (error instanceof RefusedChange) return json({ error: error.message }, 400);
+      // This request fails; the next one opens a new harness instead of failing the same way.
+      this.reopenAfter(error, person);
       throw error;
     }
   }
@@ -764,7 +811,7 @@ export class PersonCell {
     const cell = await this.cell(person);
     return guardAnswer(async () => {
       if (!isDecisionAdapter(adapter)) {
-        throw new RefusedChange('send {"adapter": "clef" | "jev"}');
+        throw new RefusedChange('send {"adapter": "clef" | "clef-flash" | "jev"}');
       }
       await cell.setDecisionAdapter(adapter);
       return modeAnswer(person, cell, await cell.guardMode());
@@ -904,6 +951,7 @@ export class PersonCell {
         { cell: person, device, request_id: input.requestId, ...errorFields(error) },
         "error",
       );
+      this.reopenAfter(error, person);
       // Not acknowledged: the client keeps the line and resends it after a reconnect.
       socket.send(
         JSON.stringify({

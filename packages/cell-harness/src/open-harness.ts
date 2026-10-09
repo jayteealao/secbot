@@ -145,6 +145,8 @@ export interface OpenCellOptions {
   readonly secrets?: SecretsClient;
   /** Called after every commit that changes a wake time (a routine ran, a reminder was set). */
   readonly onWakeChange?: () => void;
+  /** Called after a background failure is logged as `harness.report`, so the cell can react. */
+  readonly onReport?: (error: unknown) => void;
   /** More recurring routines beside the heartbeat (for example a morning briefing). */
   readonly routines?: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
   /** Tests: more extensions for every role, after the release ones (the guard stays first). */
@@ -350,7 +352,7 @@ export class CellHarness implements CellParts {
     return setGuardMode(this, mode, by, this.now(), context);
   }
 
-  /** The owner switches the decision model (clef or jev); the next call uses it. */
+  /** The owner switches the decision model (clef, clef-flash, or jev); the next call uses it. */
   setDecisionAdapter(adapter: string, context: Context = BACKGROUND_CONTEXT) {
     return setDecisionAdapter(this, adapter, context);
   }
@@ -481,8 +483,14 @@ export async function openCellHarness(
   const started = Date.now();
   const { person, env } = options;
   const now = options.now ?? (() => Date.now());
-  const onReport = (error: unknown) =>
+  const onReport = (error: unknown) => {
     logEvent("harness.report", reportFields(person, error), "error");
+    try {
+      options.onReport?.(error);
+    } catch {
+      // A failing listener must not break the report.
+    }
+  };
   const alerts = createAlerts(env, person, options.fetch);
   const monitor = new ModelHealthMonitor({ person, alerts, now, onReport });
   let opened: Harness | undefined;

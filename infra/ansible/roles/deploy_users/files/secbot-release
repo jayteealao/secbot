@@ -22,7 +22,7 @@
 #   lease         acquire|release --holder H [--seconds N]  hold the VPS lock across several commands
 #   state         --env E|all                      celld's /state of each fleet (memory, isolates)
 #   write-delay   --env test-cell --writes N       time N single-row committed writes (ms each)
-#   lab           --env test-cell --route R [--at T] [--calls N]
+#   lab           --env test-cell --route R [--at T] [--calls N] [--adapter A]
 #                                                  call the test cell's durability lab, or its guard
 #                                                  bench (routes guard-bench and guard-bench-state)
 #   crash         --env test-cell                  SIGKILL celld@test, wait until it answers again
@@ -84,7 +84,7 @@ action=""
 i=1
 if [ "$command" = "lease" ]; then action="${argv[1]:-}"; i=2; fi
 version="" sha256="" env="" long_transaction=0 cells="" lab_route="" at="" seconds=""
-snapshot_id="" kind="" run_id="" run_attempt="" holder="" writes="" calls=""
+snapshot_id="" kind="" run_id="" run_attempt="" holder="" writes="" calls="" adapter=""
 while [ "$i" -lt "${#argv[@]}" ]; do
   flag="${argv[$i]}"
   value="${argv[$((i + 1))]:-}"
@@ -104,6 +104,7 @@ while [ "$i" -lt "${#argv[@]}" ]; do
     --holder) holder="$value"; i=$((i + 2)) ;;
     --writes) writes="$value"; i=$((i + 2)) ;;
     --calls) calls="$value"; i=$((i + 2)) ;;
+    --adapter) adapter="$value"; i=$((i + 2)) ;;
     *) die "unknown argument '$flag'" ;;
   esac
 done
@@ -122,6 +123,7 @@ done
 [ -z "$holder" ] || [[ "$holder" =~ ^[A-Za-z0-9._:-]{1,80}$ ]] || die "bad holder '$holder'"
 [ -z "$writes" ] || [[ "$writes" =~ ^[0-9]{1,4}$ ]] || die "bad --writes '$writes'"
 [ -z "$calls" ] || [[ "$calls" =~ ^[0-9]{1,3}$ ]] || die "bad --calls '$calls'"
+[ -z "$adapter" ] || [[ "$adapter" =~ ^(clef|clef-flash|jev)$ ]] || die "bad --adapter '$adapter'"
 
 # ---- fleets and cells --------------------------------------------------------------------------
 
@@ -790,7 +792,7 @@ do_lab() {
     state | alarm-report) method=GET ;;
     load-state) method=GET path=/lab/load ;;
     # The guard bench: the cell measures in the background; the client polls guard-bench-state.
-    guard-bench) path="/lab/guard-bench?calls=${calls:-100}" ;;
+    guard-bench) path="/lab/guard-bench?calls=${calls:-100}${adapter:+&adapter=$adapter}" ;;
     guard-bench-state) method=GET ;;
     alarm)
       [ -n "$at" ] || die "lab --route alarm needs --at <epoch ms>|none"

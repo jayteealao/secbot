@@ -181,6 +181,11 @@ test("the release tool allows the guard-bench routes and checks --calls", () => 
   // The durability lab's routes stay as they were.
   for (const route of ["arm", "state", "load", "load-state"]) assert.ok(routes.includes(route));
   assert.match(releaseTool, /--calls\) calls="\$value"/);
+  assert.match(releaseTool, /--adapter\) adapter="\$value"/);
+  assert.match(
+    releaseTool,
+    /\[\[ "\$adapter" =~ \^\(clef\|clef-flash\|jev\)\$ \]\] \|\| die "bad --adapter/,
+  );
   assert.match(releaseTool, /\[\[ "\$calls" =~ \^\[0-9\]\{1,3\}\$ \]\] \|\| die "bad --calls/);
 });
 
@@ -188,7 +193,10 @@ test("the guard-bench routes run only on the test cell, as POST with calls and G
   const lab = shellFunction("do_lab");
   // test_cell_only comes before any other step, so production never reaches the bench.
   assert.match(lab, /^\s*do_lab\(\) \{\s*test_cell_only\n/);
-  assert.match(lab, /guard-bench\) path="\/lab\/guard-bench\?calls=\$\{calls:-100\}" ;;/);
+  assert.match(
+    lab,
+    /guard-bench\) path="\/lab\/guard-bench\?calls=\$\{calls:-100\}\$\{adapter:\+&adapter=\$adapter\}" ;;/,
+  );
   assert.match(lab, /guard-bench-state\) method=GET ;;/);
   assert.match(shellFunction("test_cell_only"), /\[ "\$env" = "test-cell" \] \|\| die/);
 });

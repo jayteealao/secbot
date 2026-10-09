@@ -1,13 +1,16 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { StorageRejected } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import {
   ADAPTER_NAME,
   CelldSqliteDatabase,
   CellStorageClosedError,
   CellStorageTransactionTimeout,
+  needsReopen,
   openCelldStorage,
+  POISONED_SESSION,
 } from "../src/index.ts";
-import { FakeCelldStorage } from "./fake-celld-storage.ts";
+import { FakeCelldStorage, RETIRED_INPUT_GATE_MESSAGE } from "./fake-celld-storage.ts";
 
 type CountRow = { n: number };
 
@@ -194,6 +197,48 @@ describe("CelldSqliteDatabase", () => {
       await new Promise((resolve) => setTimeout(resolve, 5));
     });
     await expect(result).rejects.toBeInstanceOf(CellStorageTransactionTimeout);
+  });
+
+  it("reports a gate celld refused before the callback ran as StorageRejected, so pi-durable does not poison its session", async () => {
+    const { storage, database } = await setup();
+    storage.refuseNextGate = true;
+    let ran = false;
+    const error = await database
+      .transaction(async (tx) => {
+        ran = true;
+        await tx.run("INSERT INTO items (id) VALUES (1)");
+      })
+      .catch((caught: unknown) => caught);
+    expect(ran).toBe(false);
+    expect(error).toBeInstanceOf(StorageRejected);
+    expect((error as Error).cause).toBeInstanceOf(Error);
+    expect(((error as Error).cause as Error).message).toBe(RETIRED_INPUT_GATE_MESSAGE);
+    // The driver stays open: the next transaction commits.
+    await database.transaction((tx) => tx.run("INSERT INTO items (id) VALUES (2)"));
+    expect(await count(database)).toBe(1);
+  });
+
+  it("keeps a callback's own error unchanged when the callback ran", async () => {
+    const { database } = await setup();
+    const failure = new Error(RETIRED_INPUT_GATE_MESSAGE);
+    const error = await database
+      .transaction(async (tx) => {
+        await tx.run("INSERT INTO items (id) VALUES (1)");
+        throw failure;
+      })
+      .catch((caught: unknown) => caught);
+    expect(error).toBe(failure);
+    expect(await count(database)).toBe(0);
+  });
+
+  it("tells a poisoned session or a closed driver from any other error", () => {
+    const poisoned = new Error(`${POISONED_SESSION}; reopen it`);
+    expect(needsReopen(poisoned)).toBe(true);
+    expect(needsReopen(new Error("wrapped", { cause: poisoned }))).toBe(true);
+    expect(needsReopen(new CellStorageClosedError("close() was called"))).toBe(true);
+    expect(needsReopen(new Error("the model is down"))).toBe(false);
+    expect(needsReopen("Session is poisoned")).toBe(false);
+    expect(needsReopen(undefined)).toBe(false);
   });
 
   it("refuses every operation after close", async () => {

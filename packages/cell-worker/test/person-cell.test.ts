@@ -353,6 +353,46 @@ describe("PersonCell", () => {
     ).toBe(wakes?.summary.wakes[0]?.at);
   });
 
+  it("reopens its harness after the session is poisoned, instead of failing every request until a restart", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const s = await setup();
+    expect((await call(s, "GET", "/v1/cells/owner/status")).status).toBe(200);
+    const first = s.opened[0];
+    if (first === undefined) throw new Error("no harness opened");
+    vi.spyOn(first, "status").mockRejectedValue(
+      new Error("Session is poisoned by a failed commit after storage admission; reopen it"),
+    );
+    // The request that meets the poisoned session fails once.
+    await expect(call(s, "GET", "/v1/cells/owner/status")).rejects.toThrow(/poisoned/);
+    // The next one opens a new harness on the same storage and answers.
+    const again = await call(s, "GET", "/v1/cells/owner/status");
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ status: "up", person: "owner" });
+    expect(s.opened).toHaveLength(2);
+  });
+
+  it("keeps its session after celld refuses a storage gate to work whose event ended", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const s = await setup();
+    s.sockets.splice(0);
+    await call(s, "GET", "/v1/cells/owner/status");
+    const cell = s.cells.get("owner");
+    if (cell === undefined) throw new Error("no cell");
+    const storage = (cell as unknown as { state: { storage: FakeCelldStorage } }).state.storage;
+    await s.opened[0]?.harness.waitForIdle(BACKGROUND_CONTEXT);
+    storage.refuseNextGate = true;
+    // The refused transaction fails its own operation at most; pi-durable may retry it.
+    await cell.submitInput("owner", "hello", "req-gate-0001").catch(() => undefined);
+    expect(storage.refuseNextGate).toBe(false);
+    // Nothing was written, so the session stays usable: the same harness takes the next line.
+    const { submissionId } = await cell.submitInput("owner", "hello", "req-gate-0002");
+    expect(submissionId).toBeGreaterThan(0);
+    expect((await call(s, "GET", "/v1/cells/owner/status")).status).toBe(200);
+    expect(s.opened).toHaveLength(1);
+  });
+
   it("shows live tasks with the hand-off brief on request", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = await setup();

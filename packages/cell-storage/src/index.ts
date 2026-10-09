@@ -10,6 +10,7 @@ export {
   type CelldSqliteDatabaseOptions,
   CellStorageClosedError,
   CellStorageTransactionTimeout,
+  RETIRED_INPUT_GATE,
 } from "./celld-sqlite-database.ts";
 export type {
   CelldAlarmInfo,
@@ -21,6 +22,7 @@ export type {
   CelldSqlStorage,
   CelldStorage,
 } from "./celld-types.ts";
+export { needsReopen, POISONED_SESSION } from "./reopen.ts";
 export {
   type CellDump,
   type DumpSchemaEntry,

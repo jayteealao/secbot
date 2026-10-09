@@ -259,9 +259,9 @@ mode.
 | POST | `/ops/rules?cell=<person>` | Adds an owner rule for that person's agents (body as `POST /rules`); 201 `{rule}`. |
 | DELETE | `/ops/rules?cell=<person>` | Removes an owner rule (body as `DELETE /rules`); the release rule is refused with 400. |
 | GET | `/ops/activity?cell=<person>&month=&before=&limit=` | That person's activity, as `GET /activity`. |
-| GET | `/ops/mode?cell=<person>` | `{person, mode, since, switchedBy, decisionModel, timeZone}`: the guard mode (`shadow` or `enforce`), when it began (milliseconds since 1970), who switched it, and the decision model (`clef` or `jev`). |
+| GET | `/ops/mode?cell=<person>` | `{person, mode, since, switchedBy, decisionModel, timeZone}`: the guard mode (`shadow` or `enforce`), when it began (milliseconds since 1970), who switched it, and the decision model (`clef`, `clef-flash`, or `jev`). |
 | PUT | `/ops/mode?cell=<person>` | Body `{"mode": "shadow" \| "enforce"}`; the same shape plus `changed` (false when the cell already had that mode). Logs `guard.mode` and writes one `mode` activity record per switch. 400 for any other mode. |
-| PUT | `/ops/decision-model?cell=<person>` | Body `{"adapter": "clef" \| "jev"}`; the same shape as `GET /ops/mode`. The next call uses it. 400 for any other adapter. |
+| PUT | `/ops/decision-model?cell=<person>` | Body `{"adapter": "clef" \| "clef-flash" \| "jev"}`; the same shape as `GET /ops/mode`. The next call uses it. 400 for any other adapter. |
 | GET | `/ops/cost?cell=<person>` | That person's `CostView` plus `asOf`: live for a cell this fleet serves, else the household board's last report of it (`resetsAt` 0, `hours` empty). 404 when nothing is known. |
 | GET | `/ops/cost` | The household: `{month, timeZone, totalUsd, persons: [{person, spentUsd, limitUsd, percent, line, mode, modeSince, asOf}], developer: {spentUsd, limitUsd, percent, line}}`. This fleet's cells answer live; another fleet's from the board. |
 | PUT | `/ops/limits?cell=<person>` | Body `{"limitUsd": <usd>}` (above 0, at most 10000, two decimals); `{person, limitUsd, previousUsd}`. The next check uses it; waiting work continues at once when it is now under. Logs `limit.set` and `ops.limits`. 400 for a bad amount. |

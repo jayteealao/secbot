@@ -64,7 +64,7 @@ const USAGE = `usage:
   secbot activity [--month YYYY-MM] [--page N] [--person <name> (operator key)]
   secbot mode show <person>                         (operator key)
   secbot mode set <person> shadow|enforce           (operator key)
-  secbot mode decision <person> clef|jev            (operator key)
+  secbot mode decision <person> clef|clef-flash|jev (operator key)
       shadow: the decision model and the reviewer only record what they
       would do; rules and ask-first rules always apply
   secbot cost [--person <name> | --owner]           (another person, or the

@@ -14,7 +14,7 @@
  *   GET|POST|DELETE /ops/rules?cell=     a person's rules; the owner adds and removes owner rules
  *   GET  /ops/activity?cell=             a person's activity, for the owner
  *   GET|PUT /ops/mode?cell=              a person cell's guard mode (shadow or enforce)
- *   PUT  /ops/decision-model?cell=       a person cell's decision model (clef or jev)
+ *   PUT  /ops/decision-model?cell=       a person cell's decision model (clef, clef-flash, jev)
  *   GET  /ops/cost[?cell=]               a person's month of spend, or the household's
  *   PUT  /ops/limits?cell=               a person's monthly limit ({"limitUsd": <usd>})
  *   PUT  /ops/limits?budget=developer    the household developer budget ({"limitUsd": <usd>})
@@ -174,7 +174,7 @@ const RULE_BODY_LIMIT = 16 * 1024;
  *   GET    /ops/activity?cell=<person>&month=YYYY-MM&before=&limit=   that person's activity
  *   GET    /ops/mode?cell=<person>        the guard mode, since when, and the decision model
  *   PUT    /ops/mode?cell=<person>        switch the mode (body: {"mode": "shadow" | "enforce"})
- *   PUT    /ops/decision-model?cell=<person>   switch the decision model ({"adapter": "clef" | "jev"})
+ *   PUT    /ops/decision-model?cell=<person>   switch the decision model ({"adapter": "clef" | "clef-flash" | "jev"})
  *
  * No device-key route reaches the mode: only the operator key switches a cell to enforce.
  */

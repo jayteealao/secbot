@@ -24,6 +24,8 @@ import {
   type CellHarness,
   DEFAULT_LEAD_MODEL,
   DEFAULT_SPECIALIST_MODEL,
+  type DecisionAdapter,
+  isDecisionAdapter,
   onLogEvent,
   openCellHarness,
   type Reviewer,
@@ -234,11 +236,14 @@ export class GuardBenchCell {
   }
 
   /** POST /lab/guard-bench: starts a run in the background. */
-  async start(calls: number): Promise<Response> {
+  async start(calls: number, adapter?: DecisionAdapter): Promise<Response> {
     if (this.run !== undefined && !this.run.done) {
       return Response.json({ error: "a bench run is going" }, { status: 409 });
     }
     const cell = await this.cell();
+    // The bench measures the adapter it was given; the cell keeps it for the next run.
+    if (adapter !== undefined) await cell.setDecisionAdapter(adapter);
+    const measuring = (await cell.guardMode()).decisionModel;
     const run: Run = {
       target: calls + WARMUP_CALLS,
       issued: 0,
@@ -271,7 +276,7 @@ export class GuardBenchCell {
       run.done = true;
     })();
     this.state.waitUntil?.(work);
-    return Response.json({ started: true, calls, warmup: WARMUP_CALLS });
+    return Response.json({ started: true, calls, warmup: WARMUP_CALLS, adapter: measuring });
   }
 
   /** GET /lab/guard-bench-state. */
@@ -295,7 +300,11 @@ export class GuardBenchCell {
       if (!(calls >= 1 && calls <= MAX_BENCH_CALLS)) {
         return Response.json({ error: `calls is 1-${MAX_BENCH_CALLS}` }, { status: 400 });
       }
-      return this.start(calls);
+      const adapter = url.searchParams.get("adapter") ?? undefined;
+      if (adapter !== undefined && !isDecisionAdapter(adapter)) {
+        return Response.json({ error: "adapter is clef, clef-flash, or jev" }, { status: 400 });
+      }
+      return this.start(calls, adapter);
     }
     if (route === "GET /lab/guard-bench-state") return Response.json(this.status());
     return Response.json({ error: "not found" }, { status: 404 });

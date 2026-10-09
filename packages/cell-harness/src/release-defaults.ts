@@ -63,7 +63,11 @@ export const REVIEWER_ROLE = "reviewer";
 export const DEFAULT_REVIEWER_MODEL = "anthropic/claude-sonnet-5.5";
 
 /** The decision models the owner can switch between, by adapter name (OpenRouter catalogue ids). */
-export const DECISION_MODELS = { clef: "cloudflare/clef", jev: "typesafe/jev-1.13" } as const;
+export const DECISION_MODELS = {
+  clef: "cloudflare/clef",
+  "clef-flash": "cloudflare/clef-flash",
+  jev: "typesafe/jev-1.13",
+} as const;
 
 export type DecisionAdapter = keyof typeof DECISION_MODELS;
 

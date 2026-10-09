@@ -62,7 +62,7 @@ describe("GuardBenchCell", () => {
     const cell = bench();
     expect(await call(cell, "POST", "/lab/guard-bench?calls=20")).toEqual({
       status: 200,
-      body: { started: true, calls: 20, warmup: WARMUP_CALLS },
+      body: { started: true, calls: 20, warmup: WARMUP_CALLS, adapter: "clef" },
     });
     // A second start while the run goes is refused.
     expect((await call(cell, "POST", "/lab/guard-bench?calls=20")).status).toBe(409);
@@ -92,6 +92,38 @@ describe("GuardBenchCell", () => {
     expect(results.passedP95Ms).toBeNull();
     expect(results.models).toEqual([]);
   }, 60_000);
+
+  it("measures the adapter it is given: Clef Flash and Jev reach the decisions route by their own model", async () => {
+    for (const [adapter, model] of [
+      ["clef-flash", "cloudflare/clef-flash"],
+      ["jev", "typesafe/jev-1.13"],
+    ] as const) {
+      stub.seen.splice(0);
+      const cell = bench();
+      expect(
+        (await call(cell, "POST", `/lab/guard-bench?calls=5&adapter=${adapter}`)).body,
+      ).toEqual({
+        started: true,
+        calls: 5,
+        warmup: WARMUP_CALLS,
+        adapter,
+      });
+      const results = await finished(cell);
+      expect(results.measured).toBe(5);
+      expect(results.models).toEqual([`${model}-20261001`]);
+      const bodies = stub.seen.map((request) => request.body as { model?: string });
+      expect(new Set(bodies.map((body) => body.model))).toEqual(new Set([model]));
+    }
+  }, 60_000);
+
+  it("refuses an unknown adapter", async () => {
+    const cell = bench();
+    for (const adapter of ["clef-pro", "", "CLEF"]) {
+      expect((await call(cell, "POST", `/lab/guard-bench?calls=5&adapter=${adapter}`)).status).toBe(
+        400,
+      );
+    }
+  });
 
   it("refuses a calls value outside 1-200 and answers an unknown route with 404", async () => {
     const cell = bench();

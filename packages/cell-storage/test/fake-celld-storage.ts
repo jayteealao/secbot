@@ -23,6 +23,10 @@ import type {
   CelldStorage,
 } from "../src/celld-types.ts";
 
+/** celld v0.6.1 harness.js:2621 and js.rs:1300. */
+export const RETIRED_INPUT_GATE_MESSAGE =
+  "the cell event ended before it could acquire an input gate";
+
 const RESET_MESSAGE =
   "A call to blockConcurrencyWhile() in a Durable Object waited for too long. The call was canceled and the Durable Object was reset.";
 
@@ -59,6 +63,11 @@ export class FakeCelldStorage implements CelldStorage, CelldAlarmStorage {
   readonly statements: string[] = [];
   /** When true, the next rollback fails the way a broken connection would. */
   failNextRollback = false;
+  /**
+   * When true, the next transaction is refused before its callback runs, as celld refuses a block
+   * started by work whose cell event already ended (harness.js `_blockConcurrencyWhile`).
+   */
+  refuseNextGate = false;
   /** How many times `setAlarm()` ran (each one is a bucket write on celld). */
   alarmWrites = 0;
   private aborted = false;
@@ -120,6 +129,10 @@ export class FakeCelldStorage implements CelldStorage, CelldAlarmStorage {
 
   async transaction<T>(closure: (transaction: CelldStorage) => Promise<T>): Promise<T> {
     this.assertLive();
+    if (this.refuseNextGate) {
+      this.refuseNextGate = false;
+      throw new Error(RETIRED_INPUT_GATE_MESSAGE);
+    }
     const savepoint = `cells_tx_${++this.savepoints}`;
     this.database.exec(`SAVEPOINT ${savepoint}`);
     const { promise: reset, reject: rejectReset } = Promise.withResolvers<never>();

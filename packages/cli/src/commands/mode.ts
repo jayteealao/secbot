@@ -16,10 +16,10 @@ type ModeAnswer = {
 };
 
 const MODES = ["shadow", "enforce"];
-const ADAPTERS = ["clef", "jev"];
+const ADAPTERS = ["clef", "clef-flash", "jev"];
 
 const USAGE =
-  "usage: secbot mode show <person> | secbot mode set <person> shadow|enforce | secbot mode decision <person> clef|jev";
+  "usage: secbot mode show <person> | secbot mode set <person> shadow|enforce | secbot mode decision <person> clef|clef-flash|jev";
 
 const route = (path: string, person: string) => `/ops/${path}?cell=${encodeURIComponent(person)}`;
 
@@ -50,7 +50,8 @@ export async function mode(
     return 0;
   }
   if (sub === "decision" && value !== undefined) {
-    if (!ADAPTERS.includes(value)) throw new CliError("the decision model is clef or jev", 2);
+    if (!ADAPTERS.includes(value))
+      throw new CliError("the decision model is clef, clef-flash, or jev", 2);
     const answer = await (await client()).request<ModeAnswer>(
       "PUT",
       route("decision-model", person),

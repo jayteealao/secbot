@@ -20,7 +20,7 @@
 //   node scripts/vps.mjs lease acquire|release --holder H [--seconds N]
 //   node scripts/vps.mjs measure-heap --env test-cell [--seconds 180]
 //   node scripts/vps.mjs measure-write-delay --env test-cell [--writes 200]
-//   node scripts/vps.mjs measure-guard --env test-cell [--calls 100]
+//   node scripts/vps.mjs measure-guard --env test-cell [--calls 100] [--adapter clef|clef-flash|jev]
 //
 // Cell names follow the release workflows: owner, person (the second person's cell), household,
 // and secrets. With no --cells, a command covers every cell of the environment. The secrets cell
@@ -140,6 +140,7 @@ const flags = (argv) =>
       seconds: { type: "string" },
       writes: { type: "string" },
       calls: { type: "string" },
+      adapter: { type: "string" },
     },
     allowPositionals: true,
   }).values;
@@ -910,6 +911,17 @@ export async function measureHeap({ env, seconds = "180" }) {
 }
 
 export const GUARD_BUDGET_MS = 500;
+/** The decision-model adapters the bench can measure (DECISION_MODELS in the cell harness). */
+export const GUARD_ADAPTERS = ["clef", "clef-flash", "jev"];
+
+/** The `--adapter` value, or an error; undefined measures the bench cell's current adapter. Pure. */
+export function guardAdapter(adapter) {
+  if (adapter === undefined) return undefined;
+  if (!GUARD_ADAPTERS.includes(adapter)) {
+    throw new Error(`measure-guard needs --adapter ${GUARD_ADAPTERS.join("|")}`);
+  }
+  return adapter;
+}
 export const MAX_GUARD_CALLS = 200;
 
 /** The `--calls` value as a whole number from 1 to 200, or an error. Pure. */
@@ -952,11 +964,16 @@ export function judgeGuardBench(results, calls, budgetMs = GUARD_BUDGET_MS) {
 }
 
 /** The test cell's guard bench: starts it, waits for its result (up to 10 minutes), and judges it. */
-export async function measureGuard({ env, calls = "100" }) {
+export async function measureGuard({ env, calls = "100", adapter }) {
   if (env !== "test-cell") throw new Error("measure-guard runs only with --env test-cell");
   const count = guardCalls(calls);
+  const chosen = guardAdapter(adapter);
   await withLease("guard-bench", async () => {
-    await lab(env, "guard-bench", ["--calls", String(count)]);
+    await lab(env, "guard-bench", [
+      "--calls",
+      String(count),
+      ...(chosen === undefined ? [] : ["--adapter", chosen]),
+    ]);
     const deadline = Date.now() + 10 * 60_000;
     let state = {};
     for (;;) {

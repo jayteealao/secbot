@@ -8,6 +8,7 @@ import {
   DEFAULT_CELLS,
   expandCells,
   GUARD_BUDGET_MS,
+  guardAdapter,
   guardCalls,
   HEAP_LIMIT_BYTES,
   heartbeatCells,
@@ -499,6 +500,25 @@ test("measure-guard needs every requested call measured, and at least one", () =
 });
 
 test("measure-guard takes --calls 1-200 and sends only safe words to the VPS", () => {
+  assert.equal(guardAdapter(undefined), undefined);
+  for (const adapter of ["clef", "clef-flash", "jev"]) assert.equal(guardAdapter(adapter), adapter);
+  for (const bad of ["", "clef-pro", "JEV", "jev;id"]) {
+    assert.throws(() => guardAdapter(bad), /--adapter clef\|clef-flash\|jev/);
+  }
+  assert.equal(
+    remoteCommand([
+      "lab",
+      "--env",
+      "test-cell",
+      "--route",
+      "guard-bench",
+      "--calls",
+      "100",
+      "--adapter",
+      "clef-flash",
+    ]),
+    "lab --env test-cell --route guard-bench --calls 100 --adapter clef-flash",
+  );
   assert.equal(guardCalls(), 100);
   assert.equal(guardCalls("1"), 1);
   assert.equal(guardCalls("200"), 200);
