@@ -8,6 +8,7 @@ import {
   DEFAULT_CELLS,
   expandCells,
   HEAP_LIMIT_BYTES,
+  heartbeatCells,
   judgeCrash,
   judgeHeap,
   judgeLateAlarm,
@@ -19,7 +20,7 @@ import {
   reportAlarms,
   reportCells,
   reportHeartbeats,
-  SECRETS_SKIPPED,
+  SECRETS_HEARTBEAT_SKIPPED,
   SSH_OPTIONS,
   summarizeDelays,
 } from "./vps.mjs";
@@ -28,32 +29,56 @@ const up = (version) => ({ status: "up", version, roles: ["lead"] });
 
 test("every cell up passes and prints one line per cell", () => {
   const report = reportCells({
-    cells: { owner: up("v1.0.0"), second: up("v1.0.0"), household: up("v1.0.0") },
+    cells: {
+      owner: up("v1.0.0"),
+      second: up("v1.0.0"),
+      household: up("v1.0.0"),
+      secrets: up("v1.0.0"),
+    },
   });
-  assert.equal(DEFAULT_CELLS, "owner,second,household");
+  assert.equal(DEFAULT_CELLS, "owner,second,household,secrets");
   assert.deepEqual(report, {
     ok: true,
-    lines: ["cell owner up v1.0.0", "cell second up v1.0.0", "cell household up v1.0.0"],
+    lines: [
+      "cell owner up v1.0.0",
+      "cell second up v1.0.0",
+      "cell household up v1.0.0",
+      "cell secrets up v1.0.0",
+    ],
   });
 });
 
-test("the release workflows' cell names: person is the second person, secrets is skipped", () => {
+test("the release workflows' cell names: person is the second person, secrets is a cell", () => {
+  assert.deepEqual(normalizeCells("person,household"), ["second", "household"]);
+  assert.deepEqual(normalizeCells(undefined), ["owner", "second", "household", "secrets"]);
+  assert.deepEqual(normalizeCells("owner,person,household,secrets"), [
+    "owner",
+    "second",
+    "household",
+    "secrets",
+  ]);
+  assert.deepEqual(normalizeCells("secrets"), ["secrets"]);
+});
+
+test("check:heartbeats leaves out the secrets cell with a printed line", () => {
   const printed = [];
   assert.deepEqual(
-    normalizeCells("person,household", (line) => printed.push(line)),
-    ["second", "household"],
-  );
-  assert.deepEqual(normalizeCells(undefined), ["owner", "second", "household"]);
-  assert.deepEqual(
-    normalizeCells("owner,person,household,secrets", (line) => printed.push(line)),
+    heartbeatCells(undefined, (line) => printed.push(line)),
     ["owner", "second", "household"],
   );
   assert.deepEqual(
-    normalizeCells("secrets", (line) => printed.push(line)),
+    heartbeatCells("person", (line) => printed.push(line)),
+    ["second"],
+  );
+  assert.deepEqual(
+    heartbeatCells("secrets", (line) => printed.push(line)),
     [],
   );
-  assert.deepEqual(printed, [SECRETS_SKIPPED, SECRETS_SKIPPED]);
-  assert.equal(SECRETS_SKIPPED, "cell secrets skipped: it arrives with the secrets cell");
+  assert.deepEqual(printed, [SECRETS_HEARTBEAT_SKIPPED, SECRETS_HEARTBEAT_SKIPPED]);
+  assert.equal(
+    SECRETS_HEARTBEAT_SKIPPED,
+    "cell secrets skipped: it keeps no heartbeat until the owner adds one",
+  );
 });
 
 test("a down cell, a missing cell, or another version fails", () => {
@@ -85,13 +110,14 @@ const report = (cell, alarm, earliest, problem) => ({
 });
 
 test("check:alarms names person as the second cell and passes an alarm at or before the earliest timer", () => {
-  assert.equal(DEFAULT_ALARM_CELLS, "owner,second,household");
+  assert.equal(DEFAULT_ALARM_CELLS, "owner,second,household,secrets");
   assert.deepEqual(expandCells("person,household,owner"), ["second", "household", "owner"]);
   const result = reportAlarms({
     cells: {
       owner: report("owner", 1_000, 1_000),
       second: report("second", 900, 1_000),
       household: report("household", null, null),
+      secrets: report("secrets", null, null),
     },
   });
   assert.equal(result.ok, true);
@@ -99,6 +125,7 @@ test("check:alarms names person as the second cell and passes an alarm at or bef
     `cell owner alarm ok ${iso(1_000)} (earliest timer ${iso(1_000)}, heartbeat)`,
     `cell second alarm ok ${iso(900)} (earliest timer ${iso(1_000)}, heartbeat)`,
     "cell household alarm ok: no timers",
+    "cell secrets alarm ok: no timers",
   ]);
 });
 

@@ -7,13 +7,38 @@
  *   authorization, cookie, credential, private key; any case and separator);
  * - token-shaped text anywhere in a string (`Bearer …`, `sk-…`, `ghp_…`, JWT-shaped text, and
  *   hex or base64 runs over 32 characters);
- * - any literal value the caller names (the secrets cell passes the values it holds).
+ * - any literal value the caller names, and every secret value this process has learned
+ *   (`addKnownSecretValues`: the values the secrets cell granted to this cell's agents), so the
+ *   activity record, guard logs, approval prompts, the decision model's state, and the reviewer's
+ *   input all redact them without passing them at each call site.
  *
- * Over-redaction is the safe direction: a long identifier that only looks like a token is hidden too.
+ * Over-redaction is the safe direction: a long identifier that only looks like a token is hidden
+ * too, and a value learned by one cell of a process is hidden in every cell of that process.
  */
 import type { JsonValue } from "@earendil-works/chord";
 
 export const REDACTED = "[redacted]";
+
+/** A value shorter than this is never replaced (it would match ordinary text). */
+const SHORTEST_VALUE = 4;
+
+/** Secret values learned in this process; kept in memory only, never stored or logged. */
+const knownSecretValues = new Set<string>();
+
+/** Every later redaction also replaces these values. */
+export function addKnownSecretValues(values: Iterable<string>): void {
+  for (const value of values) {
+    if (typeof value === "string" && value.length >= SHORTEST_VALUE) knownSecretValues.add(value);
+  }
+}
+
+/** Tests: forget the learned values. */
+export function clearKnownSecretValues(): void {
+  knownSecretValues.clear();
+}
+
+const withKnown = (values: readonly string[]): readonly string[] =>
+  knownSecretValues.size === 0 ? values : [...values, ...knownSecretValues];
 
 /** The largest redacted argument object a record keeps, in UTF-8 bytes. */
 export const ARGUMENTS_LIMIT = 2_048;
@@ -39,12 +64,16 @@ export function isSecretKey(key: string): boolean {
   return SECRET_KEY.test(key.toLowerCase().replace(/[^a-z0-9]/g, ""));
 }
 
-/** `text` with token-shaped parts and the named literal values replaced. */
+/** `text` with token-shaped parts, the named literal values, and the learned values replaced. */
 export function redactText(text: string, values: readonly string[] = []): string {
+  return replaceText(text, withKnown(values));
+}
+
+function replaceText(text: string, values: readonly string[]): string {
   let result = text;
   // Longest first, so a value that contains another is replaced whole.
   for (const value of [...values]
-    .filter((v) => v.length >= 4)
+    .filter((v) => v.length >= SHORTEST_VALUE)
     .sort((a, b) => b.length - a.length)) {
     result = result.split(value).join(REDACTED);
   }
@@ -65,7 +94,7 @@ export interface RedactOptions {
 }
 
 function redactValue(value: JsonValue, values: readonly string[]): JsonValue {
-  if (typeof value === "string") return redactText(value, values);
+  if (typeof value === "string") return replaceText(value, values);
   if (Array.isArray(value)) return value.map((item) => redactValue(item, values));
   if (value !== null && typeof value === "object") {
     const out: Record<string, JsonValue> = {};
@@ -86,7 +115,7 @@ const bytes = (value: JsonValue) => new TextEncoder().encode(JSON.stringify(valu
  * `"…dropped"`.
  */
 export function redact(value: JsonValue, options: RedactOptions = {}): JsonValue {
-  const redacted = redactValue(value, options.values ?? []);
+  const redacted = redactValue(value, withKnown(options.values ?? []));
   const { maxBytes } = options;
   if (
     maxBytes === undefined ||

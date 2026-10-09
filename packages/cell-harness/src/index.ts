@@ -158,7 +158,15 @@ export {
   openCellHarness,
   reportFields,
 } from "./open-harness.ts";
-export { ARGUMENTS_LIMIT, isSecretKey, REDACTED, redact, redactText } from "./redact.ts";
+export {
+  ARGUMENTS_LIMIT,
+  addKnownSecretValues,
+  clearKnownSecretValues,
+  isSecretKey,
+  REDACTED,
+  redact,
+  redactText,
+} from "./redact.ts";
 export {
   DECISION_MODELS,
   DECISION_STATE_LIMIT,
@@ -219,6 +227,20 @@ export {
   type Verdict,
   verdictText,
 } from "./rules.ts";
+export {
+  type BrokerAnswer,
+  type BrokerRequest,
+  createSecretsExtension,
+  type RotateResult,
+  SECRETS_UNAVAILABLE,
+  type SecretInput,
+  type SecretKind,
+  type SecretListing,
+  type SecretsClient,
+  SecretsRefused,
+  SecretsUnavailable,
+  secretsReason,
+} from "./secret-tools.ts";
 export { FRAME_TYPES, type Frame, type SessionStream } from "./session-stream.ts";
 export {
   earliestTimer,

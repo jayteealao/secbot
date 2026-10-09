@@ -17,7 +17,9 @@ const DISPATCH_DIRS = [join(packages, "cli", "src"), join(packages, "cell-worker
  * `/deny N` line to the cell's approval route, never to any agent, and leaves every other line to
  * go to the lead unchanged; `held-chat.test.ts` proves both halves. The CLI's `budget-names.ts`
  * holds only the developer budget's name, which the cost and limits commands print and type; it
- * names a budget and routes nothing.
+ * names a budget and routes nothing. The CLI's `secret-kinds.ts` holds only the broker kinds
+ * (`health`, `production`) that `secbot secrets add --broker` types; a kind names the service the
+ * secrets cell calls, and routes nothing.
  */
 const NOT_DISPATCH = new Set([
   "budget-names.ts",
@@ -25,6 +27,7 @@ const NOT_DISPATCH = new Set([
   "conformance-cell.ts",
   "durability-lab.ts",
   "held.ts",
+  "secret-kinds.ts",
 ]);
 
 const names = STARTER_SPECIALISTS.map((specialist) => specialist.name).join("|");

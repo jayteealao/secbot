@@ -105,6 +105,10 @@ export interface FakeCell {
   household: Record<string, unknown>;
   /** The limit changes the /ops routes took, in order. */
   limitChanges: { path: string; body: unknown }[];
+  /** The secrets list both secrets routes answer (the person's own, and sam's for the owner). */
+  secrets: { name: string; kind: string; grants: string[] }[];
+  /** When set, the next secrets route answers [status, error] (a refusal, or 503 unavailable). */
+  secretsFailure: [number, string] | undefined;
   close(): Promise<void>;
 }
 
@@ -135,6 +139,8 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     cost: {},
     household: {},
     limitChanges: [],
+    secrets: [],
+    secretsFailure: undefined,
     close: async () => {},
   };
   const seen = new Set<string>();
@@ -158,6 +164,15 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       const reply = (status: number, value: unknown) => {
         response.writeHead(status, { "content-type": "application/json" });
         response.end(JSON.stringify(value));
+      };
+      /** The secrets routes: the next failure first, then the stand-in's answer. */
+      const secretsReply = (answer: () => unknown) => {
+        if (cell.secretsFailure !== undefined) {
+          const [status, error] = cell.secretsFailure;
+          cell.secretsFailure = undefined;
+          return reply(status, { error });
+        }
+        return reply(200, answer());
       };
       const guard = (level: "owner" | "person", route: string) => {
         if (route === "rules" && request.method === "GET") return reply(200, cell.rules);
@@ -196,6 +211,9 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
         }
         const url = new URL(path, "http://cell");
         const given = (body ?? {}) as Record<string, unknown>;
+        if (url.pathname === "/ops/secrets/rotate" && request.method === "POST") {
+          return secretsReply(() => ({ from: "k1", keyId: "k2", rewrapped: 3, remaining: 0 }));
+        }
         if (url.pathname === "/ops/cost" && url.searchParams.get("cell") === null) {
           return reply(200, cell.household);
         }
@@ -217,6 +235,21 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
         if (url.searchParams.get("cell") !== "sam") return reply(404, { error: "no such cell" });
         if (url.pathname === "/ops/cost" && request.method === "GET") {
           return reply(200, { ...cell.cost, person: "sam" });
+        }
+        if (url.pathname === "/ops/secrets" && request.method === "GET") {
+          return secretsReply(() => ({ person: "sam", secrets: cell.secrets }));
+        }
+        if (url.pathname === "/ops/secrets" && request.method === "PUT") {
+          return secretsReply(() => ({
+            person: "sam",
+            name: given.name,
+            keyId: "k1",
+            replaced: false,
+          }));
+        }
+        if (url.pathname === "/ops/secrets/allowlist") {
+          const removed = request.method === "DELETE";
+          return secretsReply(() => ({ person: "sam", changed: true, revoked: removed }));
         }
         if (url.pathname === "/ops/limits" && request.method === "PUT") {
           cell.limitChanges.push({ path, body });
@@ -256,6 +289,20 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
           messages,
           remaining: 0,
         });
+      }
+      if (route === "/secrets" && request.method === "GET") {
+        return secretsReply(() => ({ person, secrets: cell.secrets }));
+      }
+      if (
+        route === "/secrets/grants" &&
+        (request.method === "POST" || request.method === "DELETE")
+      ) {
+        const granted = request.method === "POST";
+        return secretsReply(() => ({
+          person,
+          ...body,
+          ...(granted ? { granted } : { revoked: true }),
+        }));
       }
       if (route === "/cost" && request.method === "GET") {
         return reply(200, { ...cell.cost, person });

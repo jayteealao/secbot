@@ -5,7 +5,8 @@
 // A fleet serves the cells named in SECBOT_FLEET_CELLS (empty: every cell, as on the test cell).
 // Production runs the owner cell in one fleet and the second person and household cells in
 // another, so each rollout stage deploys its own fleet (celld runs one application per fleet).
-// Cell names follow the release workflows: `person` is the second person's cell.
+// Cell names follow the release workflows: `person` is the second person's cell. The secrets cell
+// runs in the test fleet and beside the household cell in production; it is never snapshotted.
 import {
   type AlarmReport,
   errorFields,
@@ -19,6 +20,13 @@ import {
   type HouseholdCellState,
   isRefusedHouseholdChange,
 } from "@secbot/household-cell";
+import {
+  SECRETS_CELL_NAME,
+  type SecretsAnswer,
+  SecretsCell as SecretsCellBase,
+  type SecretsCellEnv,
+  type SecretsCellState,
+} from "@secbot/secrets-cell";
 import { checkDevice, type DeviceEnv } from "./device-auth.ts";
 import { type CellHealth, health, releaseVersion } from "./health.ts";
 import { type HouseholdClientEnv, householdClientOf } from "./household-client.ts";
@@ -31,6 +39,7 @@ import {
   PersonCell,
   type PersonCellEnv,
 } from "./person-cell.ts";
+import { type SecretsClientEnv, secretsClientOf, secretsOf } from "./secrets-client.ts";
 
 export { PersonCell };
 
@@ -41,12 +50,21 @@ export class HouseholdCell extends HouseholdCellBase {
   }
 }
 
+/** The secrets cell with this bundle's release version and the host's key helper. */
+export class SecretsCell extends SecretsCellBase {
+  constructor(state: SecretsCellState, env: SecretsCellEnv) {
+    super(state, env, { version: releaseVersion() });
+  }
+}
+
 /** The person cells. */
 export const PERSONS: readonly string[] = ["owner", "second"];
 /** The household cell's name, the same one the household cell package uses. */
 export const HOUSEHOLD = HOUSEHOLD_CELL_NAME;
-/** Every cell (a secrets cell is not built yet). */
-export const ALL_CELLS: readonly string[] = [...PERSONS, HOUSEHOLD];
+/** The secrets cell's name, the same one the secrets cell package uses. */
+export const SECRETS = SECRETS_CELL_NAME;
+/** Every cell. */
+export const ALL_CELLS: readonly string[] = [...PERSONS, HOUSEHOLD, SECRETS];
 
 /** The release workflows' name for the second person's cell. */
 export const cellName = (name: string): string => (name === "person" ? "second" : name);
@@ -80,7 +98,13 @@ export interface LabNamespaceLike {
   };
 }
 
-export interface WorkerEnv extends DeviceEnv, PersonCellEnv, HouseholdClientEnv, OpsEnv {
+export interface WorkerEnv
+  extends DeviceEnv,
+    PersonCellEnv,
+    HouseholdClientEnv,
+    SecretsClientEnv,
+    SecretsCellEnv,
+    OpsEnv {
   readonly PERSON_CELL: DurableObjectNamespaceLike;
   readonly LAB?: LabNamespaceLike;
   readonly SECBOT_FLEET_CELLS?: string;
@@ -98,6 +122,12 @@ async function cellStatus(env: WorkerEnv, name: string): Promise<CellHealth> {
     const household = householdOf(env);
     if (household?.status === undefined) return { status: "down", reason: "no household binding" };
     const status = await household.status();
+    return { status: "up", version: status.version, roles: status.roles };
+  }
+  if (person === SECRETS) {
+    const secrets = secretsOf(env);
+    if (secrets === undefined) return { status: "down", reason: "no secrets binding" };
+    const status = await secrets.status();
     return { status: "up", version: status.version, roles: status.roles };
   }
   if (!PERSONS.includes(person)) return { status: "down", reason: "unknown cell" };
@@ -123,6 +153,11 @@ async function alarmOf(env: WorkerEnv, name: string): Promise<AlarmAnswer> {
       return { cell: name, ok: false, reason: "no household binding" };
     }
     return (await household.alarmReport()) as AlarmReport;
+  }
+  if (name === SECRETS) {
+    const secrets = secretsOf(env);
+    if (secrets === undefined) return { cell: name, ok: false, reason: "no secrets binding" };
+    return secrets.alarmReport();
   }
   if (name === "lab" && env.LAB !== undefined) {
     const lab = env.LAB.get(env.LAB.idFromName("lab"));
@@ -252,6 +287,70 @@ async function internalHousehold(request: Request, env: WorkerEnv): Promise<Resp
   return Response.json({ error: "not found" }, { status: 404 });
 }
 
+/** The secrets cell's methods a person cell calls over the private network. */
+const SECRETS_METHODS = new Set([
+  "get",
+  "broker",
+  "list",
+  "grant",
+  "revoke",
+  "add",
+  "allowlist",
+  "rotate",
+  "redaction-values",
+  "status",
+]);
+
+/**
+ * POST /internal/secrets/{get,broker,list,grant,revoke,add,allowlist,rotate,redaction-values,status}:
+ * the secrets cell's RPC for a cell or an owner route in another fleet, over the private network
+ * with the operator key. A refusal is 400 with the reason, a cell that cannot reach its key 503,
+ * any other failure 500; no value is ever logged.
+ */
+async function internalSecrets(request: Request, env: WorkerEnv): Promise<Response> {
+  const url = new URL(request.url);
+  if (!(await hasOperatorKey(request, env))) {
+    logEvent("ops.refused", { route: url.pathname, reason: "operator_key" }, "warn");
+    return Response.json({ error: "refused: operator_key" }, { status: 401 });
+  }
+  if (!fleetCells(env).includes(SECRETS)) {
+    return Response.json({ error: anotherFleet(SECRETS) }, { status: 404 });
+  }
+  const method = url.pathname.slice("/internal/secrets/".length);
+  if (request.method !== "POST" || !SECRETS_METHODS.has(method)) {
+    return Response.json({ error: "not found" }, { status: 404 });
+  }
+  const secrets = secretsOf(env);
+  if (secrets === undefined) return Response.json({ error: "no secrets binding" }, { status: 503 });
+  // The body goes to the cell as it came; each method checks its own fields.
+  const body = (await request.json().catch(() => ({}))) as never;
+  const calls: Record<string, () => Promise<SecretsAnswer<unknown>>> = {
+    get: () => secrets.get(body),
+    broker: () => secrets.broker(body),
+    list: () => secrets.list(body),
+    grant: () => secrets.grant(body),
+    revoke: () => secrets.revoke(body),
+    add: () => secrets.add(body),
+    allowlist: () => secrets.allowlist(body),
+    rotate: () => secrets.rotate({}),
+    "redaction-values": () => secrets.redactionValues(body),
+  };
+  try {
+    if (method === "status") return Response.json(await secrets.status());
+    const answer = await (calls[method] as () => Promise<SecretsAnswer<unknown>>)();
+    if (answer.ok) return Response.json(answer.value);
+    logEvent(
+      answer.status < 500 ? "secrets.refused" : "secrets.error",
+      { method, status: answer.status },
+      answer.status < 500 ? "warn" : "error",
+    );
+    return Response.json({ error: answer.error }, { status: answer.status });
+  } catch (error) {
+    logEvent("secrets.error", { method, status: 500, ...errorFields(error) }, "error");
+    return Response.json({ error: "the secrets cell failed" }, { status: 500 });
+  }
+}
+
 const CELL_ROUTE = /^\/v1\/cells\/([a-z][a-z0-9-]{0,31})\//;
 
 /** Every route except the test cell's conformance and lab routes. */
@@ -279,12 +378,14 @@ export async function route(request: Request, env: WorkerEnv): Promise<Response>
       guardOf: (cell) => guardStubOf(env, cell),
       activityQuery,
       household: () => householdClientOf(env),
+      secrets: () => secretsClientOf(env),
       ...(lab?.writeOne === undefined
         ? {}
         : { write: () => lab.writeOne?.() ?? Promise.resolve() }),
     });
   }
   if (url.pathname.startsWith("/internal/household/")) return internalHousehold(request, env);
+  if (url.pathname.startsWith("/internal/secrets/")) return internalSecrets(request, env);
   const person = CELL_ROUTE.exec(url.pathname)?.[1];
   if (person === undefined || !PERSONS.includes(person)) {
     return Response.json({ error: "not found" }, { status: 404 });

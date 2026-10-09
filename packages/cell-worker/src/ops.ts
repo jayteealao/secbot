@@ -19,6 +19,12 @@
  *   PUT  /ops/limits?cell=               a person's monthly limit ({"limitUsd": <usd>})
  *   PUT  /ops/limits?budget=developer    the household developer budget ({"limitUsd": <usd>})
  *   PUT  /ops/time-zone                  the household time zone, from the next month
+ *   GET|PUT /ops/secrets?cell=           a person's secrets (never values); store one (value in body)
+ *   PUT|DELETE /ops/secrets/allowlist?cell=  the owner's allowlist; removing an entry revokes its grant
+ *   POST /ops/secrets/rotate             the next master key becomes current; records are re-wrapped
+ *
+ * The secrets cell is never snapshotted, wiped, or restored: the default cell set of those routes
+ * leaves it out, and naming it is refused.
  *
  * The rules and activity routes are the owner's command line (`secbot rules --owner`,
  * `secbot activity --person`), with the same operator key from the owner's machine.
@@ -38,6 +44,11 @@ import {
   type HeartbeatState,
   type HouseholdClient,
   logEvent,
+  SECRETS_UNAVAILABLE,
+  type SecretInput,
+  type SecretsClient,
+  SecretsRefused,
+  SecretsUnavailable,
   type SpendReport,
 } from "@secbot/cell-harness";
 import type { CellDump } from "@secbot/cell-storage";
@@ -109,7 +120,12 @@ export interface OpsDeps {
   readonly write?: () => Promise<void>;
   /** The household cell's client (its budget board), or undefined when this fleet has none. */
   household?(): HouseholdClient | undefined;
+  /** The secrets cell's client, or undefined when this fleet reaches none. */
+  secrets?(): SecretsClient | undefined;
 }
+
+/** The secrets cell: never in a snapshot, wipe, digest, or heartbeat set of these routes. */
+const SECRETS_CELL = "secrets";
 
 const SNAPSHOT_ID = /^[A-Za-z0-9._-]{1,100}$/;
 
@@ -135,7 +151,9 @@ function cellsOf(url: URL, deps: OpsDeps): { cells: string[] } | { error: string
     .map((name) => name.trim())
     .filter(Boolean)
     .map((name) => (name === "person" ? "second" : name));
-  const cells = named.length === 0 ? [...deps.cells] : [...new Set(named)];
+  if (named.includes(SECRETS_CELL)) return { error: "the secrets cell is never snapshotted" };
+  const cells =
+    named.length === 0 ? deps.cells.filter((cell) => cell !== SECRETS_CELL) : [...new Set(named)];
   const foreign = cells.find((cell) => !deps.cells.includes(cell));
   return foreign === undefined
     ? { cells }
@@ -420,6 +438,64 @@ async function budgetRoute(request: Request, url: URL, deps: OpsDeps): Promise<R
   }
 }
 
+/**
+ * The owner's secrets, behind the operator key. A value arrives only in a request body (the CLI
+ * reads it from standard input) and is never in an answer or a log line.
+ *
+ *   GET    /ops/secrets?cell=<person>            that person's secrets, grants, and allowlist
+ *   PUT    /ops/secrets?cell=<person>            store one: {"name", "value", "broker"?}
+ *   PUT    /ops/secrets/allowlist?cell=<person>  allow: {"secret", "agent"}
+ *   DELETE /ops/secrets/allowlist?cell=<person>  stop allowing (revokes the grant)
+ *   POST   /ops/secrets/rotate                   the next master key; every record re-wrapped
+ */
+async function secretsRoute(request: Request, url: URL, deps: OpsDeps): Promise<Response> {
+  const secrets = deps.secrets?.();
+  if (secrets === undefined) return json({ error: `refused: ${SECRETS_UNAVAILABLE}` }, 503);
+  const raw = url.searchParams.get("cell") ?? "";
+  const person = raw === "person" ? "second" : raw;
+  const route = `${request.method} ${url.pathname}`;
+  try {
+    if (route === "POST /ops/secrets/rotate") {
+      const result = await secrets.rotate();
+      logEvent("ops.secrets", { action: "rotate", ok: true, key_id: result.keyId });
+      return json(result);
+    }
+    if (person === "") return json({ error: "send ?cell=<person>" }, 400);
+    if (route === "GET /ops/secrets") return json({ person, secrets: await secrets.list(person) });
+    const body = await readBody(request);
+    if (body === undefined)
+      return json({ error: `the body is over ${RULE_BODY_LIMIT} bytes` }, 413);
+    const field = (name: string) => (typeof body[name] === "string" ? (body[name] as string) : "");
+    if (route === "PUT /ops/secrets") {
+      const broker = body.broker as SecretInput["broker"] | undefined;
+      const result = await secrets.add({
+        person,
+        name: field("name"),
+        value: field("value"),
+        ...(broker === undefined || broker === null ? {} : { broker }),
+      });
+      logEvent("ops.secrets", { action: "add", person, secret: field("name"), ok: true });
+      return json({ person, name: field("name"), ...result });
+    }
+    if (url.pathname === "/ops/secrets/allowlist" && ["PUT", "DELETE"].includes(request.method)) {
+      const action = request.method === "PUT" ? "add" : "remove";
+      const result = await secrets.allowlist(person, field("secret"), field("agent"), action);
+      logEvent("ops.secrets", { action: `allowlist-${action}`, person, ok: true });
+      return json({ person, secret: field("secret"), agent: field("agent"), ...result });
+    }
+    return json({ error: "not found" }, 404);
+  } catch (error) {
+    if (error instanceof SecretsRefused) {
+      logEvent("ops.secrets", { route, person, ok: false }, "warn");
+      return json({ error: `refused: ${error.message}` }, 400);
+    }
+    if (error instanceof SecretsUnavailable) {
+      return json({ error: `refused: ${SECRETS_UNAVAILABLE}` }, 503);
+    }
+    throw error;
+  }
+}
+
 /** Handles one `/ops/*` request; the caller has checked the path prefix. */
 export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise<Response> {
   const url = new URL(request.url);
@@ -438,6 +514,10 @@ export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise
     route === "GET /ops/activity"
   ) {
     return guardRoute(request, url, deps);
+  }
+
+  if (url.pathname === "/ops/secrets" || url.pathname.startsWith("/ops/secrets/")) {
+    return secretsRoute(request, url, deps);
   }
 
   if (

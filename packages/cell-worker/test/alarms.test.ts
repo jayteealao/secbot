@@ -265,7 +265,9 @@ describe("person cell alarm", () => {
     const every = (await (await alarms(new URL("http://cell/alarms"), s.env)).json()) as {
       cells: Record<string, unknown>;
     };
-    expect(Object.keys(every.cells)).toEqual(["owner", "second", "household"]);
+    expect(Object.keys(every.cells)).toEqual(["owner", "second", "household", "secrets"]);
+    // This fleet has no secrets binding, so the secrets cell's alarm reads as not reachable.
+    expect(every.cells.secrets).toMatchObject({ ok: false, reason: "no secrets binding" });
     expect(body.cells.ghost).toMatchObject({ ok: false, reason: "unknown cell" });
     expect(body.cells.household).toMatchObject({ cell: "household" });
     const health = (await (await status(s, "household")).json()) as {

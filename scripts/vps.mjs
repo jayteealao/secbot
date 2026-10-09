@@ -22,8 +22,9 @@
 //   node scripts/vps.mjs measure-write-delay --env test-cell [--writes 200]
 //
 // Cell names follow the release workflows: owner, person (the second person's cell), household,
-// and secrets, which is skipped with a printed line until the secrets cell exists. With no
-// --cells, a command covers every cell of the environment.
+// and secrets. With no --cells, a command covers every cell of the environment. The secrets cell
+// is never snapshotted or restored, and keeps no heartbeat until the owner adds one, so
+// check-heartbeats skips it with a printed line.
 //
 // The SSH target is SECBOT_VPS_SSH, an alias in the caller's SSH config. In GitHub Actions the
 // vps-access action writes the alias "secbot-vps", which is the default there. The repo never
@@ -142,27 +143,29 @@ const flags = (argv) =>
   }).values;
 
 /** Every cell, by the cells' own names. */
-export const DEFAULT_CELLS = "owner,second,household";
-export const SECRETS_SKIPPED = "cell secrets skipped: it arrives with the secrets cell";
+export const DEFAULT_CELLS = "owner,second,household,secrets";
+/** Printed when check-heartbeats leaves out the secrets cell. */
+export const SECRETS_HEARTBEAT_SKIPPED =
+  "cell secrets skipped: it keeps no heartbeat until the owner adds one";
 
 /**
  * The release workflows' cell names to the cells' own: `person` is the second person's cell;
- * `secrets` is dropped (with SECRETS_SKIPPED, through `log`); no names means every cell.
+ * no names means every cell.
  */
-export function normalizeCells(cells, log = () => {}) {
+export function normalizeCells(cells) {
   const named = (cells ?? "")
     .split(",")
     .map((name) => name.trim())
     .filter(Boolean);
   if (named.length === 0) return DEFAULT_CELLS.split(",");
-  if (named.includes("secrets")) log(SECRETS_SKIPPED);
-  return [
-    ...new Set(
-      named
-        .filter((name) => name !== "secrets")
-        .map((name) => (name === "person" ? "second" : name)),
-    ),
-  ];
+  return [...new Set(named.map((name) => (name === "person" ? "second" : name)))];
+}
+
+/** The cells check-heartbeats asks about: every named cell but the secrets cell. */
+export function heartbeatCells(cells, log = () => {}) {
+  const named = normalizeCells(cells);
+  if (named.includes("secrets")) log(SECRETS_HEARTBEAT_SKIPPED);
+  return named.filter((name) => name !== "secrets");
 }
 
 const runWords = (env = process.env) =>
@@ -209,7 +212,7 @@ export async function deploy({ env, version, sha256, cells }) {
   const words = ["deploy", "--env", env, "--version", version];
   if (sha256) words.push("--sha256", sha256);
   if (cells) {
-    const named = normalizeCells(cells, console.log);
+    const named = normalizeCells(cells);
     if (named.length === 0) {
       console.log("deploy: no cell to deploy");
       return "";
@@ -256,7 +259,7 @@ export function reportCells(health, { cells = DEFAULT_CELLS, version } = {}) {
 export async function checkCells({ env, version, cells = DEFAULT_CELLS }) {
   if (env !== "test-cell" && env !== "production")
     throw new Error("check-cells needs --env test-cell|production");
-  const named = normalizeCells(cells, console.log);
+  const named = normalizeCells(cells);
   if (named.length === 0) return;
   cells = named.join(",");
   const stdout = await runRemote(["health", "--env", env, "--cells", cells], { echo: false });
@@ -321,7 +324,7 @@ const parseJson = (stdout, what) => {
 export async function checkAlarms({ env, cells = DEFAULT_ALARM_CELLS }) {
   if (env !== "test-cell" && env !== "production")
     throw new Error("check-alarms needs --env test-cell|production");
-  const named = normalizeCells(cells, console.log);
+  const named = normalizeCells(cells);
   if (named.length === 0) return;
   cells = named.join(",");
   const stdout = await runRemote(["alarms", "--env", env, "--cells", cells], { echo: false });
@@ -625,6 +628,9 @@ export async function restore({ env, cells, snapshot: id }) {
 }
 
 export async function drill({ snapshot: id, cells = "owner" }) {
+  if (cells.split(",").includes("secrets")) {
+    throw new Error("the secrets cell is never restored: rebuild it and rotate its credentials");
+  }
   const named = normalizeCells(cells);
   const words = ["drill", "--cells", named.join(",")];
   if (id) words.push("--snapshot", id);
@@ -680,7 +686,7 @@ export function reportHeartbeats(answer, statuses, { sinceDeploy = false } = {})
 }
 
 export async function checkHeartbeats(values, fetcher = fetch) {
-  const named = normalizeCells(values.cells, console.log);
+  const named = heartbeatCells(values.cells, console.log);
   if (named.length === 0) return;
   // The SSH user picks the environment (deploy-test: the test cell; deploy: production).
   const words = ["heartbeats", "--cells", named.join(",")];

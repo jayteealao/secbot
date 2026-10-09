@@ -45,6 +45,9 @@ import {
   type Rule,
   type RuleLevel,
   RuleNotFound,
+  SECRETS_UNAVAILABLE,
+  type SecretsClient,
+  SecretsRefused,
   type SessionStream,
 } from "@secbot/cell-harness";
 import {
@@ -56,6 +59,7 @@ import {
 import { HOUSEHOLD_CELL_NAME } from "@secbot/household-cell";
 import { releaseVersion } from "./health.ts";
 import { type HouseholdClientEnv, householdClientOf } from "./household-client.ts";
+import { type SecretsClientEnv, secretsClientOf } from "./secrets-client.ts";
 
 export interface SocketLike {
   send(data: string): void;
@@ -82,13 +86,14 @@ export interface HouseholdNamespaceLike {
   get(id: unknown): HouseholdStubLike;
 }
 
-export interface PersonCellEnv extends CellEnv, HouseholdClientEnv {
+export interface PersonCellEnv extends CellEnv, HouseholdClientEnv, SecretsClientEnv {
   readonly HOUSEHOLD_CELL?: HouseholdNamespaceLike;
 }
 
 /** What the cell gives the harness it opens. */
 export interface OpenExtras {
   readonly household?: HouseholdClient;
+  readonly secrets?: SecretsClient;
   readonly onWakeChange: () => void;
 }
 
@@ -327,12 +332,14 @@ export class PersonCell {
     if (this.opening === undefined) {
       this.rememberName(person);
       const household = householdClientOf(this.env);
+      const secrets = secretsClientOf(this.env);
       // A restore or wipe in progress finishes first, so the harness opens on the new database.
       this.opening = this.snapshots()
         .idle()
         .then(() =>
           this.open(this.state.storage, person, {
             ...(household === undefined ? {} : { household }),
+            ...(secrets === undefined ? {} : { secrets }),
             onWakeChange: () => this.rearmSoon(person),
           }),
         )
@@ -549,6 +556,9 @@ export class PersonCell {
       if (request.method === "POST" && approvalRoute !== null) {
         return this.answerRoute(request, cell, Number(approvalRoute[1]), device);
       }
+      if (route === "/secrets" || route === "/secrets/grants") {
+        return this.secretsRoute(request, cell, person, route);
+      }
       if (request.method === "GET" && route === "/activity") {
         const query = activityQuery(url.searchParams);
         if ("error" in query) return json({ error: query.error }, 400);
@@ -580,6 +590,49 @@ export class PersonCell {
     return answerJson(await guardAnswer(() => cell.removeRule(level, body)), 200, (removed) => ({
       removed,
     }));
+  }
+
+  /**
+   * The person's own secrets: GET /secrets lists them (names, kinds, grants, the allowlist; never a
+   * value); POST and DELETE /secrets/grants grant or revoke one secret for one of this person's
+   * agents (body: secret, agent), inside the owner's allowlist. The agent must be on this person's
+   * roster; the secrets cell checks the rest.
+   */
+  private async secretsRoute(
+    request: Request,
+    cell: CellHarness,
+    person: string,
+    route: string,
+  ): Promise<Response> {
+    const secrets = secretsClientOf(this.env);
+    try {
+      if (secrets === undefined) throw new Error(SECRETS_UNAVAILABLE);
+      if (route === "/secrets" && request.method === "GET") {
+        return json({ person, secrets: await secrets.list(person) });
+      }
+      if (route !== "/secrets/grants" || !["POST", "DELETE"].includes(request.method)) {
+        return json({ error: "not found" }, 404);
+      }
+      const body = await readJson(request);
+      if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+      const secret = typeof body.secret === "string" ? body.secret : "";
+      const agent = typeof body.agent === "string" ? body.agent : "";
+      if (!(await cell.status()).roles.includes(agent)) {
+        const reason = `no agent named ${agent}`;
+        const action = request.method === "POST" ? "grant" : "revoke";
+        logEvent("secret.refused", { cell: person, action, person, agent, secret, reason }, "warn");
+        return json({ error: `refused: ${reason}` }, 400);
+      }
+      if (request.method === "POST") {
+        const result = await secrets.grant(person, secret, agent);
+        return json({ person, secret, agent, ...result }, result.granted ? 201 : 200);
+      }
+      return json({ person, secret, agent, ...(await secrets.revoke(person, secret, agent)) });
+    } catch (error) {
+      if (error instanceof SecretsRefused) return json({ error: `refused: ${error.message}` }, 400);
+      logEvent("secrets.unreachable", { cell: person, route, ...errorFields(error) }, "warn");
+      return json({ error: `refused: ${SECRETS_UNAVAILABLE}` }, 503);
+    }
   }
 
   /**

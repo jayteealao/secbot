@@ -33,7 +33,15 @@ export type ActivityVerdict =
   | "running"
   | "waiting"
   | "done";
-export type ActivityLayer = "rule" | "guard" | "person" | "decision" | "reviewer" | "job";
+/** `secrets`: the secrets cell refused a secret or a brokered call, or did not answer. */
+export type ActivityLayer =
+  | "rule"
+  | "guard"
+  | "person"
+  | "decision"
+  | "reviewer"
+  | "job"
+  | "secrets";
 /**
  * `verdict`: the guard decided a call. `held`: a call waits for the person (key `<task id>:<call
  * id>`). `answered` and `lapsed`: what became of a held call (keys `approval:<n>:answer` and

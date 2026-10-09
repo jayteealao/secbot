@@ -1,0 +1,313 @@
+#!/usr/bin/python3 -I
+# secbot-key-helper: keeps the secrets cell's master keys on this host and answers only the
+# celld user's own processes on a loopback port. Python 3.8+ standard library only.
+#
+#   secbot-key-helper --key-dir /etc/secbot/secrets-keys/<env> --port <port>
+#   (--port 0 picks a free port and prints "listening <port>", for the tests)
+#
+# Routes (JSON):
+#   GET  /health          {ok, current, keyIds} or {ok: false, reason}
+#   POST /derive          {keyId, info} -> {key}: base64 of HKDF-SHA256(ikm = that key file's
+#                         32 bytes, salt = empty, info, 32 bytes) (RFC 5869); never a key file's bytes
+#   POST /rotate          {from} -> {current}: when `current` is still `from`, makes the next key
+#                         (32 random bytes, mode 0400) and makes it current; else answers the
+#                         current id, so a repeated or concurrent rotate makes one key only
+#
+# The key directory and every key file must be owned by this process's user with no group or
+# other permission bits; the check runs on every request, so a mode change after start is caught.
+# Every connection's peer must be a socket owned by this process's user (/proc/net/tcp, tcp6).
+# Journal lines carry the route, the outcome, and a reason only, never key material.
+import argparse
+import base64
+import hashlib
+import hmac
+import json
+import os
+import re
+import secrets
+import socket
+import stat
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+KEY_ID = re.compile(r"^k[1-9][0-9]{0,5}$")
+KEY_BYTES = 32
+INFO_LIMIT = 512
+BODY_LIMIT = 4096
+ROTATE_LOCK = threading.Lock()
+
+
+def log(route, outcome, reason=None):
+    line = {"event": "key_helper.request", "route": route, "outcome": outcome}
+    if reason is not None:
+        line["reason"] = reason
+    print(json.dumps(line), file=sys.stderr, flush=True)
+
+
+def discard(path):
+    """Removes a temporary file an interrupted rotate left behind."""
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+
+
+def private(path, uid):
+    """None when `path` is owned by `uid` with no group or other bits; else the problem."""
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode):
+        return "a key file is a link"
+    if info.st_uid != uid or info.st_mode & 0o077:
+        return "readable by other users"
+    return None
+
+
+class Keys:
+    def __init__(self, directory):
+        self.directory = directory
+        self.uid = os.geteuid()
+
+    def check(self):
+        """(current, key ids) or raises ValueError with the reason."""
+        try:
+            problem = private(self.directory, self.uid)
+        except FileNotFoundError:
+            raise ValueError("key directory missing")
+        if problem is not None:
+            raise ValueError("key directory readable by other users")
+        current_path = os.path.join(self.directory, "current")
+        try:
+            with open(current_path, "r", encoding="ascii") as handle:
+                current = handle.read().strip()
+        except FileNotFoundError:
+            raise ValueError("key file missing")
+        if not KEY_ID.match(current):
+            raise ValueError("key file missing")
+        ids = sorted(
+            name[: -len(".key")]
+            for name in os.listdir(self.directory)
+            if name.endswith(".key") and KEY_ID.match(name[: -len(".key")])
+        )
+        if current not in ids:
+            raise ValueError("key file missing")
+        for name in ["current"] + [key_id + ".key" for key_id in ids]:
+            if private(os.path.join(self.directory, name), self.uid) is not None:
+                raise ValueError("key file readable by other users")
+        return current, ids
+
+    def material(self, key_id):
+        current, ids = self.check()
+        if key_id not in ids:
+            raise LookupError("unknown key id")
+        with open(os.path.join(self.directory, key_id + ".key"), "rb") as handle:
+            data = handle.read()
+        if len(data) != KEY_BYTES:
+            raise ValueError("key file is not 32 bytes")
+        return data
+
+    def rotate(self, expected):
+        with ROTATE_LOCK:
+            current, ids = self.check()
+            if current != expected:
+                return current
+            number = max(int(key_id[1:]) for key_id in ids) + 1
+            next_id = "k%d" % number
+            path = os.path.join(self.directory, next_id + ".key")
+            temporary = path + ".tmp"
+            discard(temporary)
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+            try:
+                os.write(descriptor, secrets.token_bytes(KEY_BYTES))
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(temporary, path)
+            pointer = os.path.join(self.directory, "current.tmp")
+            discard(pointer)
+            descriptor = os.open(pointer, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+            try:
+                os.write(descriptor, (next_id + "\n").encode("ascii"))
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            os.replace(pointer, os.path.join(self.directory, "current"))
+            return next_id
+
+
+def hkdf_sha256(ikm, info, length=KEY_BYTES):
+    """RFC 5869 with an empty salt (a string of zeros of the hash length)."""
+    prk = hmac.new(bytes(hashlib.sha256().digest_size), ikm, hashlib.sha256).digest()
+    out = b""
+    block = b""
+    counter = 1
+    while len(out) < length:
+        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+        out += block
+        counter += 1
+    return out[:length]
+
+
+def socket_owner(proc, local, remote):
+    """The uid of the socket whose local end is `local` and remote end `remote`, or None."""
+    for name in ("tcp", "tcp6"):
+        try:
+            with open(os.path.join(proc, "net", name), "r", encoding="ascii") as handle:
+                lines = handle.read().splitlines()[1:]
+        except FileNotFoundError:
+            continue
+        for line in lines:
+            fields = line.split()
+            if len(fields) < 8:
+                continue
+            if endpoint(fields[1]) == local and endpoint(fields[2]) == remote:
+                return int(fields[7])
+    return None
+
+
+def endpoint(text):
+    """("127.0.0.1", port) from a /proc/net/tcp "0100007F:1F90" field; IPv6 loopback forms too."""
+    address, _, port = text.partition(":")
+    port = int(port, 16)
+    if len(address) == 8:
+        raw = bytes.fromhex(address)[::-1]
+        return (socket.inet_ntop(socket.AF_INET, raw), port)
+    raw = b"".join(bytes.fromhex(address[i : i + 8])[::-1] for i in range(0, 32, 8))
+    if raw[:12] == b"\x00" * 10 + b"\xff\xff":
+        return (socket.inet_ntop(socket.AF_INET, raw[12:]), port)
+    return (socket.inet_ntop(socket.AF_INET6, raw), port)
+
+
+def make_handler(keys, proc):
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "secbot-key-helper"
+        sys_version = ""
+
+        def log_message(self, *args):
+            # The standard access log is replaced by the route, outcome, and reason lines.
+            pass
+
+        def answer(self, status, body):
+            data = json.dumps(body).encode("utf-8")
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def peer_allowed(self):
+            host, port = self.client_address[0], self.client_address[1]
+            if host not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                return False
+            local = self.connection.getsockname()
+            client = (host[7:] if host.startswith("::ffff:") else host, port)
+            server = (local[0][7:] if local[0].startswith("::ffff:") else local[0], local[1])
+            owner = socket_owner(proc, client, server)
+            return owner is not None and owner == keys.uid
+
+        def body(self):
+            length = int(self.headers.get("content-length") or "0")
+            if length > BODY_LIMIT:
+                raise ValueError("the body is too large")
+            try:
+                value = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                raise ValueError("the body is not JSON")
+            if not isinstance(value, dict):
+                raise ValueError("the body is not a JSON object")
+            return value
+
+        def guarded(self, route, work):
+            if not self.peer_allowed():
+                log(route, "refused", "peer is not the celld user")
+                self.answer(403, {"ok": False, "reason": "refused"})
+                return
+            try:
+                status, body = work()
+            except ValueError as error:
+                log(route, "refused", str(error))
+                self.answer(503, {"ok": False, "reason": str(error)})
+                return
+            except LookupError as error:
+                log(route, "refused", str(error))
+                self.answer(400, {"ok": False, "reason": str(error)})
+                return
+            except Exception as error:  # noqa: BLE001 - one line, never key material
+                log(route, "failed", type(error).__name__)
+                self.answer(500, {"ok": False, "reason": "the key helper failed"})
+                return
+            log(route, "ok")
+            self.answer(status, body)
+
+        def do_GET(self):
+            if self.path != "/health":
+                self.answer(404, {"ok": False, "reason": "not found"})
+                return
+
+            def health():
+                try:
+                    current, ids = keys.check()
+                except ValueError as error:
+                    log("/health", "refused", str(error))
+                    return 200, {"ok": False, "reason": str(error)}
+                return 200, {"ok": True, "current": current, "keyIds": ids}
+
+            self.guarded("/health", health)
+
+        def do_POST(self):
+            if self.path == "/derive":
+
+                def derive():
+                    value = self.body()
+                    key_id = value.get("keyId")
+                    info = value.get("info")
+                    if not isinstance(key_id, str) or not KEY_ID.match(key_id):
+                        raise LookupError("unknown key id")
+                    if not isinstance(info, str) or not 0 < len(info) <= INFO_LIMIT:
+                        raise LookupError("info must be 1 to 512 characters")
+                    derived = hkdf_sha256(keys.material(key_id), info.encode("utf-8"))
+                    return 200, {"key": base64.b64encode(derived).decode("ascii")}
+
+                self.guarded("/derive", derive)
+                return
+            if self.path == "/rotate":
+
+                def rotate():
+                    value = self.body()
+                    expected = value.get("from")
+                    if not isinstance(expected, str) or not KEY_ID.match(expected):
+                        raise LookupError("unknown key id")
+                    return 200, {"current": keys.rotate(expected)}
+
+                self.guarded("/rotate", rotate)
+                return
+            self.answer(404, {"ok": False, "reason": "not found"})
+
+    return Handler
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(prog="secbot-key-helper")
+    parser.add_argument("--key-dir", required=True)
+    parser.add_argument("--port", required=True, type=int)
+    # Tests only: the /proc root whose net/tcp tables name the peers.
+    parser.add_argument("--proc", default="/proc", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    keys = Keys(args.key_dir)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(keys, args.proc))
+    server.daemon_threads = True
+    try:
+        keys.check()
+        log("start", "ok")
+    except ValueError as error:
+        # The helper keeps running and answers /health with the reason; the cell refuses to start.
+        log("start", "refused", str(error))
+    print("listening %d" % server.server_address[1], flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

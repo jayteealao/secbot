@@ -1,5 +1,5 @@
-// Test-cell deployment: the person-cell routes, the household cell, ConformanceCell, and the
-// durability lab. Never deployed to a person cell. The vars are names only: secbot-release fills
+// Test-cell deployment: the person-cell routes, the household cell, the secrets cell,
+// ConformanceCell, and the durability lab. Never deployed to a person cell. The vars are names only: secbot-release fills
 // them on the VPS at deploy time.
 {
   "name": "secbot",
@@ -11,13 +11,15 @@
       { "name": "CONFORMANCE", "class_name": "ConformanceCell" },
       { "name": "PERSON_CELL", "class_name": "PersonCell" },
       { "name": "HOUSEHOLD_CELL", "class_name": "HouseholdCell" },
-      { "name": "LAB", "class_name": "DurabilityLabCell" }
+      { "name": "LAB", "class_name": "DurabilityLabCell" },
+      { "name": "SECRETS_CELL", "class_name": "SecretsCell" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ConformanceCell"] },
     { "tag": "v2", "new_sqlite_classes": ["PersonCell"] },
-    { "tag": "v3", "new_sqlite_classes": ["HouseholdCell", "DurabilityLabCell"] }
+    { "tag": "v3", "new_sqlite_classes": ["HouseholdCell", "DurabilityLabCell"] },
+    { "tag": "v4", "new_sqlite_classes": ["SecretsCell"] }
   ],
   "r2_buckets": [{ "binding": "SNAPSHOTS", "bucket_name": "secbot-snapshots" }],
   "vars": {
@@ -30,6 +32,8 @@
     "SECBOT_TIME_ZONE": "",
     "SECBOT_OPERATOR_KEY": "",
     "SECBOT_FLEET_CELLS": "",
-    "SECBOT_HOUSEHOLD_URL": ""
+    "SECBOT_HOUSEHOLD_URL": "",
+    "SECBOT_SECRETS_URL": "",
+    "SECBOT_KEY_HELPER_URL": ""
   }
 }

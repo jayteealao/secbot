@@ -103,6 +103,7 @@ import { addSpecialist, ensureRoster } from "./roster.ts";
 import { ensureRoutines, type Routine } from "./routines.ts";
 import { addRule, listRules, type RuleLists, removeRule, seedRules } from "./rule-store.ts";
 import type { Rule, RuleLevel } from "./rules.ts";
+import { createSecretsExtension, redactionLoader, type SecretsClient } from "./secret-tools.ts";
 import { createLeadExtension, type TimeEnv, timeZoneOf } from "./sections.ts";
 import { type Frame, openSessionStream, type SessionStream } from "./session-stream.ts";
 import { cellSettings } from "./settings.ts";
@@ -137,6 +138,8 @@ export interface OpenCellOptions {
   readonly fetch?: typeof fetch;
   /** The household cell; the household tools report it unreachable without one. */
   readonly household?: HouseholdClient;
+  /** The secrets cell; the secret tools answer "secrets cell unavailable" without one. */
+  readonly secrets?: SecretsClient;
   /** Called after every commit that changes a wake time (a routine ran, a reminder was set). */
   readonly onWakeChange?: () => void;
   /** More recurring routines beside the heartbeat (for example a morning briefing). */
@@ -506,6 +509,15 @@ export async function openCellHarness(
   const handoff = createHandoffExtension(person, () => gate, timeZone);
   const history = createHistoryExtension(current);
   const household = createHouseholdExtension(person, () => options.household);
+  // Granted values reach the redactor at open (best effort) and before each secrets call.
+  const loadRedaction = redactionLoader(person, () => options.secrets);
+  const secrets = createSecretsExtension(
+    person,
+    () => options.secrets,
+    { now, timeZone },
+    loadRedaction,
+  );
+  loadRedaction().catch(() => {});
   const reminder = createReminderExtension(reminders, { ...hooks, now, timeZone });
   const recurring = [{ routine: heartbeat }, ...(options.routines ?? [])];
   const routines = defineExtension({
@@ -554,8 +566,19 @@ export async function openCellHarness(
   // above a limit a specialist's job waits before its next request; chat with the lead runs.
   const budget = createBudgetExtension(() => gate);
   const extensions = {
-    lead: [guard, lead, handoff, history, household, reminder, routines, telemetry, ...extra],
-    specialist: [guard, budget, history, household, telemetry, ...extra],
+    lead: [
+      guard,
+      lead,
+      handoff,
+      history,
+      household,
+      secrets,
+      reminder,
+      routines,
+      telemetry,
+      ...extra,
+    ],
+    specialist: [guard, budget, history, household, secrets, telemetry, ...extra],
   };
   const registry = createRegistry();
   for (const extension of new Set([...extensions.lead, ...extensions.specialist])) {

@@ -1,7 +1,15 @@
 // The one redactor: secret-named fields at any depth, token-shaped text, named literal values,
 // and the size cap that keeps the fields a rule matched.
-import { describe, expect, it } from "vitest";
-import { ARGUMENTS_LIMIT, isSecretKey, REDACTED, redact, redactText } from "../src/redact.ts";
+import { afterEach, describe, expect, it } from "vitest";
+import {
+  ARGUMENTS_LIMIT,
+  addKnownSecretValues,
+  clearKnownSecretValues,
+  isSecretKey,
+  REDACTED,
+  redact,
+  redactText,
+} from "../src/redact.ts";
 
 describe("redact", () => {
   it("replaces secret-named fields at any depth, in objects and arrays", () => {
@@ -83,5 +91,44 @@ describe("redact", () => {
     expect(new TextEncoder().encode(JSON.stringify(unkept)).length).toBeLessThanOrEqual(
       ARGUMENTS_LIMIT,
     );
+  });
+});
+
+describe("learned secret values", () => {
+  // A granted secret's value as the person cell learns it; plain words, so only the learned set
+  // (not the token shape) can catch it.
+  const LEARNED = "plum orchard lantern";
+  afterEach(() => clearKnownSecretValues());
+
+  it("replaces a learned value in a nested argument with no values passed", () => {
+    addKnownSecretValues([LEARNED]);
+    expect(redact({ to: "sam", body: { lines: [`the code is ${LEARNED}.`] } })).toEqual({
+      to: "sam",
+      body: { lines: [`the code is ${REDACTED}.`] },
+    });
+  });
+
+  it("replaces a learned value in a reason, beside the values the caller passes", () => {
+    addKnownSecretValues([LEARNED]);
+    expect(redactText(`refused: ${LEARNED} and the zebra key`, ["zebra key"])).toBe(
+      `refused: ${REDACTED} and the ${REDACTED}`,
+    );
+  });
+
+  it("replaces a learned value in a capped state, the kept field included", () => {
+    addKnownSecretValues([LEARNED]);
+    const capped = redact(
+      { note: `remember ${LEARNED}`, filler: "x".repeat(4_000) },
+      { keep: ["note"], maxBytes: 200 },
+    );
+    expect(capped).toEqual({ note: `remember ${REDACTED}`, "…dropped": ["filler"] });
+    expect(JSON.stringify(capped)).not.toContain(LEARNED);
+  });
+
+  it("ignores values too short to replace safely, and forgets on clear", () => {
+    addKnownSecretValues(["abc", LEARNED]);
+    expect(redactText("abc abc")).toBe("abc abc");
+    clearKnownSecretValues();
+    expect(redactText(LEARNED)).toBe(LEARNED);
   });
 });

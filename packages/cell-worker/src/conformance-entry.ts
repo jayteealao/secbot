@@ -1,4 +1,4 @@
-// The test-cell worker: the person-cell routes, the household cell, the in-cell storage
+// The test-cell worker: the person-cell routes, the household and secrets cells, the in-cell storage
 // conformance run, and the durability lab.
 import { ConformanceCell } from "./conformance-cell.ts";
 import { DurabilityLabCell } from "./durability-lab.ts";
@@ -8,11 +8,12 @@ import {
   type LabNamespaceLike,
   PersonCell,
   route,
+  SecretsCell,
   type WorkerEnv,
 } from "./index.ts";
 
 export type { DurableObjectNamespaceLike, DurableObjectStubLike } from "./index.ts";
-export { ConformanceCell, DurabilityLabCell, HouseholdCell, PersonCell };
+export { ConformanceCell, DurabilityLabCell, HouseholdCell, PersonCell, SecretsCell };
 
 export interface ConformanceEnv extends Partial<WorkerEnv> {
   readonly CONFORMANCE: DurableObjectNamespaceLike;

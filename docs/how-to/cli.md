@@ -42,6 +42,9 @@ device key is what proves the caller.
 | `secbot rules list` | The owner's rules (you cannot loosen these), then your own rules: agent, tool, argument match, verdict. |
 | `secbot rules add <agent> <tool> <permit\|ask-first\|prohibit> [match]` | Adds one of your rules. A rule looser than an owner rule is refused on stderr, naming the owner rule (exit 1). |
 | `secbot rules remove <agent> <tool> [match]` | Removes the rule with that agent, tool, and match (give the match it was added with). |
+| `secbot secrets list` | Your secrets: name, kind (`secret`, `health`, or `production`), and the agents each is granted to. Never a value. |
+| `secbot secrets grant <secret> <agent>` | Lets one of your agents use that secret. Only inside the owner's allowlist; anything else is refused on stderr (exit 1). |
+| `secbot secrets revoke <secret> <agent>` | Takes the grant back. |
 | `secbot activity [--month YYYY-MM] [--page N]` | This month's activity under the month's spend, newest first, 50 to a page: each guard verdict, held call, answer, and lapse, and each hand-off, routine, and reminder with its state (running, waiting, done); time, agent, tool or job, verdict or state, the layer, the cost, and the reason or step on the line below. |
 
 The match option is one of `--exact`, `--prefix`, `--email-domain`, `--web-domain`, or `--regex`,
@@ -194,6 +197,31 @@ sam now uses the jev decision model from the next call
 `secbot mode set <person> shadow` switches back; switching to the mode a cell already has prints
 `<person> already runs in <mode> mode` and changes nothing. Read at least a week of shadow verdicts
 before you switch a cell to enforce. A device key cannot switch a mode.
+
+### Secrets (owner)
+
+On the owner's machine, with the operator key. `add` reads the value from standard input, so it
+never appears in your shell history or on screen:
+
+```
+$ secbot secrets add --person sam test-secret < value.txt
+[ stored ] test-secret for sam under key k1
+$ secbot secrets add --person sam health-test --broker health --url "$HEALTH_URL" --header authorization < token.txt
+[ stored ] health-test for sam under key k1; used only through the broker
+$ secbot secrets allowlist --person sam add test-secret research
+[ allowed ] sam test-secret -> research
+$ secbot secrets allowlist --person sam remove test-secret research
+[ removed ] sam test-secret -> research; its grant was revoked
+$ secbot secrets rotate
+[ rotated ] 3 secrets re-wrapped under key k2; 0 left under k1
+```
+
+`secbot secrets list --person sam` lists that person's secrets. A broker secret (`--broker
+health` or `--broker production`) is never given to an agent: the agent asks the secrets cell to
+make the call, and gets the answer without the token. A person grants a secret only to an agent
+the owner's allowlist names for it; removing the allowlist entry also revokes the grant. When the
+secrets cell cannot be reached, every `secrets` command prints
+`secbot: refused: secrets cell unavailable` (exit 1).
 
 ### The owner's views of another person
 

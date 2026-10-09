@@ -40,6 +40,8 @@ function releaseToolVars(): string[] {
     "SECBOT_OPERATOR_KEY",
     "SECBOT_FLEET_CELLS",
     "SECBOT_HOUSEHOLD_URL",
+    "SECBOT_SECRETS_URL",
+    "SECBOT_KEY_HELPER_URL",
   ];
 }
 

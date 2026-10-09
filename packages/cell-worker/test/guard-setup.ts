@@ -22,9 +22,11 @@ import {
   type Responder,
 } from "@secbot/cell-harness/testing";
 import { HouseholdCell } from "@secbot/household-cell";
+import { type KeyCustody, SecretsCell, testCustody } from "@secbot/secrets-cell";
 import { sha256Hex } from "../src/device-auth.ts";
 import { route, type WorkerEnv } from "../src/index.ts";
 import { type HouseholdStubLike, PersonCell } from "../src/person-cell.ts";
+import type { SecretsStubLike } from "../src/secrets-client.ts";
 
 export const KEY = "owner-laptop-key-0123456789abcdef0123456789abcdef";
 export const OPERATOR_KEY = "operator-key-fedcba9876543210fedcba9876543210"; // gitleaks:allow (fake test key)
@@ -48,6 +50,8 @@ export interface GuardSetup {
   readonly gateway: FauxGateway;
   /** The household cell, when the setup has one (`household: true`). */
   readonly household?: HouseholdCell;
+  /** The secrets cell, when the setup has one (`secrets` given). */
+  readonly secrets?: SecretsCell;
   /** The open harness of a person (opened by its first request). */
   harness(person: string): CellHarness;
 }
@@ -65,6 +69,11 @@ export async function guardSetup(
     readonly fetch?: typeof fetch;
     /** The person cells' clock (Date.now when absent). */
     readonly now?: () => number;
+    /**
+     * A secrets cell behind the SECRETS_CELL binding: `true` for a stand-in key custody, or the
+     * custody and the fetch its broker calls use.
+     */
+    readonly secrets?: true | { readonly custody?: KeyCustody; readonly fetch?: typeof fetch };
   } = {},
 ): Promise<GuardSetup> {
   const household =
@@ -81,6 +90,28 @@ export async function guardSetup(
             get: () => household as unknown as HouseholdStubLike,
           },
         };
+  const secretsOptions = options.secrets === true ? {} : options.secrets;
+  const secrets =
+    secretsOptions === undefined
+      ? undefined
+      : new SecretsCell(
+          { storage: new FakeCelldStorage() },
+          {},
+          {
+            custody: secretsOptions.custody ?? testCustody(),
+            ...(secretsOptions.fetch === undefined ? {} : { fetch: secretsOptions.fetch }),
+          },
+        );
+  const secretsBinding =
+    secrets === undefined
+      ? {}
+      : {
+          SECRETS_CELL: {
+            idFromName: (name: string) => name,
+            // The secrets cell's methods are its RPC surface, as celld's stub exposes them.
+            get: () => secrets as unknown as SecretsStubLike,
+          },
+        };
   const gateway = createFauxGateway(options.respond ?? scripted);
   const opened: CellHarness[] = [];
   const cells = new Map<string, PersonCell>();
@@ -90,7 +121,7 @@ export async function guardSetup(
     if (cell === undefined) {
       cell = new PersonCell(
         { storage: new FakeCelldStorage() },
-        householdBinding,
+        { ...householdBinding, ...secretsBinding },
         async (storage, name, extras) => {
           const harness = await openCellHarness(storage, {
             person: name,
@@ -98,6 +129,7 @@ export async function guardSetup(
             env: options.cellEnv ?? {},
             models: gateway.models,
             ...(extras.household === undefined ? {} : { household: extras.household }),
+            ...(extras.secrets === undefined ? {} : { secrets: extras.secrets }),
             ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
             ...(options.now === undefined ? {} : { now: options.now }),
             // A passing decision model unless a test gives its own: the suites that are not about
@@ -120,6 +152,7 @@ export async function guardSetup(
     ...(fleet === undefined ? {} : { SECBOT_FLEET_CELLS: fleet }),
     PERSON_CELL: { idFromName: (name) => name, get: (id) => cellFor(String(id)) },
     ...householdBinding,
+    ...secretsBinding,
   };
   return {
     env,
@@ -127,6 +160,7 @@ export async function guardSetup(
     opened,
     gateway,
     ...(household === undefined ? {} : { household }),
+    ...(secrets === undefined ? {} : { secrets }),
     harness: (person) => {
       const found = byPerson.get(person);
       if (found === undefined) throw new Error(`${person} is not open`);
@@ -144,4 +178,5 @@ export const workerFetch =
 export async function closeAll(setup: GuardSetup): Promise<void> {
   for (const harness of setup.opened) await harness.close();
   await setup.household?.close();
+  await setup.secrets?.close();
 }

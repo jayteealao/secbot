@@ -11,9 +11,11 @@
 #   health        --env E [--cells C]              print the cell health (version, and each named cell)
 #   alarms        --env E [--cells C]              print each cell's stored alarm against its earliest timer
 #   heartbeats    [--env E] [--cells C]            each cell's last heartbeat and its fleet's deploy time
+#                                                  (the secrets cell keeps no heartbeat here)
 #   snapshot      --env E --snapshot-id ID         every cell of the environment to its fleet bucket
+#                                                  (never the secrets cell: printed as skipped)
 #   restore       --env E --cells CELL --snapshot ID  load one cell from its snapshot (never secrets)
-#   digest        --env E [--cells C]              each cell's database digest
+#   digest        --env E [--cells C]              each cell's database digest (never secrets)
 #   drill         [--snapshot ID] [--cells C]      copy a production snapshot into the test cell, restore it
 #   ledger-record --kind K [--version V] [--cells C] [--snapshot-id ID] [--run-id R --run-attempt A]
 #   ledger-read                                    print the deploy ledger (JSON lines)
@@ -28,9 +30,11 @@
 # Fleets: celld runs one application per fleet (celld v0.6.1 README, "A fleet runs one
 # application"), so each rollout stage is its own fleet. The test cell is one fleet (celld@test)
 # that serves every cell. Production is celld@prod-owner (the owner cell) and celld@prod-shared
-# (the second person's cell and the household cell); both share the production bucket by key
-# prefix. Cell names follow the release workflows: `person` is the second person's cell; the
-# secrets cell is skipped with a printed line until it exists.
+# (the second person's cell, the household cell, and the secrets cell); both share the production
+# bucket by key prefix. Cell names follow the release workflows: `person` is the second person's
+# cell. The secrets cell's master keys stay with the host key helper (secbot-key-helper@<env>):
+# this tool never reads a key file; it fills only the helper's loopback address into the fleet
+# that serves the secrets cell.
 #
 # crash and down use exactly three sudo commands for celld@test (sudoers drop-in from host setup);
 # nothing here can stop, kill, or start a production unit.
@@ -127,9 +131,9 @@ fleets_of_env() {
 env_of_fleet() { [ "$1" = test ] && echo test-cell || echo production; }
 fleet_cells() {
   case "$1" in
-    test) echo "owner second household" ;;
+    test) echo "owner second household secrets" ;;
     prod-owner) echo "owner" ;;
-    prod-shared) echo "second household" ;;
+    prod-shared) echo "second household secrets" ;;
   esac
 }
 # The deploy directory keeps the test cell's earlier name, so its deploy history stays readable.
@@ -142,12 +146,11 @@ fleet_of_cell() {
   return 1
 }
 
-# The workflow names to the cells' own: person is the second person; secrets is skipped.
+# The workflow names to the cells' own: person is the second person.
 normalized_cells() {
   local name out=""
   for name in ${1//,/ }; do
     case "$name" in
-      secrets) echo "cell secrets skipped: it arrives with the secrets cell" >&2; continue ;;
       person) name=second ;;
     esac
     [[ " $out " == *" $name "* ]] || out="$out $name"
@@ -181,6 +184,16 @@ cells_in_fleet() {
   fi
   out="${out# }"
   echo "${out// /,}"
+}
+
+# cells_in_fleet without the secrets cell, for the routes that never take it (heartbeats, digest).
+data_cells_in_fleet() {
+  local list
+  list="$(cells_in_fleet "$1" "$2")"
+  list=",$list,"
+  list="${list//,secrets,/,}"
+  list="${list#,}"
+  echo "${list%,}"
 }
 
 # ---- the VPS lock and the lease ----------------------------------------------------------------
@@ -299,10 +312,13 @@ render_app() {
   local key_file
   key_file="$(operator_key_file "$target_env")"
   [ -r "$key_file" ] || die "the operator key for $target_env is missing ($key_file); run host setup"
-  local fleet_cells_value="" household_url=""
+  local fleet_cells_value="" household_url="" secrets_url="" serves_secrets=""
   # The test cell's single fleet serves every cell: SECBOT_FLEET_CELLS stays empty there.
   [ "$fleet" = test ] || fleet_cells_value="$(cells_in_fleet "$fleet" "")"
   household_url="http://$(listen_of "$(fleet_of_cell "$target_env" household)")"
+  secrets_url="http://$(listen_of "$(fleet_of_cell "$target_env" secrets)")"
+  # The key helper's loopback address goes only to the fleet that serves the secrets cell.
+  [[ " $(fleet_cells "$fleet") " == *" secrets "* ]] && serves_secrets=1
   local copy
   copy="$(mktemp -d)"
   cp -a "$app/." "$copy/"
@@ -337,6 +353,8 @@ render_app() {
     fill SECBOT_OPERATOR_KEY optional "$(cat "$key_file")" || exit 1
     fill SECBOT_FLEET_CELLS optional "$fleet_cells_value" || exit 1
     fill SECBOT_HOUSEHOLD_URL optional "$household_url" || exit 1
+    fill SECBOT_SECRETS_URL optional "$secrets_url" || exit 1
+    fill SECBOT_KEY_HELPER_URL optional "${serves_secrets:+${SECBOT_KEY_HELPER_URL:-}}" || exit 1
   ); then
     rm -rf "$copy"
     exit 1
@@ -601,7 +619,7 @@ do_heartbeats() {
   local fleet list deployed
   {
     for fleet in $(fleets_for "$env" "$cells"); do
-      list="$(cells_in_fleet "$fleet" "$cells")"
+      list="$(data_cells_in_fleet "$fleet" "$cells")"
       [ -n "$list" ] || continue
       deployed="$(stat -c %Y "$(fleet_dir "$fleet")/current" 2>/dev/null || echo 0)"
       ops_call "$fleet" GET "/ops/heartbeats?cells=$list" |
@@ -614,6 +632,8 @@ do_snapshot() {
   if ! { [ -n "$env" ] && [ -n "$snapshot_id" ]; }; then die "snapshot needs --env and --snapshot-id"; fi
   with_lock
   local fleet first=1 answer contract=""
+  # The secrets cell is never snapshotted: its records are rebuilt and their credentials rotated.
+  echo "cell secrets skipped: the secrets cell is never snapshotted" >&2
   printf '{"id":"%s","snapshots":[' "$snapshot_id"
   for fleet in $(fleets_of_env "$env"); do
     answer="$(ops_call "$fleet" POST "/ops/snapshot?id=$snapshot_id")" || die "snapshot of $fleet failed"
@@ -642,7 +662,7 @@ do_digest() {
   [ -n "$env" ] || die "digest needs --env"
   local fleet list
   for fleet in $(fleets_for "$env" "$cells"); do
-    list="$(cells_in_fleet "$fleet" "$cells")"
+    list="$(data_cells_in_fleet "$fleet" "$cells")"
     [ -n "$list" ] || continue
     ops_call "$fleet" GET "/ops/digest?cells=$list"
   done | merge_cells

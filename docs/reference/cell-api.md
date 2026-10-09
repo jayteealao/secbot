@@ -28,6 +28,9 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | DELETE | `/rules` | the rule's `{agent, tool, match?}` as it was added | `{removed: Rule}` | 200, 400 (`refused: …`), 404 (no such rule), 413 |
 | GET | `/activity?month=YYYY-MM&before=<n>&limit=<1-200>` | none; `month` defaults to the current month in the cell's time zone, `limit` to 50 | `{person, month, timeZone, total, records: [ActivityRecord], next, spentUsd, live: [ActivityRecord]}`, newest first; pass `next` as `before` for the next older page (`null` when none is left); `spentUsd` is the person's spend in the month; `live` holds the jobs running or waiting now (first page of the current month only, otherwise empty) | 200, 400 (a bad parameter) |
 | GET | `/approvals` | none | `{held: [HeldCall]}`: the calls waiting for an answer, oldest first | 200 |
+| GET | `/secrets` | none | `{person, secrets: [{name, kind, grants, allowed, keyId, createdAt}]}`: the person's secrets with their kind (`secret`, `health`, or `production`), the agents each is granted to, and the agents the owner's allowlist lets the person grant it to; never a value | 200, 503 (`refused: secrets cell unavailable`) |
+| POST | `/secrets/grants` | `{"secret", "agent"}` (at most 16 KiB); the agent is one of this person's roles | `{person, secret, agent, granted}` | 201 (granted), 200 (already granted), 400 (`refused: no agent named <agent>`, `refused: no secret named <secret>`, `refused: <secret> is not in the owner's allowlist for <agent>`), 413, 503 |
+| DELETE | `/secrets/grants` | `{"secret", "agent"}` | `{person, secret, agent, revoked}` | 200, 400, 413, 503 |
 | POST | `/approvals/{n}` | `{"answer": "allow" \| "always" \| "deny"}` (at most 16 KiB) | `{number, status, answer, agent, tool, summary, answeredBy, rule}` (`rule` is the person rule allow always added, or `null`) | 200, 400 (a bad body, or `refused: …`), 404 (`no held call #n`), 409 (`{"error": "lapsed"}` or `{"error": "answered"}`), 413 |
 
 ### Spend and limits
@@ -247,6 +250,11 @@ mode.
 | GET | `/ops/digest?cells=` | Each cell's digest and row count. |
 | GET | `/ops/heartbeats?cells=` | Each cell's heartbeat routine state. |
 | POST | `/ops/write` | One committed single-row write (the test cell only). |
+| GET | `/ops/secrets?cell=<person>` | That person's secrets, as `GET /secrets`. |
+| PUT | `/ops/secrets?cell=<person>` | Adds or replaces a secret: body `{"name", "value", "broker"?: {"kind": "health" \| "production", "url", "header"}}`; `{person, name, keyId, replaced}`. The value is sealed at once and never answered back. A broker secret is never returned to an agent: the secrets cell makes those calls itself. |
+| PUT | `/ops/secrets/allowlist?cell=<person>` | Body `{"secret", "agent"}`: lets that person grant the secret to that agent; `{person, secret, agent, changed, revoked}`. |
+| DELETE | `/ops/secrets/allowlist?cell=<person>` | Removes the entry and revokes a grant made under it, in one write; `revoked` says whether one was. |
+| POST | `/ops/secrets/rotate` | Makes the next master key current on the host and re-wraps every record under it in batches; `{from, keyId, rewrapped, remaining}`. A read during the rotation decrypts under whichever key its record carries. |
 | GET | `/ops/rules?cell=<person>` | Both levels of that person's rules, as `GET /rules`. |
 | POST | `/ops/rules?cell=<person>` | Adds an owner rule for that person's agents (body as `POST /rules`); 201 `{rule}`. |
 | DELETE | `/ops/rules?cell=<person>` | Removes an owner rule (body as `DELETE /rules`); the release rule is refused with 400. |
@@ -263,6 +271,12 @@ mode.
 `<person>` is `owner` or `second` (`person` also names the second cell). A cell this fleet does not
 serve answers 404 `cell <name> is served by another fleet`; a cell that is not a person cell
 answers 404. No device-key route changes a limit, the developer budget, or the time zone.
+
+The secrets cell is never snapshotted, restored, wiped, or digested: without `cells=` those
+routes and `/ops/heartbeats` leave it out, and naming it answers 400 (restore: 403). A refused
+secrets request answers 400 `refused: <reason>`; when the secrets cell cannot be reached or has
+no usable key, 503 `refused: secrets cell unavailable`. No device-key route adds a secret, sets
+the allowlist, or rotates a key.
 
 ## Household routes: `/internal/household/…`
 
@@ -282,6 +296,52 @@ A `SpendReport` is `{opId, cell, month, timeZone, at, spentUsd, limitUsd, mode, 
 byLayer, byRole, developerUsd, developerLimitUsd, developerLines}`. Person cells report after their
 spend changes (at most every 5 seconds, at once when a line is reached). The board is a report of
 each cell's own ledger: a person's limit is decided in that person's cell only.
+
+## Secrets routes: `/internal/secrets/…`
+
+Auth: the operator key. A person cell (and the owner routes) in another fleet calls these to reach
+the secrets cell; in the secrets cell's own fleet the same methods go through its binding. Every
+answer is `{ok: true, value}` or `{ok: false, status, error}`, with that status on the response.
+The caller tries a call three times on no answer or a 5xx, except `broker`, which is never
+repeated.
+
+| Method | Path | Request | Response |
+| --- | --- | --- | --- |
+| POST | `/internal/secrets/get` | `{person, agent, name}` | `{value}` for a granted secret that is not a broker secret |
+| POST | `/internal/secrets/broker` | `{person, agent, name, request: {method, path, body?}}` | `{status, body}`: the target's answer (at most 64 KiB) with the token and token-shaped text redacted; status 0 when the target did not answer in 30 s. Redirects are not followed. |
+| POST | `/internal/secrets/list` | `{person}` | the person's secrets, as `GET /secrets` |
+| POST | `/internal/secrets/grant` | `{person, secret, agent}` | `{granted}` |
+| POST | `/internal/secrets/revoke` | `{person, secret, agent}` | `{revoked}` |
+| POST | `/internal/secrets/add` | `{person, name, value, broker?}` | `{keyId, replaced}` |
+| POST | `/internal/secrets/allowlist` | `{person, secret, agent, action: "add" \| "remove"}` | `{changed, revoked}` |
+| POST | `/internal/secrets/rotate` | `{}` | `{from, keyId, rewrapped, remaining}` |
+| POST | `/internal/secrets/redaction-values` | `{person}` | `{values}`: the person's granted plain secret values, which the person cell's redactor learns |
+
+Statuses: 200; 400 for a refusal (the reasons `no secret named <name>`, `<name> is not in the
+owner's allowlist for <agent>`, `<name> is not granted to <agent>`, `<name> is used only through
+the broker`, `<name> is not a broker secret`, or a bad name, value, or request); 401 without the
+operator key; 503 when the key helper does not answer or its key files are not usable; 500 for any
+other failure. Each refusal logs one `secret.refused {action, person, agent, secret, reason}` line,
+never a value.
+
+The agents reach these through two tools: `secret_get {name}` and `broker_call {secret, method,
+path, body?}`. A refusal is a `secrets`-layer activity record with the tool `secret <name>` or
+`broker <name>` and the reason.
+
+### The key helper (host only)
+
+The secrets cell's master keys stay in key files on the host, read only by
+`secbot-key-helper@<env>` (the celld user, `127.0.0.1` only). It answers sockets owned by the
+celld user and refuses any other peer with 403. The cell calls it at `SECBOT_KEY_HELPER_URL`:
+
+| Method | Path | Request | Response |
+| --- | --- | --- | --- |
+| GET | `/health` | none | `{ok: true, current, keyIds}`, or `{ok: false, reason}` (`key file missing`, `key file readable by other users`, `key directory readable by other users`) |
+| POST | `/derive` | `{keyId, info}` | `{key}`: base64 of HKDF-SHA256 of that key file for `info` (one record's key-encryption key); never the key file's bytes |
+| POST | `/rotate` | `{from}` | `{current}`: makes the next key current when `from` is still current; otherwise answers the current id, so a repeated rotate makes one key |
+
+The checks run on every request. When the helper is down or a key file is wrong, the secrets cell
+refuses to start, logs `secrets.refused_start {reason}`, and every secrets route answers 503.
 
 A failed call is logged on both sides: `household.call` with `outcome: "refused" | "failed"`,
 `status`, and the error on the caller; `household.refused` or `household.error` on the household

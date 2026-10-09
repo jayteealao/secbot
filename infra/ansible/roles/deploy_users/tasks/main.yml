@@ -135,6 +135,7 @@
       SECBOT_PRIVATE_HOSTS={{ lookup('ansible.builtin.env', 'SECBOT_PRIVATE_HOSTS') }}
       SECBOT_HEARTBEAT_URLS={{ lookup('ansible.builtin.env', item.heartbeats_env, default='') }}
       SECBOT_TIME_ZONE={{ lookup('ansible.builtin.env', 'SECBOT_TIME_ZONE', default='') }}
+      SECBOT_KEY_HELPER_URL=http://127.0.0.1:{{ secbot_key_helper_ports[item.env] }}
     owner: root
     group: "{{ item.group }}"
     mode: "0640"

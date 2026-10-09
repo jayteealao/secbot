@@ -15,6 +15,8 @@
  *   secbot mode show | set | decision <person>   (operator key)
  *   secbot cost [--person <name> | --owner]  (another person or the household: operator key)
  *   secbot limits show | set <person> <usd> | developer <usd> | zone <IANA>   (operator key)
+ *   secbot secrets list | grant | revoke     (a person's own; --person <name>: operator key)
+ *   secbot secrets add | allowlist | rotate  (operator key; add reads the value from stdin)
  *
  * The owner's views of another person use the operator key (SECBOT_OPERATOR_KEY, or operator.json
  * in the config folder), sent only to the operator routes.
@@ -40,6 +42,7 @@ import {
   rulesList,
   rulesRemove,
 } from "./commands/rules.ts";
+import { secrets } from "./commands/secrets.ts";
 import { specialistAdd } from "./commands/specialist.ts";
 import { CliError, type Environment } from "./config.ts";
 import { type Io, processIo } from "./io.ts";
@@ -72,6 +75,15 @@ const USAGE = `usage:
   secbot limits zone <IANA time zone>               (operator key)
       above a limit, hand-offs, routines, and reminders wait; chat with the
       lead continues; nothing is dropped
+  secbot secrets list [--person <name> (operator key)]
+  secbot secrets grant <secret> <agent>
+  secbot secrets revoke <secret> <agent>
+  secbot secrets add --person <name> <secret>       (operator key)
+      [--broker health|production --url <url> --header <name>]
+      the value is read from standard input and never printed
+  secbot secrets allowlist --person <name> add|remove <secret> <agent>
+                                                    (operator key)
+  secbot secrets rotate                             (operator key)
 `;
 
 /** `text` with every line wider than 80 columns wrapped, continuing two spaces further in. */
@@ -113,6 +125,9 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
         person: { type: "string" },
         month: { type: "string" },
         page: { type: "string" },
+        broker: { type: "string" },
+        url: { type: "string" },
+        header: { type: "string" },
       },
     });
     const [command, sub, ...rest] = positionals;
@@ -176,6 +191,16 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
     }
     if (command === "limits") {
       return await limits(() => OperatorClient.from(environment, options.fetch), io, sub, rest);
+    }
+    if (command === "secrets") {
+      return await secrets(
+        client,
+        () => OperatorClient.from(environment, options.fetch),
+        io,
+        sub,
+        rest,
+        { person: values.person, broker: values.broker, url: values.url, header: values.header },
+      );
     }
     if (command === "activity" && sub === undefined) {
       const target =

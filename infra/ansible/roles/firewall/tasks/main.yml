@@ -1,8 +1,9 @@
-# Firewall rules for the celld ports only. The role never resets ufw, never enables or disables
-# it, and never touches the SSH rules or any other rule: the VPS runs other software.
-# Binding already keeps the ports private (workers on the private-network address, internal
-# listeners on loopback); these rules are the second layer. One worker port and one internal
-# port per fleet (celld_ports in group_vars/all.yml).
+# Firewall rules for the celld and key helper ports only. The role never resets ufw, never
+# enables or disables it, and never touches the SSH rules or any other rule: the VPS runs other
+# software. Binding already keeps the ports private (workers on the private-network address,
+# internal listeners and key helpers on loopback); these rules are the second layer. One worker
+# port and one internal port per fleet (celld_ports), one key helper port per environment
+# (secbot_key_helper_ports), both in group_vars/all.yml.
 - name: Admit each fleet's worker port on the private-network interface
   community.general.ufw:
     rule: allow
@@ -25,6 +26,15 @@
   loop: >-
     {{ (celld_ports | dict2items | map(attribute='value.worker') | list)
        + (celld_ports | dict2items | map(attribute='value.internal') | list) }}
+
+- name: Refuse the key helper ports on every interface (the helpers bind loopback only)
+  community.general.ufw:
+    rule: deny
+    direction: in
+    port: "{{ item | string }}"
+    proto: tcp
+    comment: secbot key helper (loopback only)
+  loop: "{{ secbot_key_helper_ports.values() | list }}"
 
 - name: Read whether ufw is active
   ansible.builtin.command: ufw status

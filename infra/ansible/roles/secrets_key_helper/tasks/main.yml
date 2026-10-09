@@ -1,0 +1,112 @@
+# The secrets cell's host key helper: one secbot-key-helper@<env> unit per environment, run as the
+# celld user on a loopback port, holding that environment's master keys in
+# /etc/secbot/secrets-keys/<env>/ (celld, 0700; each key file celld, 0400). The first key is made
+# here once and never shown, copied, or committed; a rotation makes the next one on the host.
+# The role installs no package or runtime: it stops with a message when /usr/bin/python3 is
+# missing or older than 3.8.
+- name: Choose the environments this run sets up a key helper for
+  ansible.builtin.set_fact:
+    secrets_key_helper_envs: >-
+      {{ ['test-cell'] + (['production'] if (celld_production | default(false) | bool) else []) }}
+
+- name: Read the host's python3 version (the helper uses the standard library only)
+  ansible.builtin.command: /usr/bin/python3 -I -c "import sys; print('%d.%d' % sys.version_info[:2])"
+  register: secrets_key_helper_python
+  changed_when: false
+  failed_when: false
+
+- name: Stop when python3 is missing or older than 3.8 (this role never installs it)
+  ansible.builtin.assert:
+    that:
+      - secrets_key_helper_python.rc == 0
+      - secrets_key_helper_python.stdout is version('3.8', '>=')
+    fail_msg: >-
+      The secrets cell's key helper needs /usr/bin/python3 3.8 or later on the VPS, and host setup
+      never installs a runtime. Found: {{ secrets_key_helper_python.stdout | default('none', true) }}.
+    quiet: true
+
+- name: Install the key helper
+  ansible.builtin.copy:
+    src: secbot-key-helper
+    dest: /usr/local/bin/secbot-key-helper
+    owner: root
+    group: root
+    mode: "0755"
+  notify: Restart the key helpers
+
+- name: Create the key directory root
+  ansible.builtin.file:
+    path: /etc/secbot/secrets-keys
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Create each environment's key directory (celld only)
+  ansible.builtin.file:
+    path: "/etc/secbot/secrets-keys/{{ item }}"
+    state: directory
+    owner: celld
+    group: celld
+    mode: "0700"
+  loop: "{{ secrets_key_helper_envs }}"
+
+# Made once: `creates:` keeps a repeat run from replacing a key the secrets cell sealed under.
+- name: Create each environment's first master key once (never shown)
+  ansible.builtin.shell: |
+    set -o pipefail
+    umask 077
+    head -c 32 /dev/urandom > "/etc/secbot/secrets-keys/{{ item }}/k1.key"
+  args:
+    executable: /bin/bash
+    creates: "/etc/secbot/secrets-keys/{{ item }}/k1.key"
+  loop: "{{ secrets_key_helper_envs }}"
+  no_log: true
+
+- name: Give the first master key to the celld user, readable by it alone
+  ansible.builtin.file:
+    path: "/etc/secbot/secrets-keys/{{ item }}/k1.key"
+    owner: celld
+    group: celld
+    mode: "0400"
+  loop: "{{ secrets_key_helper_envs }}"
+
+# force: false: after a rotation the helper rewrites `current`; host setup never sets it back.
+- name: Name the first key current, once
+  ansible.builtin.copy:
+    dest: "/etc/secbot/secrets-keys/{{ item }}/current"
+    content: "k1\n"
+    owner: celld
+    group: celld
+    mode: "0400"
+    force: false
+  loop: "{{ secrets_key_helper_envs }}"
+
+- name: Write each key helper's port (not a secret)
+  ansible.builtin.copy:
+    dest: "/etc/secbot/secbot-key-helper-{{ item }}.env"
+    content: "SECBOT_KEY_HELPER_PORT={{ secbot_key_helper_ports[item] }}\n"
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ secrets_key_helper_envs }}"
+  notify: Restart the key helpers
+
+- name: Install the key helper unit template
+  ansible.builtin.template:
+    src: secbot-key-helper@.service.j2
+    dest: /etc/systemd/system/secbot-key-helper@.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd for the key helpers
+    - Restart the key helpers
+
+- name: Enable and start each environment's key helper
+  ansible.builtin.systemd_service:
+    name: "secbot-key-helper@{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ secrets_key_helper_envs }}"
