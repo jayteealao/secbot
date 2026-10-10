@@ -110,7 +110,10 @@ naming the owner rule. A call these rules hold is not offered `allow always`.
 
 Every cell starts in shadow mode: rules and approvals apply, and the decision model and the
 reviewer record what they would have done. Read at least a week of shadow verdicts in
-`secbot activity --person <name>` first, then:
+`secbot activity --person <name>` first. With the low release thresholds, watch the reminders and
+history searches the decision model would mark: many marks on plain calls mean many held calls
+once the cell enforces. Then:
+
 
 ```
 $ secbot mode set sam enforce
