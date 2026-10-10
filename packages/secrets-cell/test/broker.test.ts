@@ -5,7 +5,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
-import { brokerCall, checkRequest } from "../src/broker.ts";
+import { BrokerRequestRefused, brokerCall, checkRequest, checkTarget } from "../src/broker.ts";
 import { testCustody } from "../src/key-custody.ts";
 import { SecretsCell } from "../src/secrets-cell.ts";
 
@@ -149,6 +149,27 @@ describe("brokerCall", () => {
       { method: "GET", path: "/steps" },
     );
     expect(answer).toEqual({ status: 0, body: "The service did not answer." });
+  });
+});
+
+describe("checkTarget", () => {
+  const target = (url: string) => ({ kind: "health", url, header: "authorization" });
+
+  it("refuses plain http to a host that is not loopback", () => {
+    expect(() => checkTarget(target("http://health.example.test/api"))).toThrow(
+      BrokerRequestRefused,
+    );
+  });
+
+  it("accepts plain http on loopback, and https anywhere", () => {
+    for (const url of [
+      "http://127.0.0.1:9/api",
+      "http://localhost/api",
+      "http://[::1]/api",
+      "https://health.example.test/api",
+    ]) {
+      expect(checkTarget(target(url)).url).toBe(url);
+    }
   });
 });
 

@@ -21,6 +21,8 @@ const BROKER_REQUEST_LIMIT = 64 * 1024;
 
 const METHODS = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 const HEADER = /^[A-Za-z][A-Za-z0-9-]{0,63}$/;
+/** A loopback host name, as the URL parser gives it: plain http is allowed only here. */
+const LOOPBACK = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])$/;
 
 /** A request the broker refuses before it calls; the message is the reason a person reads. */
 export class BrokerRequestRefused extends Error {
@@ -55,6 +57,9 @@ export function checkTarget(target: unknown): BrokerTarget {
     url.hash !== ""
   ) {
     throw new BrokerRequestRefused("a broker target needs an http or https address");
+  }
+  if (url.protocol === "http:" && !LOOPBACK.test(url.hostname)) {
+    throw new BrokerRequestRefused("a broker target needs an https address, or http on loopback");
   }
   return {
     kind: value.kind,
