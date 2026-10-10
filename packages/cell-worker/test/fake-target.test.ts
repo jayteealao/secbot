@@ -11,7 +11,7 @@ import conformanceWorker, {
 import { OPERATOR_HEADER } from "../src/internal-rpc.ts";
 
 const TOKEN = "hb-test-token-5c1e9a7b3d2f4e60"; // gitleaks:allow (fake test token)
-const CELL = "http://cells.example.test";
+const CELL = "https://cells.example.test";
 
 const noCell: DurableObjectNamespaceLike = {
   idFromName: (name) => name,

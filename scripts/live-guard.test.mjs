@@ -339,6 +339,23 @@ test("preflight prints SET or missing and never a value", async () => {
     assert.ok(ready.lines.includes("device key listed for its person  yes"));
     for (const line of ready.lines.slice(0, -1))
       assert.match(line.slice(PREFLIGHT_PAD - 2), /^ {2}\S/);
+    // The broker takes plain http only on loopback, so a plain http fake target elsewhere is refused.
+    const reason =
+      "refused: the secrets cell accepts plain http broker targets only on loopback; set SECBOT_FAKE_TARGET_URL to an https or loopback address";
+    const plainCell = await preflight({ ...env, SECBOT_CELL_URL: `http://${HOST}` }, dir);
+    assert.equal(plainCell.ok, false);
+    assert.ok(plainCell.lines.includes(`${"SECBOT_FAKE_TARGET_URL".padEnd(PREFLIGHT_PAD)}${reason}`));
+    assert.ok(!plainCell.lines.join("\n").includes(HOST), "a value was printed");
+    const plainTarget = await preflight(
+      { ...env, SECBOT_FAKE_TARGET_URL: `http://${HOST}/fake-target` },
+      dir,
+    );
+    assert.equal(plainTarget.ok, false);
+    for (const loopback of ["http://localhost:8787", "http://127.0.0.1:8787", "http://[::1]:8787"]) {
+      const local = await preflight({ ...env, SECBOT_FAKE_TARGET_URL: loopback }, dir);
+      assert.equal(local.ok, true);
+      assert.ok(local.lines.includes(`${"SECBOT_FAKE_TARGET_URL".padEnd(PREFLIGHT_PAD)}SET`));
+    }
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

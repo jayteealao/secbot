@@ -155,7 +155,9 @@ after the owner says yes. Put the SSH config alias of the VPS in your shell as `
 and keep every value in your shell.
 
 1. Preflight, which prints `SET` or `missing` for each setting and never a value:
-   `mise run live:guard -- preflight`. Go on only after `preflight: ready`.
+   `mise run live:guard -- preflight`. Go on only after `preflight: ready`. The fake target
+   (`SECBOT_FAKE_TARGET_URL`, or the cell address + `/fake-target`) must be an https address or a
+   loopback address.
 2. Build and stage: `pnpm -r run build`, then build the bundle and run
    `node scripts/vps.mjs dry-run`.
 3. Set up the host and deploy the test cell: `mise run host:setup`, then stage and deploy with

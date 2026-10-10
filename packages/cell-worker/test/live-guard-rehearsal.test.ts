@@ -320,7 +320,8 @@ describe("the live guard check, rehearsed on the stand-in", () => {
       now: () => Date.now(),
       sleep: (ms: number) => new Promise((done) => setTimeout(done, Math.min(ms, 1_500))),
     };
-    const fakeTarget = `${CELL_URL}/fake-target`;
+    // The secrets cell takes plain http targets only on loopback, so the fake target is https.
+    const fakeTarget = `https://${HOST}/fake-target`;
     const values = {
       "cell-url": CELL_URL,
       "fake-target": fakeTarget,

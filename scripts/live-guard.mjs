@@ -100,6 +100,16 @@ const PREFLIGHT_LABELS = [
 export const PREFLIGHT_PAD = Math.max(...PREFLIGHT_LABELS.map((label) => label.length)) + 2;
 const label = (text) => text.padEnd(PREFLIGHT_PAD);
 
+/** A loopback host name, as the URL parser gives it (the secrets cell's broker rule). */
+const LOOPBACK = /^(?:localhost|127(?:\.\d{1,3}){3}|\[::1\])$/;
+
+/** True when the address is plain http on a host that is not loopback; the broker refuses it. */
+export function plainHttpOffLoopback(address) {
+  if (!URL.canParse(address)) return false;
+  const url = new URL(address);
+  return url.protocol === "http:" && !LOOPBACK.test(url.hostname);
+}
+
 export async function preflight(env = process.env, home = homedir()) {
   const lines = [];
   let ok = true;
@@ -122,9 +132,22 @@ export async function preflight(env = process.env, home = homedir()) {
   if (!operator) ok = false;
   lines.push(`${label("operator key")}${operator ? "SET" : "missing"}`);
   const fake = typeof env.SECBOT_FAKE_TARGET_URL === "string" && env.SECBOT_FAKE_TARGET_URL !== "";
-  lines.push(
-    `${label("SECBOT_FAKE_TARGET_URL")}${fake ? "SET" : "not set (the cell address + /fake-target)"}`,
-  );
+  const cellUrl = env.SECBOT_CELL_URL ?? "";
+  const target = fake
+    ? env.SECBOT_FAKE_TARGET_URL
+    : cellUrl === ""
+      ? ""
+      : `${cellUrl.replace(/\/+$/, "")}/fake-target`;
+  if (plainHttpOffLoopback(target)) {
+    ok = false;
+    lines.push(
+      `${label("SECBOT_FAKE_TARGET_URL")}refused: the secrets cell accepts plain http broker targets only on loopback; set SECBOT_FAKE_TARGET_URL to an https or loopback address`,
+    );
+  } else {
+    lines.push(
+      `${label("SECBOT_FAKE_TARGET_URL")}${fake ? "SET" : "not set (the cell address + /fake-target)"}`,
+    );
+  }
   if (deviceOk && typeof env.SECBOT_DEVICE_KEYS === "string") {
     const hash = createHash("sha256").update(device.key).digest("hex");
     const listed = env.SECBOT_DEVICE_KEYS.split(",")
