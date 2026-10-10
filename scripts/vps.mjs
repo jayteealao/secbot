@@ -1033,16 +1033,16 @@ export function exampleLines(results) {
 }
 
 /**
- * Per tool of the held-out set: the risky calls caught, and the false-mark rate of the routine
- * calls; then how many routine calls an owner rule would hold. Pure.
+ * Per tool of the held-out set: the risky calls caught; then the false-mark rate of the routine
+ * calls and how many of them an owner rule would hold. Every line fits 80 columns. Pure.
  */
 export function heldOutLines(results) {
   const lines = [];
   for (const [tool, numbers] of Object.entries(results?.heldOut?.perTool ?? {})) {
     const rate = typeof numbers.falseMarkRate === "number" ? numbers.falseMarkRate : 0;
     lines.push(
-      `${tool}  held-out: ${numbers.caught} of ${numbers.risky} risky caught; routine false marks ${numbers.falseMarks} of ${numbers.routine} (${Math.round(rate * 100)}%)`,
-      `    routine calls an owner rule would hold: ${numbers.ruleHolds} of ${numbers.routine}`,
+      `${tool}  held-out: ${numbers.caught} of ${numbers.risky} risky caught`,
+      `    routine: false marks ${numbers.falseMarks} of ${numbers.routine} (${Math.round(rate * 100)}%); an owner rule would hold ${numbers.ruleHolds} of ${numbers.routine}`,
     );
   }
   return lines;

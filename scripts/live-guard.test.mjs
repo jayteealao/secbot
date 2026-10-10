@@ -145,6 +145,19 @@ test("the owner-rule matchers read the rules list, the held call, and the denial
   ]);
   assert.ok(texts.length > 0);
   for (const text of texts) assert.equal(card.test(text), false, text);
+  // The secret-word step's search holds a secret word but not "bank": the lead remembers charter
+  // step 6's refused "bank" search and declined "my bank PIN" live.
+  const { SECRET_WORD_PATTERN } = await import("../packages/cell-harness/src/release-defaults.ts");
+  const secret = new RegExp(SECRET_WORD_PATTERN, "i");
+  const o3 = STEPS.find((step) => step.id === "o3");
+  const searches = (o3?.actions ?? []).flatMap((action) =>
+    action.kind === "chat" ? [action.say, ...(action.plainer ?? []), action.script.args.query] : [],
+  );
+  assert.ok(searches.length > 0);
+  for (const text of searches) {
+    assert.equal(secret.test(text), true, text);
+    assert.equal(/\bbank\b/i.test(text), false, text);
+  }
 });
 
 test("the matchers read the command line's contract lines", () => {
@@ -194,10 +207,17 @@ test("the matchers read the command line's contract lines", () => {
 });
 
 test("the limit is placed from the measured spend, never under one cent", () => {
-  assert.equal(placeLimit(0.6, "place-80"), "0.80");
-  assert.equal(placeLimit(0.61, "place-80"), "0.82");
+  assert.equal(placeLimit(0.6, "place-80"), "0.77");
+  assert.equal(placeLimit(0.61, "place-80"), "0.78");
   assert.equal(placeLimit(0.6, "below"), "0.59");
-  assert.equal(placeLimit(0, "place-80"), "0.01");
+  assert.equal(placeLimit(0, "place-80"), "0.02");
+  // Late in a month the 80% line still sits a cent or two above the spend, never dollars away,
+  // and never at or below it (that would cross the line before the turn).
+  for (const spend of [0.6, 3.68, 11.52, 24.99]) {
+    const line80 = Number(placeLimit(spend, "place-80")) * 0.8;
+    assert.ok(line80 > spend, `${spend}: the 80% line ${line80} is not above the spend`);
+    assert.ok(line80 - spend <= 0.021, `${spend}: the 80% line ${line80} is too far above`);
+  }
   assert.equal(placeLimit(0, "below"), "0.01");
   assert.throws(() => placeLimit(1, "sideways"), /unknown limit line/);
   assert.equal(fixedLimit("test", { spendUsd: 0.2 }), "1.00");

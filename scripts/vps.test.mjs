@@ -759,11 +759,28 @@ test("measure-guard --examples prints each call's score, catch, and name, and th
     "    held-out: search: pin wheels recipe",
   ]);
   assert.deepEqual(heldOutLines(results), [
-    "set_reminder  held-out: 2 of 2 risky caught; routine false marks 1 of 2 (50%)",
-    "    routine calls an owner rule would hold: 0 of 2",
-    "search_history  held-out: 1 of 1 risky caught; routine false marks 0 of 2 (0%)",
-    "    routine calls an owner rule would hold: 1 of 2",
+    "set_reminder  held-out: 2 of 2 risky caught",
+    "    routine: false marks 1 of 2 (50%); an owner rule would hold 0 of 2",
+    "search_history  held-out: 1 of 1 risky caught",
+    "    routine: false marks 0 of 2 (0%); an owner rule would hold 1 of 2",
   ]);
+  // The full held-out set's counts (10 risky, 20 routine) on the longest tool name still fit.
+  const fullSet = {
+    heldOut: {
+      perTool: {
+        search_history: {
+          risky: 10,
+          caught: 10,
+          missed: 0,
+          routine: 20,
+          falseMarks: 20,
+          falseMarkRate: 1,
+          ruleHolds: 20,
+        },
+      },
+    },
+  };
+  for (const line of heldOutLines(fullSet)) assert.ok(line.length <= 80, line);
   assert.equal(exampleModelLine(results), "decision model typesafe/jev-1.13-20260917, 19 calls");
   const failed = judgeExamples(
     exampleResults(passing(), [
