@@ -3,8 +3,9 @@
 // change stays inside Secbot's scope (no VPS-wide journald config, no filter in the file the
 // release tool sources), and the secrets cell's key helper role.
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -282,4 +283,81 @@ test("the release tool refuses --examples and --repeat outside the guard bench's
     assert.equal(status, 1, command);
     assert.match(stderr, message, command);
   }
+});
+
+/**
+ * Runs the release tool's do_snapshot for production against a temporary deploy directory.
+ * `deployed` lists the fleets that have a current deploy; `failing` lists the fleets whose
+ * snapshot call fails. The lock and the operator call are stubs: the stub answers like a cell.
+ */
+function snapshotRun({ deployed, failing = [] }) {
+  const deploys = mkdtempSync(join(tmpdir(), "secbot-snapshot-"));
+  try {
+    for (const fleet of deployed) mkdirSync(join(deploys, fleet, "current"), { recursive: true });
+    const oneLiner = (name) => {
+      const line = new RegExp(`^${name}\\(\\) \\{.*\\}$`, "m").exec(releaseTool)?.[0];
+      assert.ok(line, `${name} is defined`);
+      return line;
+    };
+    const script = [
+      "set -euo pipefail",
+      `DEPLOYS='${deploys}'`,
+      "env=production snapshot_id=pre-v1.0.0-1",
+      `failing=' ${failing.join(" ")} '`,
+      'die() { echo "secbot-release: $*" >&2; exit 1; }',
+      "with_lock() { :; }",
+      'ops_call() { [[ "$failing" != *" $1 "* ]] || return 1; echo "{\\"snapshots\\":[{\\"cell\\":\\"$1-cell\\"}],\\"contractStep\\":3}"; }',
+      shellFunction("fleets_of_env"),
+      "}",
+      oneLiner("fleet_dir"),
+      shellFunction("do_snapshot"),
+      "}",
+      "do_snapshot",
+    ].join("\n");
+    const { status, stdout, stderr } = spawnSync("bash", ["-s"], {
+      input: script,
+      encoding: "utf8",
+    });
+    return { status, stdout, stderr };
+  } finally {
+    rmSync(deploys, { recursive: true, force: true });
+  }
+}
+
+test("the first release's snapshot skips the fleets that were never deployed", {
+  skip: process.platform === "win32" ? "needs a Linux bash" : false,
+}, () => {
+  const none = snapshotRun({ deployed: [] });
+  assert.equal(none.status, 0, none.stderr);
+  assert.deepEqual(JSON.parse(none.stdout), {
+    id: "pre-v1.0.0-1",
+    snapshots: [],
+    contractStep: 0,
+  });
+  for (const fleet of ["prod-owner", "prod-shared"]) {
+    assert.ok(
+      none.stderr.includes(`fleet ${fleet} skipped: nothing deployed yet, so nothing to snapshot`),
+      none.stderr,
+    );
+  }
+
+  // A fleet with a deploy is still snapshotted, and its failed snapshot still stops the release.
+  const failed = snapshotRun({ deployed: ["prod-shared"], failing: ["prod-shared"] });
+  assert.equal(failed.status, 1);
+  assert.match(failed.stderr, /secbot-release: snapshot of prod-shared failed/);
+
+  const partial = snapshotRun({ deployed: ["prod-shared"] });
+  assert.equal(partial.status, 0, partial.stderr);
+  assert.deepEqual(JSON.parse(partial.stdout), {
+    id: "pre-v1.0.0-1",
+    snapshots: [{ cell: "prod-shared-cell" }],
+    contractStep: 3,
+  });
+
+  const both = snapshotRun({ deployed: ["prod-owner", "prod-shared"] });
+  assert.equal(both.status, 0, both.stderr);
+  assert.deepEqual(
+    JSON.parse(both.stdout).snapshots.map((item) => item.cell),
+    ["prod-owner-cell", "prod-shared-cell"],
+  );
 });
