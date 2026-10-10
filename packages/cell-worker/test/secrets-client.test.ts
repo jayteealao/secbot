@@ -121,4 +121,20 @@ describe("the secrets client over HTTP", () => {
       attempts: 3,
     });
   });
+
+  it("sends a revoke once: a network failure is not retried", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const paths: string[] = [];
+    const fetcher: typeof fetch = async (input, init) => {
+      paths.push(new URL(new Request(input, init).url).pathname);
+      throw new TypeError("network connection lost");
+    };
+    const client = httpSecretsClient(URL_BASE, KEY, fetcher);
+    await expect(client.revoke("owner", "test-secret", "research")).rejects.toThrow(
+      SecretsUnavailable,
+    );
+    expect(paths).toEqual(["/internal/secrets/revoke"]);
+  });
 });

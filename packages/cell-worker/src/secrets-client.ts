@@ -2,8 +2,8 @@
  * How a person cell (and the owner's routes) reach the secrets cell: over the private network at
  * `<SECBOT_SECRETS_URL>/internal/secrets/*` with the operator key when that var is set, otherwise
  * through the `SECRETS_CELL` binding's stub in one fleet. Over HTTP (internal-rpc.ts): three
- * attempts on a network error or a 5xx, a 4xx final; a brokered call and a rotation are sent once,
- * because the first attempt may have acted.
+ * attempts on a network error or a 5xx, a 4xx final; a brokered call, a revoke, and a rotation are
+ * sent once, because the first attempt may have acted.
  *
  * The secrets cell answers every method with `SecretsAnswer`; this client turns a refusal (4xx)
  * into `SecretsRefused` with the cell's reason and no answer (or 5xx) into `SecretsUnavailable`.
@@ -76,8 +76,11 @@ export const SECRETS_CALLS: Readonly<Record<SecretsMethod, SecretsCall>> = {
 export const isSecretsMethod = (method: string): method is SecretsMethod =>
   Object.hasOwn(SECRETS_CALLS, method);
 
-/** Calls that are never repeated: the first attempt may have acted. */
-const SENT_ONCE: ReadonlySet<SecretsMethod> = new Set(["broker", "rotate"]);
+/**
+ * Calls that are never repeated: the first attempt may have acted. A revoke is one of them: a
+ * retry after a lost answer would be refused as "not granted" though the first attempt revoked.
+ */
+const SENT_ONCE: ReadonlySet<SecretsMethod> = new Set(["broker", "rotate", "revoke"]);
 
 export interface SecretsNamespaceLike {
   idFromName(name: string): unknown;
