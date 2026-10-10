@@ -655,12 +655,14 @@ do_snapshot() {
   echo "cell secrets skipped: the secrets cell is never snapshotted" >&2
   printf '{"id":"%s","snapshots":[' "$snapshot_id"
   for fleet in $(fleets_of_env "$env"); do
-    # The first release finds fleets that were never deployed: they hold no cell data yet.
-    if [ ! -e "$(fleet_dir "$fleet")/current" ]; then
-      echo "fleet $fleet skipped: nothing deployed yet, so nothing to snapshot" >&2
+    # A running app is always snapshotted, even when its first deploy stopped before `current`
+    # was linked. Only a failed snapshot of a fleet that was never deployed is skipped: the first
+    # release finds it with no app and no cell data.
+    if ! answer="$(ops_call "$fleet" POST "/ops/snapshot?id=$snapshot_id")"; then
+      [ ! -e "$(fleet_dir "$fleet")/current" ] || die "snapshot of $fleet failed"
+      echo "fleet $fleet skipped: snapshot failed and nothing was ever deployed here" >&2
       continue
     fi
-    answer="$(ops_call "$fleet" POST "/ops/snapshot?id=$snapshot_id")" || die "snapshot of $fleet failed"
     [ -n "$contract" ] || contract="$(grep -o '"contractStep":[0-9]*' <<<"$answer" | head -n1 | cut -d: -f2)"
     [ "$first" = 1 ] || printf ','
     sed -n 's/.*"snapshots":\[\(.*\)\].*/\1/p' <<<"$answer" | tr -d '\n'

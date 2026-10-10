@@ -97,7 +97,8 @@ snapshots every production cell, records the approved attempt in the deploy ledg
 the owner fleet (`--cells owner`), then the shared fleet (`--cells person,household`). Each stage
 runs `check:cells`, `check:alarms`, and `check:heartbeats` before the next. The secrets stage is
 skipped until the repository variable `SECBOT_SECRETS_CELL` is `true`. The first production
-release has nothing to snapshot, so the snapshot step skips fleets that have never had a deploy.
+release has nothing to snapshot, so the snapshot step skips a fleet when its snapshot fails and
+it has never had a deploy.
 
 ## Roll back
 

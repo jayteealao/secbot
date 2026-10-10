@@ -324,10 +324,14 @@ function snapshotRun({ deployed, failing = [] }) {
   }
 }
 
-test("the first release's snapshot skips the fleets that were never deployed", {
+test("the first release's snapshot skips only the fleets that fail and were never deployed", {
   skip: process.platform === "win32" ? "needs a Linux bash" : false,
 }, () => {
-  const none = snapshotRun({ deployed: [] });
+  const skipLine = (fleet) =>
+    `fleet ${fleet} skipped: snapshot failed and nothing was ever deployed here`;
+
+  // (a) No deploy and no running app: both fleets are skipped, and the list is empty.
+  const none = snapshotRun({ deployed: [], failing: ["prod-owner", "prod-shared"] });
   assert.equal(none.status, 0, none.stderr);
   assert.deepEqual(JSON.parse(none.stdout), {
     id: "pre-v1.0.0-1",
@@ -335,25 +339,28 @@ test("the first release's snapshot skips the fleets that were never deployed", {
     contractStep: 0,
   });
   for (const fleet of ["prod-owner", "prod-shared"]) {
-    assert.ok(
-      none.stderr.includes(`fleet ${fleet} skipped: nothing deployed yet, so nothing to snapshot`),
-      none.stderr,
-    );
+    assert.ok(none.stderr.includes(skipLine(fleet)), none.stderr);
   }
 
-  // A fleet with a deploy is still snapshotted, and its failed snapshot still stops the release.
+  // (b) A first deploy stopped before `current` was linked, but the owner app runs: it is
+  // snapshotted, and only the fleet that fails is skipped.
+  const interrupted = snapshotRun({ deployed: [], failing: ["prod-shared"] });
+  assert.equal(interrupted.status, 0, interrupted.stderr);
+  assert.deepEqual(JSON.parse(interrupted.stdout), {
+    id: "pre-v1.0.0-1",
+    snapshots: [{ cell: "prod-owner-cell" }],
+    contractStep: 3,
+  });
+  assert.ok(!interrupted.stderr.includes(skipLine("prod-owner")), interrupted.stderr);
+  assert.ok(interrupted.stderr.includes(skipLine("prod-shared")), interrupted.stderr);
+
+  // (c) A deployed fleet whose snapshot fails still stops the release.
   const failed = snapshotRun({ deployed: ["prod-shared"], failing: ["prod-shared"] });
   assert.equal(failed.status, 1);
   assert.match(failed.stderr, /secbot-release: snapshot of prod-shared failed/);
+  assert.ok(!failed.stderr.includes(skipLine("prod-shared")), failed.stderr);
 
-  const partial = snapshotRun({ deployed: ["prod-shared"] });
-  assert.equal(partial.status, 0, partial.stderr);
-  assert.deepEqual(JSON.parse(partial.stdout), {
-    id: "pre-v1.0.0-1",
-    snapshots: [{ cell: "prod-shared-cell" }],
-    contractStep: 3,
-  });
-
+  // (d) Both fleets deployed: both are snapshotted.
   const both = snapshotRun({ deployed: ["prod-owner", "prod-shared"] });
   assert.equal(both.status, 0, both.stderr);
   assert.deepEqual(
