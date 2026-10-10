@@ -168,11 +168,13 @@ page it names the month before. `--month` and `--page` combine. Activity is kept
 
 Every cell starts in shadow mode. Rules, ask-first rules, and approvals always apply; the decision
 model and the reviewer run on the calls the rules permit and record what they would have done, but
-the call runs. In `secbot activity` such a row reads:
+the call runs. A reminder to "move the savings to the new account on Friday" matches no owner
+rule, but the decision model can still mark it for the reviewer; in `secbot activity` such a row
+reads:
 
 ```
-11:20  lead       set_reminder             would block   reviewer  $0.0061
-         shadow: reminder text holds a card number; the call ran
+11:20  lead       set_reminder             would ask     reviewer  $0.0061
+         shadow: reminder moves the savings to a new account; the call ran
 ```
 
 `would block` and `would ask` are the reviewer's block and ask; the reason says the call ran. In

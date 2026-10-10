@@ -4,8 +4,10 @@
  * A celld cell cannot read a host file (celld v0.6.1 docs/cloudflare-compat.md:157-159: `node:fs`
  * sees only a request-local /tmp and a read-only /bundle), and a value given to it at deploy is
  * stored in the deploy manifest at the bucket provider (crates/celld/deploy.rs:1864-1895). So the
- * master keys stay with the key helper, a small host process run as the celld user that reads
- * /etc/secbot/secrets-keys/<env>/ (infra/ansible/roles/secrets_key_helper). A cell reaches it on a
+ * master keys stay with the key helper, a small host process run as its own system user
+ * (secbot-keys), which alone owns and reads /etc/secbot/secrets-keys/<env>/; the helper answers
+ * only the celld user's connections, and the celld units cannot see the key directory
+ * (infra/ansible/roles/secrets_key_helper, docs/how-to/operate-guard.md). A cell reaches it on a
  * loopback port: celld's outbound fetch has no address filter (crates/celld/js.rs:711-723,
  * 2423-2428, 8702-8760).
  *
