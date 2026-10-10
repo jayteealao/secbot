@@ -1,7 +1,7 @@
 // The guard's routes through the worker on the stand-in: the person's rules and activity behind
 // the device key, the owner's rules and activity behind the operator key, and the refusals.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { route } from "../src/index.ts";
+import { route } from "../src/routes.ts";
 import { closeAll, type GuardSetup, guardSetup, HOST, KEY, OPERATOR_KEY } from "./guard-setup.ts";
 
 const setups: GuardSetup[] = [];

@@ -3,7 +3,7 @@
 // and logged, and no log line holds the key, its hash, or the full host name.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { checkDevice, parseDeviceKeys, sha256Hex } from "../src/device-auth.ts";
-import { route, type WorkerEnv } from "../src/index.ts";
+import { route, type WorkerEnv } from "../src/routes.ts";
 
 const OWNER_KEY = "owner-laptop-key-0123456789abcdef0123456789abcdef";
 const SECOND_KEY = "second-phone-key-0123456789abcdef0123456789abcdef";

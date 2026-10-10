@@ -12,8 +12,8 @@ import {
 } from "@secbot/cell-harness/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "../src/device-auth.ts";
-import { route, type WorkerEnv } from "../src/index.ts";
 import { PersonCell, type SocketLike } from "../src/person-cell.ts";
+import { route, type WorkerEnv } from "../src/routes.ts";
 
 const KEY = "owner-laptop-key-0123456789abcdef0123456789abcdef";
 const HOST = "cells.example.test";

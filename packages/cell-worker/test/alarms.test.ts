@@ -23,8 +23,8 @@ import {
 } from "@secbot/cell-harness/testing";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { alarms, route, type WorkerEnv } from "../src/index.ts";
 import { PERSON_HEADER, PersonCell, type SocketLike } from "../src/person-cell.ts";
+import { alarms, route, type WorkerEnv } from "../src/routes.ts";
 
 class FakeSocket implements SocketLike {
   readonly sent: Record<string, unknown>[] = [];

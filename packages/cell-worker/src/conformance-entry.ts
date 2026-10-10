@@ -5,18 +5,16 @@ import { logEvent } from "@secbot/cell-harness";
 import { ConformanceCell } from "./conformance-cell.ts";
 import { DurabilityLabCell } from "./durability-lab.ts";
 import { GuardBenchCell } from "./guard-bench.ts";
+import { HouseholdCell, PersonCell, SecretsCell } from "./index.ts";
+import { hasOperatorKey } from "./ops.ts";
 import {
   type DurableObjectNamespaceLike,
-  HouseholdCell,
   type LabNamespaceLike,
-  PersonCell,
   route,
-  SecretsCell,
   type WorkerEnv,
-} from "./index.ts";
-import { hasOperatorKey } from "./ops.ts";
+} from "./routes.ts";
 
-export type { DurableObjectNamespaceLike, DurableObjectStubLike } from "./index.ts";
+export type { DurableObjectNamespaceLike, DurableObjectStubLike } from "./routes.ts";
 export {
   ConformanceCell,
   DurabilityLabCell,

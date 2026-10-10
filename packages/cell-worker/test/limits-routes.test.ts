@@ -13,8 +13,8 @@ import {
   until,
 } from "@secbot/cell-harness/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { route } from "../src/index.ts";
 import { PersonCell, type SocketLike } from "../src/person-cell.ts";
+import { route } from "../src/routes.ts";
 import { closeAll, type GuardSetup, guardSetup, HOST, KEY, OPERATOR_KEY } from "./guard-setup.ts";
 
 const setups: GuardSetup[] = [];

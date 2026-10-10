@@ -7,8 +7,8 @@ import { FakeCelldStorage, loggedEvents } from "@secbot/cell-harness/testing";
 import { SecretsCell } from "@secbot/secrets-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { testCustody } from "../../secrets-cell/src/key-custody.ts";
-import { route, type WorkerEnv } from "../src/index.ts";
 import { OPERATOR_HEADER } from "../src/internal-rpc.ts";
+import { route, type WorkerEnv } from "../src/routes.ts";
 import { httpSecretsClient } from "../src/secrets-client.ts";
 
 const KEY = "k".repeat(32);

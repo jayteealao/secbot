@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
 import { ConformanceCell, runConformance, runLongTransaction } from "../src/conformance-cell.ts";
 import conformanceWorker, { type ConformanceEnv } from "../src/conformance-entry.ts";
-import worker, { type WorkerEnv } from "../src/index.ts";
+import worker from "../src/index.ts";
+import type { WorkerEnv } from "../src/routes.ts";
 
 const post = (path: string) => new Request(`http://cell${path}`, { method: "POST" });
 
