@@ -23,6 +23,7 @@ import {
   type TaskRuntime,
   type Tx,
 } from "@earendil-works/pi-durable";
+import { needsReopen } from "@secbot/cell-storage";
 import { appendRecord } from "./activity.ts";
 import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
@@ -31,6 +32,14 @@ import { ROUTINE_KIND_PREFIX } from "./wake-times.ts";
 
 /** A failed one-off routine (a reminder whose delivery threw) tries again after this long. */
 export const ONE_OFF_RETRY_MS = 60_000;
+
+/**
+ * A routine whose commit failed because its database is gone (`needsReopen`) waits this long
+ * before its invocation ends. pi-durable restarts a running task at once when an invocation ends
+ * without a durable change, so without the wait a harness that nobody closes runs the routine
+ * again without end, one ping and one report per turn. A close ends the wait at once.
+ */
+export const ROUTINE_GONE_BACKOFF_MS = 60_000;
 
 export const ROUTINE_NAME = /^[a-z][a-z0-9-]{1,31}$/;
 
@@ -85,6 +94,8 @@ export interface RoutineHooks {
    * in activity (jobs.ts), in the run's own commit.
    */
   readonly timeZone?: string;
+  /** Tests: the back-off after a storage-gone commit; ROUTINE_GONE_BACKOFF_MS by default. */
+  readonly goneBackoffMs?: number;
 }
 
 export interface Routine<P extends JsonObject = JsonObject> {
@@ -150,7 +161,7 @@ export function defineRoutine<P extends JsonObject>(
             : retry
               ? runtime.now() + ONE_OFF_RETRY_MS
               : undefined;
-        await runtime.commit(async (tx) => {
+        const commit = runtime.commit(async (tx) => {
           if (!retry) await result.record?.(tx);
           if (!retry && spec.spends !== false && hooks.timeZone !== undefined) {
             await appendRecord(
@@ -175,6 +186,20 @@ export function defineRoutine<P extends JsonObject>(
             ? { status: "terminal", outcome: { status: "completed", result: null } }
             : { status: "running", checkpoint: { phase: "wait", wakeAt: next } };
         }, context);
+        try {
+          await commit;
+        } catch (error) {
+          if (!needsReopen(error) || runtime.signal.aborted) throw error;
+          // The database is gone: report now, so a cell under a harness slot closes this harness
+          // (which ends the wait below), then wait before the invocation ends and pi-durable
+          // starts the routine again.
+          runtime.report(error);
+          await runtime.sleep(
+            runtime.now() + (hooks.goneBackoffMs ?? ROUTINE_GONE_BACKOFF_MS),
+            context,
+          );
+          throw error;
+        }
         logEvent("routine.fired", {
           cell: hooks.cell,
           routine: spec.name,

@@ -44,6 +44,7 @@ import {
   DecisionFailure,
   type DecisionModel,
   decide,
+  HarnessSlot,
   type HeldOutExample,
   heldOutExamples,
   isDecisionAdapter,
@@ -59,7 +60,6 @@ import {
   thresholdFor,
 } from "@secbot/cell-harness";
 import type { CelldCellStorage } from "@secbot/cell-storage";
-import { HarnessSlot } from "./harness-slot.ts";
 import { releaseVersion } from "./health.ts";
 
 export const BENCH_PERSON = "bench";
@@ -462,7 +462,7 @@ interface ExamplesRun {
 type Run = LatencyRun | ExamplesRun;
 
 export class GuardBenchCell {
-  private readonly slot: HarnessSlot;
+  private readonly slot: HarnessSlot<CellHarness>;
   private run: Run | undefined;
 
   constructor(

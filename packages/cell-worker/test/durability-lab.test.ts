@@ -4,13 +4,12 @@
 // goes from the owner cell to the second cell. The SIGKILL itself runs on the test cell
 // (test:durability) and locally in cell-harness crash.test.ts. The heap load briefs all four
 // specialists at once with one long job, and the write probe commits one row per call.
-import { CellHarness, onLogEvent } from "@secbot/cell-harness";
+import { CellHarness, HarnessSlot, onLogEvent } from "@secbot/cell-harness";
 import { FakeCelldStorage, until } from "@secbot/cell-harness/testing";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import conformanceWorker, { type ConformanceEnv } from "../src/conformance-entry.ts";
 import { DurabilityLabCell, type LabEnv } from "../src/durability-lab.ts";
-import { HarnessSlot } from "../src/harness-slot.ts";
 
 import { OPERATOR_HEADER } from "../src/household-client.ts";
 import { PersonCell } from "../src/person-cell.ts";
@@ -192,7 +191,7 @@ describe("DurabilityLabCell", () => {
     let reports = 0;
     const realLost = HarnessSlot.prototype.lost;
     const lost = vi.spyOn(HarnessSlot.prototype, "lost").mockImplementation(function (
-      this: HarnessSlot,
+      this: HarnessSlot<CellHarness>,
       error: unknown,
       generation?: number,
     ) {

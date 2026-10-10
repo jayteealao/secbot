@@ -25,8 +25,10 @@ import {
   type BudgetSettings,
   CellAlarm,
   createHeartbeatRoutine,
+  createReportGate,
   ensureRoutines,
   errorFields,
+  HarnessSlot,
   type HeartbeatEnv,
   type HeartbeatState,
   type HouseholdApplyResult,
@@ -37,7 +39,6 @@ import {
   type NextWake,
   nextWake,
   type ReportSpendResult,
-  reportFields,
   type WakeSummary,
   wakesOf,
 } from "@secbot/cell-harness";
@@ -81,10 +82,15 @@ interface Opened {
     readonly summary: WakeSummary;
     readonly next: NextWake | undefined;
   }>;
+  /** Logs the count of reports not logged yet, then closes the harness. */
+  close(): Promise<void>;
 }
 
 export class HouseholdCell {
-  private opening: Promise<Opened> | undefined;
+  /** The routine harness: closed and opened again when celld closes the database under it. */
+  private readonly slot: HarnessSlot<Opened>;
+  /** The open that `open()` watches for a failure to log. */
+  private watched: Promise<Opened> | undefined;
   private readonly alarms: CellAlarm;
   private readonly now: () => number;
   /** Snapshot, restore, wipe, and digest, shared with the person cells. */
@@ -104,44 +110,49 @@ export class HouseholdCell {
       state.storage,
       {
         openDatabase: async () => {
-          const opening = this.opening;
+          const opening = this.slot.current();
           return opening === undefined ? undefined : (await opening).database;
         },
         close: () => this.close(),
       },
       this.now,
     );
+    // A restore or wipe in progress finishes first, so the harness opens on the new database.
+    this.slot = new HarnessSlot(
+      HOUSEHOLD_CELL_NAME,
+      (onReport) => this.snapshots.idle().then(() => this.openNow(onReport)),
+      (work) => this.state.waitUntil?.(work),
+    );
   }
 
   private open(): Promise<Opened> {
-    if (this.opening === undefined) {
-      // A restore or wipe in progress finishes first, so the harness opens on the new database.
-      const opening = this.snapshots.idle().then(() => this.openNow());
-      this.opening = opening;
+    const opening = this.slot.get();
+    if (opening !== this.watched) {
+      this.watched = opening;
+      // A failed open leaves the slot empty, so the next request tries again.
       opening.catch((error: unknown) => {
-        if (this.opening === opening) this.opening = undefined;
         logEvent("cell.open_failed", { cell: HOUSEHOLD_CELL_NAME, ...errorFields(error) }, "error");
       });
     }
-    return this.opening;
+    return opening;
   }
 
-  private async openNow(context: Context = BACKGROUND_CONTEXT): Promise<Opened> {
+  private async openNow(
+    onReport: (error: unknown) => void,
+    context: Context = BACKGROUND_CONTEXT,
+  ): Promise<Opened> {
     const { storage, database } = await openCelldStorageWithDatabase(this.state.storage);
     const log = new ChangeLog(database, this.now);
     const hooks = { cell: HOUSEHOLD_CELL_NAME, onWakeChange: () => this.rearmSoon() };
     const heartbeat = createHeartbeatRoutine(this.env, hooks, this.options.fetch);
     const registry = createRegistry();
     registry.install(defineExtension({ name: "secbot-routines", tasks: [heartbeat.task] }));
+    // The first storage-gone report is logged and closes this harness through the slot; later
+    // ones are counted into one harness.reports_suppressed line.
+    const reports = createReportGate(HOUSEHOLD_CELL_NAME, onReport);
     const harness = await Harness.open(
       storage,
-      {
-        models: createModels(),
-        registry,
-        now: this.now,
-        onReport: (error) =>
-          logEvent("harness.report", reportFields(HOUSEHOLD_CELL_NAME, error), "error"),
-      },
+      { models: createModels(), registry, now: this.now, onReport: reports.report },
       context,
     );
     try {
@@ -157,18 +168,24 @@ export class HouseholdCell {
           const summary = wakesOf(await harness.inspect(context));
           return { summary, next: nextWake(summary, this.now()) };
         },
+        close: async () => {
+          // First, so the count goes out even when the close below never finishes.
+          reports.flush();
+          await harness.close(context);
+        },
       };
       await this.alarms.rearm(opened);
       return opened;
     } catch (error) {
       // An opened harness must not stay running while the next event opens another one.
+      reports.flush();
       await harness.close(context).catch(() => {});
       throw error;
     }
   }
 
   private rearmSoon(): void {
-    const opening = this.opening;
+    const opening = this.slot.current();
     if (opening === undefined) return;
     const work = opening
       .then((opened) => this.alarms.rearm(opened))
@@ -306,10 +323,8 @@ export class HouseholdCell {
     return Response.json({ error: "not found" }, { status: 404 });
   }
 
-  /** Tests: closes the routine harness. */
-  async close(context: Context = BACKGROUND_CONTEXT): Promise<void> {
-    const opening = this.opening;
-    this.opening = undefined;
-    if (opening !== undefined) await (await opening.catch(() => undefined))?.harness.close(context);
+  /** Closes the routine harness (before a restore or wipe loads, and in tests). */
+  async close(): Promise<void> {
+    await this.slot.close();
   }
 }

@@ -26,8 +26,10 @@ import {
   type BrokerRequest,
   CellAlarm,
   createHeartbeatRoutine,
+  createReportGate,
   ensureRoutines,
   errorFields,
+  HarnessSlot,
   type HeartbeatEnv,
   type HeartbeatState,
   heartbeatState,
@@ -35,7 +37,6 @@ import {
   type NextWake,
   nextWake,
   type RotateResult,
-  reportFields,
   SECRETS_UNAVAILABLE,
   type SecretInput,
   type SecretListing,
@@ -91,12 +92,17 @@ interface Opened {
     readonly summary: WakeSummary;
     readonly next: NextWake | undefined;
   }>;
+  /** Logs the count of reports not logged yet, then closes the harness. */
+  close(): Promise<void>;
 }
 
 const text = (value: unknown): string => (typeof value === "string" ? value : "");
 
 export class SecretsCell {
-  private opening: Promise<Opened> | undefined;
+  /** The routine harness: closed and opened again when celld closes the database under it. */
+  private readonly slot: HarnessSlot<Opened>;
+  /** The open that `open()` watches for a failure to log. */
+  private watched: Promise<Opened> | undefined;
   private readonly alarms: CellAlarm;
   private readonly now: () => number;
   private readonly custody: KeyCustody;
@@ -112,23 +118,31 @@ export class SecretsCell {
       now: this.now,
       ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
     });
+    this.slot = new HarnessSlot(
+      SECRETS_CELL_NAME,
+      (onReport) => this.openNow(onReport),
+      (work) => this.state.waitUntil?.(work),
+    );
   }
 
   private open(): Promise<Opened> {
-    if (this.opening === undefined) {
-      const opening = this.openNow();
-      this.opening = opening;
+    const opening = this.slot.get();
+    if (opening !== this.watched) {
+      this.watched = opening;
+      // A failed open leaves the slot empty, so the next request tries again.
       opening.catch((error: unknown) => {
-        if (this.opening === opening) this.opening = undefined;
         if (!(error instanceof KeyCustodyUnavailable)) {
           logEvent("cell.open_failed", { cell: SECRETS_CELL_NAME, ...errorFields(error) }, "error");
         }
       });
     }
-    return this.opening;
+    return opening;
   }
 
-  private async openNow(context: Context = BACKGROUND_CONTEXT): Promise<Opened> {
+  private async openNow(
+    onReport: (error: unknown) => void,
+    context: Context = BACKGROUND_CONTEXT,
+  ): Promise<Opened> {
     // No route answers without a usable key: the key files are checked before anything opens.
     const health = await this.custody.health();
     if (!health.ok) {
@@ -144,15 +158,12 @@ export class SecretsCell {
     const heartbeat = createHeartbeatRoutine(this.env, hooks, this.options.fetch);
     const registry = createRegistry();
     registry.install(defineExtension({ name: "secbot-routines", tasks: [heartbeat.task] }));
+    // The first storage-gone report is logged and closes this harness through the slot; later
+    // ones are counted into one harness.reports_suppressed line.
+    const reports = createReportGate(SECRETS_CELL_NAME, onReport);
     const harness = await Harness.open(
       storage,
-      {
-        models: createModels(),
-        registry,
-        now: this.now,
-        onReport: (error) =>
-          logEvent("harness.report", reportFields(SECRETS_CELL_NAME, error), "error"),
-      },
+      { models: createModels(), registry, now: this.now, onReport: reports.report },
       context,
     );
     try {
@@ -166,6 +177,11 @@ export class SecretsCell {
           const summary = wakesOf(await harness.inspect(context));
           return { summary, next: nextWake(summary, this.now()) };
         },
+        close: async () => {
+          // First, so the count goes out even when the close below never finishes.
+          reports.flush();
+          await harness.close(context);
+        },
       };
       await this.alarms.rearm(opened);
       logEvent("secrets.started", {
@@ -175,13 +191,14 @@ export class SecretsCell {
       });
       return opened;
     } catch (error) {
+      reports.flush();
       await harness.close(context).catch(() => {});
       throw error;
     }
   }
 
   private rearmSoon(): void {
-    const opening = this.opening;
+    const opening = this.slot.current();
     if (opening === undefined) return;
     const work = opening
       .then((opened) => this.alarms.rearm(opened))
@@ -436,10 +453,8 @@ export class SecretsCell {
   }
 
   /** Tests: closes the routine harness. */
-  async close(context: Context = BACKGROUND_CONTEXT): Promise<void> {
-    const opening = this.opening;
-    this.opening = undefined;
-    if (opening !== undefined) await (await opening.catch(() => undefined))?.harness.close(context);
+  async close(): Promise<void> {
+    await this.slot.close();
   }
 
   /** Tests: the store, to read raw records. */

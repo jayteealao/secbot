@@ -108,6 +108,7 @@ export {
   isDecisionAdapter,
   isGuardMode,
 } from "./guard-settings.ts";
+export { HarnessSlot, type OpenHarness, SLOT_CLOSE_WAIT_MS } from "./harness-slot.ts";
 export {
   createHeartbeatRoutine,
   HEARTBEAT_EVERY_MS,
@@ -165,9 +166,12 @@ export {
   type CellEnv,
   CellHarness,
   type CellStatus,
+  createReportGate,
   type MissedWithHeld,
   type OpenCellOptions,
   openCellHarness,
+  REPORT_SUMMARY_MS,
+  type ReportGate,
   reportFields,
 } from "./open-harness.ts";
 export {

@@ -42,6 +42,7 @@ import {
   DEFAULT_LEAD_MODEL,
   DEFAULT_SPECIALIST_MODEL,
   defineRoutine,
+  HarnessSlot,
   type HouseholdApplyResult,
   type HouseholdChange,
   type HouseholdDocument,
@@ -52,7 +53,6 @@ import {
   scheduleReminder,
 } from "@secbot/cell-harness";
 import type { CelldAlarmInfo, CelldCellStorage } from "@secbot/cell-storage";
-import { HarnessSlot } from "./harness-slot.ts";
 import { releaseVersion } from "./health.ts";
 import { type HouseholdNamespaceLike, householdOf } from "./person-cell.ts";
 
@@ -127,7 +127,7 @@ const lastText = (context: TranscriptContext): { role: string; text: string; sys
 };
 
 export class DurabilityLabCell {
-  private readonly slot: HarnessSlot;
+  private readonly slot: HarnessSlot<CellHarness>;
   private readonly alarms: CellAlarm;
   /** Model calls in this process's life, by role; a restart starts at zero. */
   readonly calls = { lead: 0, specialist: 0 };

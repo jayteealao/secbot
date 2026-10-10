@@ -369,6 +369,23 @@ the guard bench's. The release tool's `lab` command calls them; `measure:guard` 
 
 
 `adapter` is `clef`, `clef-flash`, or `jev`; the bench keeps it for its next run. The bench never
-reads a threshold cap. When celld closes the database of a lab or bench cell under running work
-(`no db for <cell>`), the cell logs one `cell.reopen` line, closes its harness, and opens a new
-one on the next request.
+reads a threshold cap.
+
+### When celld closes a cell's database under running work
+
+celld can give a cell back (a version swap, an idle eviction, or a stop) and close its database
+while the cell's JavaScript still runs; every storage call of that instance then fails with
+`no db for <cell>`. The secrets cell, the household cell, and the test-cell lab and bench cells
+handle it the same way:
+
+- The first such failure logs one `harness.report` line and one `cell.reopen` line (warn), and the
+  cell closes its harness. The next request or alarm opens a new harness on the same storage,
+  which resumes from its stored state.
+- Later failures from the same harness are counted, not logged: one `harness.reports_suppressed`
+  line (warn) with `count`, `first_at`, `last_at`, and the last error goes out every 60 s while
+  they come, and when the harness closes.
+- A routine whose commit fails this way reports it and waits 60 s before it runs again, in every
+  cell, so a harness that nobody closes pings and reports at most once a minute. A close ends
+  the wait at once.
+
+The person cell closes and reopens its harness on the same failures.
