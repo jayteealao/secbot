@@ -15,10 +15,7 @@
       "build-dirs": [
         "node_modules",
         "dist",
-        "app/build",
-        "coverage",
-        ".terraform",
-        ".scratch/wf"
+        "app/build"
       ],
       "heavy-suites": [
         "mise run test:conformance",
