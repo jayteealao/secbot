@@ -4,12 +4,14 @@
 // goes from the owner cell to the second cell. The SIGKILL itself runs on the test cell
 // (test:durability) and locally in cell-harness crash.test.ts. The heap load briefs all four
 // specialists at once with one long job, and the write probe commits one row per call.
-import { onLogEvent } from "@secbot/cell-harness";
+import { CellHarness, onLogEvent } from "@secbot/cell-harness";
 import { FakeCelldStorage, until } from "@secbot/cell-harness/testing";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import conformanceWorker, { type ConformanceEnv } from "../src/conformance-entry.ts";
 import { DurabilityLabCell, type LabEnv } from "../src/durability-lab.ts";
+import { HarnessSlot } from "../src/harness-slot.ts";
+
 import { OPERATOR_HEADER } from "../src/household-client.ts";
 import { PersonCell } from "../src/person-cell.ts";
 
@@ -159,6 +161,79 @@ describe("DurabilityLabCell", () => {
       expect(count("cell.reopen")).toBe(1);
     } finally {
       stop();
+    }
+  }, 60_000);
+
+  it("logs one report line per loss when celld closes its database and the old harness never finishes closing", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const storage = new FakeCelldStorage();
+    const cell = new DurabilityLabCell(
+      { storage },
+      {},
+      {
+        hangMs: 60_000,
+        holdMs: 200,
+        pollMs: 5,
+        reportSummaryMs: 200,
+      },
+    );
+    labs.push(cell);
+    await call(cell, "POST", "/lab/arm");
+    const events: string[] = [];
+    const count = (name: string) => events.filter((event) => event === name).length;
+    const stop = onLogEvent((event) => {
+      events.push(event);
+    });
+    // Every report still reaches the slot. A guard for the failing case: without the fix every
+    // report is a log line and the retries starve the timers, so the test gives the database back
+    // after 200 reports to end the loop.
+    let reports = 0;
+    const realLost = HarnessSlot.prototype.lost;
+    const lost = vi.spyOn(HarnessSlot.prototype, "lost").mockImplementation(function (
+      this: HarnessSlot,
+      error: unknown,
+      generation?: number,
+    ) {
+      reports++;
+      if (reports === 200) storage.gaveBack = undefined;
+      return realLost.call(this, error, generation);
+    });
+    // A close that never finishes, as when the old harness's own retries hold it: the old harness
+    // keeps running on the closed database.
+    const hung: CellHarness[] = [];
+    const finishes: (() => void)[] = [];
+    const realClose = CellHarness.prototype.close;
+    const close = vi.spyOn(CellHarness.prototype, "close").mockImplementation(function (
+      this: CellHarness,
+    ) {
+      hung.push(this);
+      return new Promise<void>((resolve) => finishes.push(resolve));
+    });
+    try {
+      storage.gaveBack = "DurabilityLabCell:lab-test";
+      cell.releaseHangs();
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      expect(reports).toBeGreaterThan(1);
+      expect(count("cell.reopen")).toBe(1);
+      expect(count("harness.report")).toBe(1);
+      expect(count("harness.reports_suppressed")).toBeGreaterThanOrEqual(1);
+      // celld takes the cell in again and the old close ends: the next request opens a new harness,
+      // which resumes the job, with no second reopen line.
+      close.mockRestore();
+      storage.gaveBack = undefined;
+      for (const harness of hung) await realClose.call(harness).catch(() => {});
+      for (const finish of finishes) finish();
+      await until(
+        async () => (await call(cell, "GET", "/lab/state")).followupReported === true,
+        20_000,
+      );
+      expect(count("cell.reopen")).toBe(1);
+    } finally {
+      stop();
+      close.mockRestore();
+      lost.mockRestore();
     }
   }, 60_000);
 

@@ -68,11 +68,19 @@ const rule = (
   ...extra,
 });
 
+// The release owner rules' patterns, as the cell stores them.
+const CARD_NUMBER = String.raw`\b\d(?:[ \-\u2010-\u2015]?\d){12,18}\b`;
+const SECRET_WORD = String.raw`\b(?:password|passcode|pin|token|api[ _\-]?key)\b`;
+
 const FIRST_RUN = [
   "OWNER RULES (you cannot loosen these)",
   "------------------------------------------------------------------------------",
   "AGENT   TOOL               MATCH                          VERDICT",
   "all     pay tools          any                            prohibit",
+  String.raw`all     set_reminder       text ~ /\b\d(?:[ \-\u2010-\u2015]?\d){12,18}\b/i`,
+  "                                                          ask first",
+  String.raw`all     search_history     query ~ /\b(?:password|passcode|pin|token|api[ _\-]?k`,
+  String.raw`                           ey)\b/i                        ask first`,
   "",
   "YOUR RULES",
   "------------------------------------------------------------------------------",
@@ -106,7 +114,18 @@ const CONTRACT_LIST = [
 ].join("\n");
 
 const DEFAULTS = {
-  owner: [rule("all", "pay", "prohibit", { source: "release" })],
+  owner: [
+    rule("all", "pay", "prohibit", { source: "release" }),
+    rule("all", "set_reminder", "ask-first", {
+      source: "release",
+      match: { kind: "regex", field: "text", value: CARD_NUMBER },
+    }),
+    rule("all", "search_history", "ask-first", {
+      source: "release",
+      match: { kind: "regex", field: "query", value: SECRET_WORD },
+    }),
+  ],
+
   person: [
     rule("all", "handoff", "permit"),
     rule("all", "household_change", "permit"),
@@ -486,7 +505,7 @@ describe("the owner's operator-key views", () => {
       "sam",
     );
     expect(added.out).toBe("added: all handoff (specialist = developer) -> ask first\n");
-    expect(fake.rules.owner).toHaveLength(2);
+    expect(fake.rules.owner).toHaveLength(4);
     fake.activity = { ...fake.activity, person: "sam", records: RECORDS, total: 2 };
     const activity = await secbot(environment, "activity", "--person", "sam");
     expect(activity.out.split("\n")[0]).toBe(

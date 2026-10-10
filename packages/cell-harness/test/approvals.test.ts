@@ -256,6 +256,69 @@ describe("a held call", () => {
       1,
     );
   });
+
+  it("offers allow always for a reminder the person's own rule held, and only allow once and deny for a card number or a secret word", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const t = await open();
+    const at = new Date(Date.now() + 86_400_000).toISOString();
+    await t.cell.addRule("person", { agent: "lead", tool: "set_reminder", verdict: "ask-first" });
+    await t.cell.submit(CALL("set_reminder", { text: "bins out", at }), "r-1");
+    await until(async () => (await t.cell.heldCalls()).length === 1);
+    const [own] = await t.cell.heldCalls();
+    // The owner card-number rule does not accept "bins out", so allow always stays on offer (AC-19).
+    expect(own).toMatchObject({
+      reasonSource: "your-rule",
+      always: {
+        offered: true,
+        rule: {
+          agent: "lead",
+          tool: "set_reminder",
+          verdict: "permit",
+          match: { kind: "exact", field: "text", value: "bins out" },
+        },
+        note: null,
+      },
+    });
+    const answered = await t.cell.answer(own?.number ?? 0, "always", { device: "laptop" });
+    expect(answered.rule).toMatchObject({ source: "allow-always", tool: "set_reminder" });
+
+    // A card number in a reminder: held by the owner rule, allow always not offered (AC-49).
+    await t.cell.submit(
+      CALL("set_reminder", { text: "pay with card 4111 1111 1111 1111", at }),
+      "r-2",
+    );
+    await until(async () => (await t.cell.heldCalls()).length === 1);
+    const [card] = await t.cell.heldCalls();
+    expect(card).toMatchObject({
+      reasonSource: "owner-rule",
+      always: { offered: false, rule: null, note: NOT_OFFERED_OWNER },
+    });
+    expect(card?.reason).toMatch(/^owner rule: all set_reminder \(text ~ /);
+    await expect(
+      t.cell.answer(card?.number ?? 0, "always", { device: "laptop" }),
+    ).rejects.toBeInstanceOf(AlwaysNotOffered);
+    await t.cell.answer(card?.number ?? 0, "deny", { device: "laptop" });
+    await until(async () => (await t.cell.heldCalls()).length === 0);
+
+    // A secret word in a history search: the same.
+    await t.cell.submit(CALL("search_history", { query: "my bank PIN" }), "r-3");
+    await until(async () => (await t.cell.heldCalls()).length === 1);
+    const [word] = await t.cell.heldCalls();
+    expect(word).toMatchObject({
+      tool: "search_history",
+      reasonSource: "owner-rule",
+      always: { offered: false, rule: null, note: NOT_OFFERED_OWNER },
+    });
+    await t.cell.answer(word?.number ?? 0, "deny", { device: "laptop" });
+    await until(async () => (await t.cell.heldCalls()).length === 0);
+
+    // A routine search runs with no hold.
+    await t.cell.submit(CALL("search_history", { query: "spinach" }), "r-4");
+    await until(async () =>
+      (await records(t)).some((r) => r.kind === "verdict" && r.tool === "search_history"),
+    );
+    expect(await t.cell.heldCalls()).toEqual([]);
+  });
 });
 
 describe("binding an answer to its request", () => {

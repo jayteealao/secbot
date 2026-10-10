@@ -109,8 +109,13 @@ A `Rule` is `{id, agent, tool, verdict, match?, source, addedAt}`:
   at most one repeat (`*`, `+`, `{n,}`), no back-reference, no look-around, and at most 200
   characters, and runs on at most 4096 characters of a value (a longer value counts as a match for
   `prohibit` and `ask-first`, and as no match for `permit`).
-- `source`: `release` (the owner rule that agents never pay; it cannot be removed), `default` (a
-  new person's four permit rules), `owner`, `person`, or `allow-always`.
+- `source`: `release` (the owner rules that come with the release; they cannot be removed),
+  `default` (a new person's four permit rules), `owner`, `person`, or `allow-always`. The release
+  rules are: `all pay tools any -> prohibit`; `all set_reminder (text ~ <card number>) -> ask
+  first`, where the pattern is 13 to 19 digits that may be split by spaces or dashes; and
+  `all search_history (query ~ <secret word>) -> ask first`, for `password`, `passcode`, `pin`,
+  `token`, or `api key`. A cell gains any release rule it lacks each time it opens, logged as
+  `rules.changed`.
 - `addedAt`: milliseconds since 1970, by the cell's clock.
 
 Inside one level the most specific rule decides (an agent name before `all`, a tool name before
@@ -118,15 +123,18 @@ Inside one level the most specific rule decides (an agent name before `all`, a t
 across levels the strictest verdict wins, so a person's rule never loosens an owner rule. A call
 no rule matches is allowed by the rules.
 
-A person rule looser than an overlapping owner rule is refused, naming the owner rule:
+A person rule looser than an overlapping owner rule is refused, naming the owner rule. A person
+rule with no match, or with a match the owner rule's match can accept, overlaps it; an `exact`
+person match overlaps an owner match only when that owner match accepts the exact value (so a
+permit for every reminder is refused, and a permit for one plain reminder text is not):
 
 ```json
 {"error": "refused: this rule is looser than an owner rule:\n  all handoff (specialist = developer) -> ask first\n  Your rules can be stricter than the owner's rules, never looser."}
 ```
 
 Other refusals: an unknown agent, tool, verdict, or match kind; a pattern of a refused form; a
-duplicate rule; more than 200 rules in one level; the release rule's removal (`refused: this rule
-is part of the release: agents never pay`).
+duplicate rule; more than 200 rules in one level; a release rule's removal (`refused: this rule
+is part of the release: any pay tool -> prohibit`, naming the rule).
 
 ### Activity records
 
@@ -355,8 +363,10 @@ the guard bench's. The release tool's `lab` command calls them; `measure:guard` 
 | Method | Path | Response |
 | --- | --- | --- |
 | POST | `/lab/guard-bench?calls=<1-200>[&adapter=<a>]` | `{started, calls, warmup, adapter}`: the latency run starts (5 warm-up calls, then `calls` permitted `household_read` calls); 409 while a run goes, 400 for a bad value |
-| POST | `/lab/guard-bench?examples=1[&repeat=<1-3>][&adapter=<a>]` | `{started, kind: "examples", examples, repeat, calls, adapter}`: the examples run starts. The bench makes each decision-model example call (every example whose tool an agent has) `repeat` times (default 2), in order. 400 for `examples` with `calls` or a bad `repeat` |
-| GET | `/lab/guard-bench-state` | `{done, kind, measured, results?}`. For the latency run, `results` holds the percentiles, marks, fallbacks, models, and cost. For the examples run, `results` is `{examples: [{name, tool, expected, threshold, scores, marked, ok}], calls, models, fallbacks, costUsd, timedOut, allOk}`: each score is judged on the tool's release threshold, and `allOk` is true only when every repeat of every risky example (`expected: "mark"`) scored at or above it and every routine one below it, with no fallback |
+| POST | `/lab/guard-bench?examples=1[&repeat=<1-3>][&adapter=<a>]` | `{started, kind: "examples", examples, repeat, heldOut, calls, adapter}`: the examples run starts. The bench scores each decision-model tuning example (every example whose tool an agent has) `repeat` times (default 2), then each held-out call (`heldOut`, 60) once, in order, with the decision model alone and no threshold cap. 400 for `examples` with `calls` or a bad `repeat` |
+
+| GET | `/lab/guard-bench-state` | `{done, kind, measured, results?}`. For the latency run, `results` holds the percentiles, marks, fallbacks, models, and cost. For the examples run, `results` is `{tuning: {examples: [{name, tool, expected, threshold, scores, marked, ok}], allOk}, heldOut: {calls: [{name, tool, kind, threshold, score, marked, rule, ok}], perTool: {<tool>: {risky, caught, missed, routine, falseMarks, falseMarkRate, ruleHolds}}, allCaught}, calls, models, fallbacks, costUsd, timedOut, allOk}`: each score is judged on the tool's release threshold. A held-out call's `rule` names the release owner rule that would hold it (`owner card number`, `owner secret word`), or is null; a risky held-out call is caught when it is marked or a rule holds it. `allOk` is true only when every repeat of every risky tuning example (`expected: "mark"`) scored at or above the threshold, every routine tuning one below it, and every risky held-out call was caught, with no fallback and no timeout; routine held-out false marks are counted, not failed |
+
 
 `adapter` is `clef`, `clef-flash`, or `jev`; the bench keeps it for its next run. The bench never
 reads a threshold cap. When celld closes the database of a lab or bench cell under running work

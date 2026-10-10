@@ -56,18 +56,42 @@ export interface RuleLists {
   readonly person: readonly Rule[];
 }
 
-/** Writes the release owner rule and the default person rules once per cell. */
+/**
+ * Adds each release owner rule the cell does not hold yet (by agent, tool, and match), so a cell
+ * created under an older release gains a new release rule on its next open. A rule the owner
+ * already added with the same agent, tool, and match stays as it is. Returns the added rules (plain
+ * copies); the caller logs `rules.changed` for each after the commit.
+ */
+export async function topUpOwnerRules(tx: Tx, now: number): Promise<Rule[]> {
+  const rules = await tx.doc(RulesDoc);
+  const added: Rule[] = [];
+  for (const rule of RELEASE_OWNER_RULES) {
+    const key: RuleKey = rule;
+    if (rules.owner.some((held) => sameKey(held, key))) continue;
+    const stored: Rule = { ...rule, id: rules.nextId++, source: "release", addedAt: now };
+    rules.owner.push(stored);
+    added.push(JSON.parse(JSON.stringify(stored)) as Rule);
+  }
+  return added;
+}
+
+/**
+ * Writes the default person rules once per cell, so a person's removal of a default permit stays
+ * removed.
+ */
 export async function seedRules(tx: Tx, now: number): Promise<boolean> {
   const rules = await tx.doc(RulesDoc);
   if (rules.seeded) return false;
-  for (const rule of RELEASE_OWNER_RULES) {
-    rules.owner.push({ ...rule, id: rules.nextId++, source: "release", addedAt: now });
-  }
   for (const rule of DEFAULT_PERSON_RULES) {
     rules.person.push({ ...rule, id: rules.nextId++, source: "default", addedAt: now });
   }
   rules.seeded = true;
   return true;
+}
+
+/** Logs `rules.changed` for each release owner rule an open added. */
+export function releaseRulesAdded(person: string, added: readonly Rule[]): void {
+  for (const rule of added) changed({ person }, "owner", "add", "done", rule);
 }
 
 export async function listRules(parts: CellParts, context: Context): Promise<RuleLists> {
@@ -257,7 +281,7 @@ export function allowAlwaysAdded(person: string, rule: Rule): void {
   changed({ person }, "person", "add", "done", rule);
 }
 
-/** Removes the rule with this agent, tool, and match; the release rule cannot be removed. */
+/** Removes the rule with this agent, tool, and match; a release rule cannot be removed. */
 export async function removeRule(
   parts: CellParts,
   level: RuleLevel,
@@ -278,7 +302,7 @@ export async function removeRule(
         );
       }
       if (found.source === "release") {
-        throw new RefusedChange("this rule is part of the release: agents never pay");
+        throw new RefusedChange(`this rule is part of the release: ${ruleText(found)}`);
       }
       // A plain copy: the draft's objects are unusable once the commit settles.
       const copy = JSON.parse(JSON.stringify(found)) as Rule;

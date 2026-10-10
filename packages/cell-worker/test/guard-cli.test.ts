@@ -67,8 +67,13 @@ const FIRST_RUN = [
   "------------------------------------------------------------------------------",
   "AGENT   TOOL               MATCH                          VERDICT",
   "all     pay tools          any                            prohibit",
+  String.raw`all     set_reminder       text ~ /\b\d(?:[ \-\u2010-\u2015]?\d){12,18}\b/i`,
+  "                                                          ask first",
+  String.raw`all     search_history     query ~ /\b(?:password|passcode|pin|token|api[ _\-]?k`,
+  String.raw`                           ey)\b/i                        ask first`,
   "",
   "YOUR RULES",
+
   "------------------------------------------------------------------------------",
   "AGENT   TOOL               MATCH                          VERDICT",
   "all     handoff            any                            permit",

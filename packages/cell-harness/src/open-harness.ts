@@ -23,6 +23,7 @@ import {
 import {
   type CelldSqliteDatabase,
   type CelldStorage,
+  needsReopen,
   openCelldStorageWithDatabase,
 } from "@secbot/cell-storage";
 import {
@@ -101,7 +102,15 @@ import {
 import { createReviewer, type Reviewer } from "./reviewer.ts";
 import { addSpecialist, ensureRoster } from "./roster.ts";
 import { ensureRoutines, type Routine } from "./routines.ts";
-import { addRule, listRules, type RuleLists, removeRule, seedRules } from "./rule-store.ts";
+import {
+  addRule,
+  listRules,
+  type RuleLists,
+  releaseRulesAdded,
+  removeRule,
+  seedRules,
+  topUpOwnerRules,
+} from "./rule-store.ts";
 import type { Rule, RuleLevel } from "./rules.ts";
 import { createSecretsExtension, redactionLoader, type SecretsClient } from "./secret-tools.ts";
 import { createLeadExtension, type TimeEnv, timeZoneOf } from "./sections.ts";
@@ -145,8 +154,13 @@ export interface OpenCellOptions {
   readonly secrets?: SecretsClient;
   /** Called after every commit that changes a wake time (a routine ran, a reminder was set). */
   readonly onWakeChange?: () => void;
-  /** Called after a background failure is logged as `harness.report`, so the cell can react. */
+  /**
+   * Called for every background failure, after it is logged as `harness.report` (or counted, for a
+   * repeated storage-gone failure), so the cell can react.
+   */
   readonly onReport?: (error: unknown) => void;
+  /** Tests: how often the count of unlogged storage-gone reports is logged (REPORT_SUMMARY_MS). */
+  readonly reportSummaryMs?: number;
   /** More recurring routines beside the heartbeat (for example a morning briefing). */
   readonly routines?: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
   /** Tests: more extensions for every role, after the release ones (the guard stays first). */
@@ -202,6 +216,8 @@ export class CellHarness implements CellParts {
     readonly budget: CellBudget,
     /** Routines that spend nothing (the heartbeat): activity does not list them as jobs. */
     readonly quietRoutines: ReadonlySet<string> = new Set(),
+    /** The harness's report gate: close logs the count of reports it did not log. */
+    private readonly reports?: ReportGate,
   ) {}
 
   private limitParts() {
@@ -468,11 +484,80 @@ export class CellHarness implements CellParts {
   }
 
   async close(context: Context = BACKGROUND_CONTEXT): Promise<void> {
+    // First, so the count goes out even when the close below never finishes.
+    this.reports?.flush();
     await this.budget.stop();
     await this.budget.watch.settled();
     await this.monitor.settled();
     await this.harness.close(context);
   }
+}
+
+/** How often a harness logs the count of storage-gone reports it did not log: 60 s. */
+export const REPORT_SUMMARY_MS = 60_000;
+
+/** A harness's background failures on their way to the log and to `options.onReport`. */
+export interface ReportGate {
+  readonly report: (error: unknown) => void;
+  /** Logs the count of reports not logged yet, if any. */
+  readonly flush: () => void;
+}
+
+/**
+ * Each report logs one `harness.report` line, except a storage-gone failure (`needsReopen`: celld
+ * closed the database, a reset closed the driver, or pi-durable poisoned the session) after the
+ * first one of this harness: it never heals in this harness, and a harness whose close cannot
+ * finish keeps retrying its work, so each later one is counted, not logged. The count goes out as
+ * one `harness.reports_suppressed` line every `summaryMs` while such reports come, and when the
+ * harness closes. Every other failure logs as before, and every report reaches `onReport`.
+ */
+export function createReportGate(
+  person: string,
+  onReport: ((error: unknown) => void) | undefined,
+  summaryMs = REPORT_SUMMARY_MS,
+): ReportGate {
+  let gone = false;
+  let count = 0;
+  let firstAt = 0;
+  let lastAt = 0;
+  let lastError: unknown;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const flush = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    if (count === 0) return;
+    logEvent(
+      "harness.reports_suppressed",
+      {
+        cell: person,
+        count,
+        first_at: new Date(firstAt).toISOString(),
+        last_at: new Date(lastAt).toISOString(),
+        ...errorFields(lastError),
+      },
+      "warn",
+    );
+    count = 0;
+  };
+  const report = (error: unknown) => {
+    if (gone && needsReopen(error)) {
+      const at = Date.now();
+      if (count === 0) firstAt = at;
+      count++;
+      lastAt = at;
+      lastError = error;
+      timer ??= setTimeout(flush, summaryMs);
+    } else {
+      if (needsReopen(error)) gone = true;
+      logEvent("harness.report", reportFields(person, error), "error");
+    }
+    try {
+      onReport?.(error);
+    } catch {
+      // A failing listener must not break the report.
+    }
+  };
+  return { report, flush };
 }
 
 export async function openCellHarness(
@@ -483,14 +568,8 @@ export async function openCellHarness(
   const started = Date.now();
   const { person, env } = options;
   const now = options.now ?? (() => Date.now());
-  const onReport = (error: unknown) => {
-    logEvent("harness.report", reportFields(person, error), "error");
-    try {
-      options.onReport?.(error);
-    } catch {
-      // A failing listener must not break the report.
-    }
-  };
+  const reports = createReportGate(person, options.onReport, options.reportSummaryMs);
+  const onReport = reports.report;
   const alerts = createAlerts(env, person, options.fetch);
   const monitor = new ModelHealthMonitor({ person, alerts, now, onReport });
   let opened: Harness | undefined;
@@ -617,10 +696,12 @@ export async function openCellHarness(
       alerts,
       gate,
       onReport,
+      reports,
     });
   } catch (error) {
     // A failure after the open (roster, routines, inspect) must not leave this harness running on
     // the storage while the next event opens a second one.
+    reports.flush();
     await harness.close(context).catch(() => {});
     throw error;
   }
@@ -654,6 +735,7 @@ async function finishOpen(
     readonly alerts: ReturnType<typeof createAlerts>;
     readonly gate: BudgetGate;
     readonly onReport: (error: unknown) => void;
+    readonly reports: ReportGate;
   },
 ): Promise<CellHarness> {
   const { person } = options;
@@ -690,16 +772,20 @@ async function finishOpen(
         .filter((routine) => !routine.spends)
         .map((routine) => routine.name),
     ),
+    parts.reports,
   );
+
   // What the last run left: live work, and routines whose time passed while the cell was down.
   // Read before this open creates anything and before resume(), so nothing has run yet.
   const left = (await harness.inspect(context)).tasks;
   const created = await ensureRoster(cell, context);
-  await harness.commit(async (tx) => {
+  const releaseRules = await harness.commit(async (tx) => {
     await tx.doc(ModelHealthDoc);
     // Sessions watch the held-call list from the start.
     await tx.doc(ApprovalsDoc);
-    // The release owner rule and the default person rules, once per cell (existing cells too).
+    // Every release owner rule the cell lacks (existing cells too), then the default person rules
+    // once per cell.
+    const added = await topUpOwnerRules(tx, now());
     await seedRules(tx, now());
     // Every cell, existing ones too, starts in shadow mode on the default decision model.
     const mode = await tx.doc(GuardModeDoc);
@@ -718,7 +804,9 @@ async function finishOpen(
     for (const record of Object.values((await tx.doc(RosterDoc)).specialists)) {
       await tx.doc(UsageDoc, record.conversationId);
     }
+    return added;
   }, context);
+  releaseRulesAdded(person, releaseRules);
   const routineTasks = left.filter(({ record }) => record.kind.startsWith(ROUTINE_KIND_PREFIX));
   const overdue = wakesOf({ tasks: routineTasks }).wakes.filter((wake) => wake.at <= now()).length;
   const pendingWork = left.length - routineTasks.length;

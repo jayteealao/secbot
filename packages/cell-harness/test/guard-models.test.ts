@@ -182,12 +182,12 @@ describe("decision model then reviewer (enforce mode)", () => {
     reviewerAnswer = () => verdictJson("allow", "a recipe search");
     await call(t, "search_history", { query: "soup" }, 2);
     expect(await newest(t)).toMatchObject({ verdict: "allowed", layer: "reviewer" });
-    reviewerAnswer = () => verdictJson("block", "the query asks for a password");
-    await call(t, "search_history", { query: "password" }, 3);
+    reviewerAnswer = () => verdictJson("block", "the query asks for login details");
+    await call(t, "search_history", { query: "login details for the bank" }, 3);
     expect(await newest(t)).toMatchObject({
       verdict: "refused",
       layer: "reviewer",
-      reason: "reviewer: the query asks for a password",
+      reason: "reviewer: the query asks for login details",
     });
     reviewerAnswer = () => verdictJson("ask", "the reminder text holds a card number");
     await t.cell.submit('CALL set_reminder {"text":"card 4111","at":"09:00"}', "ac11-3");

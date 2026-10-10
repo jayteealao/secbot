@@ -48,10 +48,39 @@ export const LEAD_INSTRUCTIONS =
   "You are the lead agent of one person's personal assistant. Answer the person directly when you can. When a request fits one of your specialists, brief that specialist with the handoff tool: write a self-contained brief in your own words. The specialist's answer comes back to you later as a message that starts with [handoff <name> answered]; relay what matters to the person. You can search your own earlier conversation with search_history.";
 
 /**
- * The release owner rule: agents never pay. It cannot be removed; the owner can only add stricter
- * rules. The pay group is every tool named `pay_…`.
+ * A card number: 13 to 19 digits, with at most one space or dash (ASCII or Unicode) between two
+ * digits, on word edges. A phone number (10 or 11 digits), a time, or a date does not match.
  */
-export const RELEASE_OWNER_RULES = [{ agent: "all", tool: "pay", verdict: "prohibit" }] as const;
+export const CARD_NUMBER_PATTERN = String.raw`\b\d(?:[ \-\u2010-\u2015]?\d){12,18}\b`;
+
+/**
+ * A secret word as a whole word: password, passcode, pin, token, or api key (with a space, a
+ * hyphen, an underscore, or nothing between "api" and "key"). "spinach" and "tokens" do not match.
+ */
+export const SECRET_WORD_PATTERN = String.raw`\b(?:password|passcode|pin|token|api[ _\-]?key)\b`;
+
+/**
+ * The release owner rules: agents never pay; a card number in a reminder and a secret word in a
+ * history search ask first. They cannot be removed; the owner can only add stricter rules. Every
+ * cell gains a release rule it does not hold yet on its next open (`topUpOwnerRules`). The pay
+ * group is every tool named `pay_…`; a rule's value is matched after `normalizeText`, so case and
+ * full-width digits do not matter.
+ */
+export const RELEASE_OWNER_RULES = [
+  { agent: "all", tool: "pay", verdict: "prohibit" },
+  {
+    agent: "all",
+    tool: "set_reminder",
+    match: { kind: "regex", field: "text", value: CARD_NUMBER_PATTERN },
+    verdict: "ask-first",
+  },
+  {
+    agent: "all",
+    tool: "search_history",
+    match: { kind: "regex", field: "query", value: SECRET_WORD_PATTERN },
+    verdict: "ask-first",
+  },
+] as const;
 
 /**
  * The reviewer's role name in the role-to-model map. The reviewer is a model call inside the guard,
@@ -89,8 +118,10 @@ export const MARK_THRESHOLDS: Readonly<Record<string, number>> = {
   handoff: 0.5,
   household_change: 0.5,
   household_read: 0.7,
-  set_reminder: 0.5,
-  search_history: 0.7,
+  // Lowered from 0.5 and 0.7 after Jev scored a card-number reminder 0.15-0.23 and a password
+  // search 0.49-0.56 live; the owner rules above hold those patterns whatever the score.
+  set_reminder: 0.1,
+  search_history: 0.3,
 };
 
 /** The threshold of a tool not listed above. */

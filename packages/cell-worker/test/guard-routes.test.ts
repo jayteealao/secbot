@@ -64,7 +64,11 @@ describe("the person's guard routes (device key)", () => {
       person: { tool: string }[];
       timeZone: string;
     };
-    expect(listed.owner.map((r) => [r.tool, r.source])).toEqual([["pay", "release"]]);
+    expect(listed.owner.map((r) => [r.tool, r.source])).toEqual([
+      ["pay", "release"],
+      ["set_reminder", "release"],
+      ["search_history", "release"],
+    ]);
     expect(listed.person.map((r) => r.tool)).toEqual([
       "handoff",
       "household_change",
@@ -160,15 +164,26 @@ describe("the owner's guard routes (operator key)", () => {
     const listed = (await (await operator(s, "GET", "/ops/rules?cell=owner")).json()) as {
       owner: unknown[];
     };
-    expect(listed.owner).toHaveLength(2);
+    expect(listed.owner).toHaveLength(4);
     const release = await operator(s, "DELETE", "/ops/rules?cell=owner", {
       agent: "all",
       tool: "pay",
     });
     expect(release.status).toBe(400);
     expect(await release.json()).toEqual({
-      error: "refused: this rule is part of the release: agents never pay",
+      error: "refused: this rule is part of the release: any pay tool -> prohibit",
     });
+    // A permit for every reminder of the lead is looser than the owner card-number rule.
+    const looser = await device(s, "POST", "/v1/cells/owner/rules", {
+      agent: "lead",
+      tool: "set_reminder",
+      verdict: "permit",
+    });
+    expect(looser.status).toBe(400);
+    expect(((await looser.json()) as { error: string }).error).toMatch(
+      /^refused: this rule is looser than an owner rule:\n {2}all set_reminder \(text ~ /,
+    );
+
     const removed = await operator(s, "DELETE", "/ops/rules?cell=owner", OWNER_ASK);
     expect(removed.status).toBe(200);
     const activity = await operator(s, "GET", "/ops/activity?cell=person&month=2026-10");

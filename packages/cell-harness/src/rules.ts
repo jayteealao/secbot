@@ -265,13 +265,15 @@ function toolsOverlap(a: string, b: string): boolean {
 }
 
 /**
- * Conservative: two matches overlap unless they name different fields, or are both exact with
- * different values. A doubtful case overlaps, so a looser rule is refused rather than accepted.
+ * Whether a person match and an owner match can both apply to one call. Conservative: they overlap
+ * unless they name different fields, or the person match is exact and the owner match does not
+ * accept its value (two exact matches compare their values). A doubtful case overlaps, so a looser
+ * rule is refused rather than accepted.
  */
-function matchesOverlap(a: RuleMatch | undefined, b: RuleMatch | undefined): boolean {
-  if (a === undefined || b === undefined) return true;
-  if (a.field !== b.field) return false;
-  if (a.kind === "exact" && b.kind === "exact") return a.value === b.value;
+function matchesOverlap(person: RuleMatch | undefined, owner: RuleMatch | undefined): boolean {
+  if (person === undefined || owner === undefined) return true;
+  if (person.field !== owner.field) return false;
+  if (person.kind === "exact") return valueMatches(owner, person.value, true);
   return true;
 }
 

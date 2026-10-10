@@ -62,6 +62,9 @@ export { CREDIT_MARKER, isCreditError, withCreditPause } from "./credit-pause.ts
 export {
   DECISION_EXAMPLES,
   type DecisionExample,
+  HELD_OUT_EXAMPLES,
+  type HeldOutExample,
+  heldOutExamples,
   liveExamples,
 } from "./decision-examples.ts";
 export {
@@ -177,6 +180,7 @@ export {
   redactText,
 } from "./redact.ts";
 export {
+  CARD_NUMBER_PATTERN,
   DECISION_MODELS,
   DECISION_STATE_LIMIT,
   DEFAULT_DECISION_ADAPTER,
@@ -193,7 +197,9 @@ export {
   LIMIT_LINES,
   LIMIT_MAX_USD,
   MARK_THRESHOLDS,
+  RELEASE_OWNER_RULES,
   REVIEWER_ROLE,
+  SECRET_WORD_PATTERN,
   STARTER_SPECIALISTS,
 } from "./release-defaults.ts";
 export { REMINDER_PREFIX, type ReminderPayload, scheduleReminder } from "./reminder.ts";

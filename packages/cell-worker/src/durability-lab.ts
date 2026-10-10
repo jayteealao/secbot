@@ -100,6 +100,8 @@ export interface LabOptions {
   readonly loadMs?: number;
   readonly longJobMs?: number;
   readonly pollMs?: number;
+  /** How often the harness logs the count of storage-gone reports it did not log. */
+  readonly reportSummaryMs?: number;
 }
 
 const lastText = (context: TranscriptContext): { role: string; text: string; system: string } => {
@@ -239,6 +241,9 @@ export class DurabilityLabCell {
       onWakeChange: hooks.onWakeChange,
       onReport,
       routines: [{ routine: tick }],
+      ...(this.options.reportSummaryMs === undefined
+        ? {}
+        : { reportSummaryMs: this.options.reportSummaryMs }),
     }).then(async (cell) => {
       await this.alarms.rearm(cell);
       const settled = this.alarms.settle(cell).catch(() => {});

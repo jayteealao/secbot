@@ -19,7 +19,9 @@ import {
 } from "./live-guard.mjs";
 import {
   ALL_CHECKS,
+  BANK_REMINDER,
   buildReport,
+  CARD_REMINDER,
   CLEARING_FILES,
   CONTRACT,
   check,
@@ -84,6 +86,65 @@ test("evidence with an address or a private value is refused and not written", a
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("the owner-rule matchers read the rules list, the held call, and the denial", async () => {
+  const rules = [
+    "OWNER RULES (you cannot loosen these)",
+    "------------------------------------------------------------------------------",
+    "AGENT   TOOL               MATCH                          VERDICT",
+    "all     pay tools          any                            prohibit",
+    "all     set_reminder       text ~ /\\b\\d(?:[ \\-\\u2010-\\u2015]?\\d){12,18}\\b/i",
+    "                                                          ask first",
+    "all     search_history     query ~ /\\b(?:password|passcode|pin|token|api[ _\\-]?",
+    "                           key)\\b/i",
+    "                                                          ask first",
+  ].join("\n");
+  assert.deepEqual(
+    check(rules, { expect: [CONTRACT.ownerCardRule, CONTRACT.ownerSecretRule] }).missing,
+    [],
+  );
+  const held = [
+    "[ HELD #3 ] the lead wants to run a tool                  lapses in 23 h 59 m",
+    "  agent      lead",
+    "  tool       set_reminder",
+    "  why held   owner rule: all set_reminder (text ~ /\\b\\d(?:[",
+    "             \\-\\u2010-\\u2015]?\\d){12,18}\\b/i) -> ask first",
+    "  answer     /allow 3     allow once",
+    "             (allow always is not offered: an owner rule asks first here)",
+    "             /deny 3      deny",
+  ].join("\n");
+  assert.deepEqual(
+    check(held, {
+      expect: [CONTRACT.held, CONTRACT.heldOwnerCard, CONTRACT.alwaysNotOffered],
+      reject: [CONTRACT.alwaysLine],
+    }),
+    { missing: [], present: [] },
+  );
+  assert.ok(
+    CONTRACT.heldOwnerSecret.test(
+      "  why held   owner rule: all search_history (query ~ /\\b(?:password|passcode|pin|",
+    ),
+  );
+  assert.ok(
+    CONTRACT.deniedReminder.test('[ denied ] #3 set_reminder; the lead was told "denied by sam"'),
+  );
+  assert.ok(
+    CONTRACT.deniedSearch.test('[ denied ] #4 search_history; the lead was told "denied by sam"'),
+  );
+  assert.ok(CONTRACT.alwaysLine.test("             /always 1    allow always; adds: lead handoff"));
+  // Charter step 7's reminder holds no card number, so no owner rule holds it; the card step's does.
+  const { CARD_NUMBER_PATTERN } = await import("../packages/cell-harness/src/release-defaults.ts");
+  const card = new RegExp(CARD_NUMBER_PATTERN, "i");
+  assert.equal(card.test(BANK_REMINDER), false);
+  assert.equal(card.test(CARD_REMINDER), true);
+  const c7 = STEPS.find((step) => step.id === "c7");
+  const texts = (c7?.actions ?? []).flatMap((action) => [
+    action.say ?? "",
+    ...(action.plainer ?? []),
+  ]);
+  assert.ok(texts.length > 0);
+  for (const text of texts) assert.equal(card.test(text), false, text);
 });
 
 test("the matchers read the command line's contract lines", () => {
@@ -178,9 +239,13 @@ test("the step list fills person and target at run time and covers every criteri
     "secret-grants",
     "secret-broker",
     "cli-text",
+    "owner-rules",
   ]) {
     assert.ok(ALL_CHECKS.includes(name), name);
   }
+  // The owner-rule steps run in part 1, before charter step 1.
+  const ids = stepsOf(1).map((step) => step.id);
+  assert.deepEqual(ids.slice(ids.indexOf("o1"), ids.indexOf("c1")), ["o1", "o2", "o3", "o4"]);
   for (let n = 1; n <= 10; n++) assert.ok(ALL_CHECKS.includes(`charter-${n}`), `charter-${n}`);
   const evidence = new Set(STEPS.map((step) => step.evidence));
   for (const file of CLEARING_FILES) assert.ok(evidence.has(file), file);

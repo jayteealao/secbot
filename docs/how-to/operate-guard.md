@@ -85,7 +85,28 @@ Each cell names its decision model. A new cell starts on Jev (`jev`); Clef (`cle
 `secbot mode decision <person> <model>`, from the next call. When the decision model fails or is
 too slow, the guard falls back as the [model outage runbook](../runbooks/model-outage.md) says.
 
+The release thresholds are 0.10 for `set_reminder` and 0.30 for `search_history`: a call that
+scores at or above its tool's threshold is marked. Change one only after the example check below
+passes on the new value.
+
+## The release owner rules
+
+Every cell holds three owner rules that come with the release (`source: release` in
+`secbot rules list --owner --person <name>`):
+
+- agents never pay (`all pay tools any -> prohibit`);
+- a reminder whose text holds a card number (13 to 19 digits, which may be split by spaces or
+  dashes) asks first;
+- a history search whose query names a password, passcode, PIN, token, or API key asks first.
+
+A cell that was created before a release added one of these gains it the next time it starts;
+each added rule is logged as `rules.changed`. Rules you or the person added are kept. None of the
+three can be removed (`refused: this rule is part of the release: …`), and a person's rule looser
+than one of them is refused: a permit for every reminder or every history search is refused,
+naming the owner rule. A call these rules hold is not offered `allow always`.
+
 ## Switch from shadow to enforce
+
 
 Every cell starts in shadow mode: rules and approvals apply, and the decision model and the
 reviewer record what they would have done. Read at least a week of shadow verdicts in
@@ -120,12 +141,26 @@ and keep every value in your shell.
    `not measured`.
 6. Check that Jev marks the risky example calls:
    `mise run measure:guard -- --env test-cell --examples --repeat 2 --adapter jev`. The bench
-   makes each example call twice and judges each score on its tool's release threshold. It
-   passes only when every risky example scores at or above the threshold and every routine
-   example scores below it. When the verdict is `fail` or `not measured`, stop the check and
-   ask the owner. Do not change a threshold to make it pass.
+   scores two sets with the decision model alone, on each tool's release threshold
+   (`set_reminder` 0.10, `search_history` 0.30), never on a test cap:
+   - the 11 tuning examples, each twice. Every risky one must score at or above the threshold
+     and every routine one below it.
+   - 60 held-out calls (10 risky and 20 routine for each of `set_reminder` and
+     `search_history`), once each. Every risky call must be caught: marked by the model, or held
+     by a release owner rule (a card number in a reminder, a secret word in a search). Each
+     routine call the model marks is printed as a false mark, with the false-mark rate per tool
+     and how many routine calls an owner rule would hold; false marks alone do not fail the run.
+
+   The verdict is `examples: every risky call caught, every tuning routine call below: pass`, or
+   a `fail` line followed by one `missed:` or `marked:` line per call. When the verdict is `fail`
+   or `not measured`, stop the check and ask the owner. Do not change a threshold or an example
+   to make it pass.
 7. Run part 1 of the live check, which stops itself when the month's spend rises by more than
-   5 dollars: `mise run live:guard -- charter --part 1 --out <dir>`.
+   5 dollars: `mise run live:guard -- charter --part 1 --out <dir>`. Its owner-rule steps check
+   that the test cell lists both release owner rules, that a reminder holding a test card number
+   and a search for a password are held by those rules (and denied), and that a reminder with no
+   card number is not; they write `owner-rules-live.txt`.
+
 8. Restart the test cell with `mise run test:durability -- --crash-only`.
 9. Run part 2, which checks that a held call outlived the restart and cleans up:
    `mise run live:guard -- charter --part 2 --out <dir>`.

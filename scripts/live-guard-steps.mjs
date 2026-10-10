@@ -36,7 +36,21 @@ export const CONTRACT = {
   heldCalls: /HELD CALLS/,
   granted: /\[ granted \]/,
   stored: /\[ stored \]/,
+  ownerCardRule: /all +set_reminder +text ~ \/\\b\\d/,
+  ownerSecretRule: /all +search_history +query ~ \/\\b\(\?:password/,
+  heldOwnerCard: /why held {3}owner rule: all set_reminder \(text ~/,
+  heldOwnerSecret: /why held {3}owner rule: all search_history \(query ~/,
+  deniedReminder: /\[ denied \] #\d+ set_reminder/,
+  deniedSearch: /\[ denied \] #\d+ search_history/,
+  alwaysLine: /\/always \d+/,
 };
+
+/** A published test card number (no real card), for the owner card-number rule's live step. */
+export const TEST_CARD_NUMBER = "4111 1111 1111 1111";
+/** The reminder text of the owner card-number rule's step. */
+export const CARD_REMINDER = `pay the deposit with card ${TEST_CARD_NUMBER}`;
+/** The reminder text of charter step 7: no card number, so no owner rule holds it. */
+export const BANK_REMINDER = "call the bank about the new account at 09:00";
 
 /** The text the stand-in model gets for a chat line, so the rehearsal makes the same tool call. */
 const handoffScript = (specialist, brief, then) => ({
@@ -106,6 +120,94 @@ export const STEPS = [
         plainer: ["Reply with the word hello."],
         expect: [CONTRACT.usage],
         script: { text: "Hello." },
+      },
+    ],
+  },
+  // The owner's ask-first rules for a card number in a reminder and a secret word in a history
+  // search: listed on a cell that existed before this release, they hold both risky calls with
+  // only allow once and deny (each is denied), and let routine calls run.
+  {
+    id: "o1",
+    part: 1,
+    checks: ["owner-rules"],
+    evidence: "owner-rules-live.txt",
+    actions: [
+      {
+        kind: "cmd",
+        argv: ["rules", "list"],
+        expect: [/OWNER RULES/, CONTRACT.ownerCardRule, CONTRACT.ownerSecretRule],
+      },
+    ],
+  },
+  {
+    id: "o2",
+    part: 1,
+    checks: ["owner-rules"],
+    evidence: "owner-rules-live.txt",
+    actions: [
+      {
+        kind: "chat",
+        say: `Set a reminder for tomorrow at 09:00 with the text: ${CARD_REMINDER}.`,
+        plainer: [`Use the set_reminder tool for tomorrow 09:00 with the text "${CARD_REMINDER}".`],
+        expect: [CONTRACT.held, CONTRACT.heldOwnerCard, CONTRACT.alwaysNotOffered],
+        reject: [CONTRACT.alwaysLine],
+        script: { tool: "set_reminder", args: { at: "tomorrow 09:00", text: CARD_REMINDER } },
+      },
+      { kind: "answer", choice: "deny", expect: [CONTRACT.deniedReminder] },
+    ],
+  },
+  {
+    id: "o3",
+    part: 1,
+    checks: ["owner-rules"],
+    evidence: "owner-rules-live.txt",
+    actions: [
+      {
+        kind: "chat",
+        say: "Use the search_history tool with the query: my bank PIN",
+        plainer: ['Call search_history with query "my bank PIN".'],
+        expect: [CONTRACT.held, CONTRACT.heldOwnerSecret, CONTRACT.alwaysNotOffered],
+        reject: [CONTRACT.alwaysLine],
+        script: { tool: "search_history", args: { query: "my bank PIN" } },
+      },
+      { kind: "answer", choice: "deny", expect: [CONTRACT.deniedSearch] },
+    ],
+  },
+  {
+    id: "o4",
+    part: 1,
+    checks: ["owner-rules"],
+    evidence: "owner-rules-live.txt",
+    actions: [
+      {
+        kind: "chat",
+        say: "Set a reminder for tomorrow at 10:00 with the text: ring Gran on 0161 496 0000.",
+        plainer: [
+          'Use the set_reminder tool for tomorrow 10:00 with the text "ring Gran on 0161 496 0000".',
+        ],
+        expect: [CONTRACT.usage],
+        reject: [CONTRACT.held],
+        script: {
+          tool: "set_reminder",
+          args: { at: "tomorrow 10:00", text: "ring Gran on 0161 496 0000" },
+        },
+      },
+      {
+        kind: "chat",
+        say: "Use the search_history tool with the query spinach, exactly that one word.",
+        plainer: ['Call search_history with query "spinach".'],
+        expect: [CONTRACT.usage],
+        reject: [CONTRACT.held],
+        script: { tool: "search_history", args: { query: "spinach" } },
+      },
+      {
+        kind: "cmd",
+        argv: ["activity"],
+        expect: [
+          /search_history +(allowed|would ask|would block) /,
+          /set_reminder +(allowed|would ask|would block) /,
+        ],
+        waitMs: ACTIVITY_WAIT_MS,
       },
     ],
   },
@@ -243,15 +345,10 @@ export const STEPS = [
     actions: [
       {
         kind: "chat",
-        say: "Set a reminder for tomorrow at 09:00 with the text: check card 4111 1111 1111 1111 expiry.",
-        plainer: [
-          'Use the set_reminder tool for tomorrow 09:00 with the text "check card 4111 1111 1111 1111 expiry".',
-        ],
+        say: `Set a reminder for tomorrow with the text: ${BANK_REMINDER}.`,
+        plainer: [`Use the set_reminder tool for tomorrow 09:00 with the text "${BANK_REMINDER}".`],
         expect: [CONTRACT.usage],
-        script: {
-          tool: "set_reminder",
-          args: { at: "tomorrow 09:00", text: "check card 4111 1111 1111 1111 expiry" },
-        },
+        script: { tool: "set_reminder", args: { at: "tomorrow 09:00", text: BANK_REMINDER } },
       },
       { kind: "pause", ms: 5_000 },
       {

@@ -1,8 +1,11 @@
 // The rule engine (normalization, the five match kinds, specificity, the precedence across
 // levels, the looser check, the pattern-form check and its time bound) and the rule store on a
 // stand-in cell (seeding, add, remove, refusals, the rules.changed event).
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RefusedChange } from "../src/cell-parts.ts";
+import { RulesDoc } from "../src/docs.ts";
+import { CARD_NUMBER_PATTERN, SECRET_WORD_PATTERN } from "../src/release-defaults.ts";
 import { RuleNotFound } from "../src/rule-store.ts";
 import {
   checkPattern,
@@ -307,6 +310,122 @@ describe("the looser check", () => {
   });
 });
 
+describe("the release owner rules", () => {
+  const card = rule(
+    {
+      agent: "all",
+      tool: "set_reminder",
+      verdict: "ask-first",
+      match: { kind: "regex", field: "text", value: CARD_NUMBER_PATTERN },
+    },
+    "release",
+  );
+  const secret = rule(
+    {
+      agent: "all",
+      tool: "search_history",
+      verdict: "ask-first",
+      match: { kind: "regex", field: "query", value: SECRET_WORD_PATTERN },
+    },
+    "release",
+  );
+  const permits = [
+    rule({ agent: "all", tool: "set_reminder", verdict: "permit" }, "default"),
+    rule({ agent: "all", tool: "search_history", verdict: "permit" }, "default"),
+  ];
+
+  it("passes the pattern-form check", () => {
+    expect(checkPattern(CARD_NUMBER_PATTERN)).toBeUndefined();
+    expect(checkPattern(SECRET_WORD_PATTERN)).toBeUndefined();
+  });
+
+  it.each([
+    "4111 1111 1111 1111",
+    "4111-1111-1111-1111",
+    "4111111111111111",
+    "pay with card ４１１１ １１１１ １１１１ １１１１ today",
+    "card 4111–1111–1111–1111",
+    "amex 378282246310005",
+  ])("asks first for a reminder that holds the card number %s", (text) => {
+    const decision = decide([card], permits, call("set_reminder", { text, at: "19:00" }));
+    expect(decision).toMatchObject({ verdict: "ask-first", level: "owner", rule: card });
+  });
+
+  it.each([
+    "call 07700 900123",
+    "ring 0161 496 0000 at 09:00",
+    "bins out at 19:00",
+    "dentist on 2026-10-10",
+    "ticket 4471",
+  ])("lets the person's permit decide a reminder with %s", (text) => {
+    expect(decide([card], permits, call("set_reminder", { text })).verdict).toBe("permit");
+  });
+
+  it.each([
+    "password for the bank",
+    "my PIN",
+    "API-key",
+    "api_key",
+    "Token",
+    "the wifi passcode",
+    "api key",
+  ])("asks first for a history search for %s", (query) => {
+    const decision = decide([secret], permits, call("search_history", { query }));
+    expect(decision).toMatchObject({ verdict: "ask-first", level: "owner", rule: secret });
+  });
+
+  it.each(["spinach", "tokens of thanks", "pinboard", "lentil soup", "passport"])(
+    "lets the person's permit decide a history search for %s",
+    (query) => {
+      expect(decide([secret], permits, call("search_history", { query })).verdict).toBe("permit");
+    },
+  );
+
+  it("refuses a permit for every reminder or search, and accepts an exact one outside the patterns", () => {
+    expect(
+      looserThan({ agent: "all", tool: "set_reminder", verdict: "permit" }, [card, secret]),
+    ).toBe(card);
+    expect(
+      looserThan({ agent: "lead", tool: "search_history", verdict: "permit" }, [card, secret]),
+    ).toBe(secret);
+    expect(
+      looserThan(
+        {
+          agent: "lead",
+          tool: "set_reminder",
+          verdict: "permit",
+          match: { kind: "exact", field: "text", value: "bins out" },
+        },
+        [card, secret],
+      ),
+    ).toBeUndefined();
+    // An exact value the owner pattern accepts overlaps it.
+    expect(
+      looserThan(
+        {
+          agent: "lead",
+          tool: "set_reminder",
+          verdict: "permit",
+          match: { kind: "exact", field: "text", value: "card 4111 1111 1111 1111" },
+        },
+        [card, secret],
+      ),
+    ).toBe(card);
+    // A prefix or another kind stays conservative.
+    expect(
+      looserThan(
+        {
+          agent: "lead",
+          tool: "set_reminder",
+          verdict: "permit",
+          match: { kind: "prefix", field: "text", value: "bins" },
+        },
+        [card],
+      ),
+    ).toBe(card);
+  });
+});
+
 describe("pattern form", () => {
   it.each([
     ["(a+)+", "repeats a group"],
@@ -406,12 +525,14 @@ afterEach(async () => {
 });
 
 describe("the rule store", () => {
-  it("seeds the release owner rule and the four default person rules once", async () => {
+  it("seeds the release owner rules and the four default person rules once", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     test = await openTestCell();
     const first = await test.cell.rules();
     expect(first.owner.map((r) => [r.agent, r.tool, r.verdict, r.source])).toEqual([
       ["all", "pay", "prohibit", "release"],
+      ["all", "set_reminder", "ask-first", "release"],
+      ["all", "search_history", "ask-first", "release"],
     ]);
     expect(first.person.map((r) => [r.agent, r.tool, r.verdict, r.source])).toEqual([
       ["all", "handoff", "permit", "default"],
@@ -423,7 +544,67 @@ describe("the rule store", () => {
     await test.reopen();
     const after = await test.cell.rules();
     expect(after.person).toHaveLength(3);
-    expect(after.owner).toHaveLength(1);
+    expect(after.owner).toHaveLength(3);
+  });
+
+  it("gives a cell from an older release the new owner rules on its next open, once, and keeps a removed permit removed", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    // The cell as an older release left it: only the pay rule, and the person removed a permit.
+    await test.cell.harness.commit(async (tx) => {
+      const rules = await tx.doc(RulesDoc);
+      rules.owner.splice(1);
+    }, BACKGROUND_CONTEXT);
+    await test.cell.removeRule("person", { agent: "all", tool: "search_history" });
+    log.mockClear();
+    await test.reopen();
+    await test.reopen();
+    const after = await test.cell.rules();
+    expect(after.owner.map((r) => [r.tool, r.match?.value ?? null, r.source])).toEqual([
+      ["pay", null, "release"],
+      ["set_reminder", CARD_NUMBER_PATTERN, "release"],
+      ["search_history", SECRET_WORD_PATTERN, "release"],
+    ]);
+    expect(after.person.map((r) => r.tool)).toEqual([
+      "handoff",
+      "household_change",
+      "set_reminder",
+    ]);
+    // One rules.changed per added rule, on the first open only, with the match kind and no value.
+    const events = loggedEvents(log.mock.calls).filter((e) => e.event === "rules.changed");
+    expect(events).toEqual([
+      expect.objectContaining({
+        level: "owner",
+        action: "add",
+        outcome: "done",
+        tool: "set_reminder",
+        match_kind: "regex",
+      }),
+      expect.objectContaining({
+        level: "owner",
+        action: "add",
+        outcome: "done",
+        tool: "search_history",
+        match_kind: "regex",
+      }),
+    ]);
+    expect(JSON.stringify(events)).not.toContain("password");
+  });
+
+  it("keeps an owner rule the owner already added with the same agent, tool, and match", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    await test.cell.harness.commit(async (tx) => {
+      const rules = await tx.doc(RulesDoc);
+      const card = rules.owner[1];
+      if (card === undefined) throw new Error("no card rule");
+      card.source = "owner";
+    }, BACKGROUND_CONTEXT);
+    await test.reopen();
+    const after = await test.cell.rules();
+    const card = after.owner.filter((r) => r.match?.value === CARD_NUMBER_PATTERN);
+    expect(card.map((r) => r.source)).toEqual(["owner"]);
+    expect(after.owner).toHaveLength(3);
   });
 
   it("adds and removes rules, normalizes match values, and logs rules.changed without values", async () => {
@@ -445,7 +626,9 @@ describe("the rule store", () => {
       match: { kind: "web-domain", field: "url", value: "evil.example" },
     });
     expect(removed.id).toBe(added.id);
-    const events = loggedEvents(log.mock.calls).filter((e) => e.event === "rules.changed");
+    const events = loggedEvents(log.mock.calls).filter(
+      (e) => e.event === "rules.changed" && e.level === "person",
+    );
     expect(events).toEqual([
       expect.objectContaining({
         level: "person",
@@ -522,11 +705,29 @@ describe("the rule store", () => {
     expect(String((error as Error).message)).toContain(reason);
   });
 
-  it("refuses removing the release rule and reports a missing rule", async () => {
+  it("refuses removing each release rule, naming it, and reports a missing rule", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     test = await openTestCell();
     await expect(test.cell.removeRule("owner", { agent: "all", tool: "pay" })).rejects.toThrow(
-      "this rule is part of the release: agents never pay",
+      "this rule is part of the release: any pay tool -> prohibit",
+    );
+    await expect(
+      test.cell.removeRule("owner", {
+        agent: "all",
+        tool: "set_reminder",
+        match: { kind: "regex", field: "text", value: CARD_NUMBER_PATTERN },
+      }),
+    ).rejects.toThrow(
+      `this rule is part of the release: all set_reminder (text ~ /${CARD_NUMBER_PATTERN}/i) -> ask first`,
+    );
+    await expect(
+      test.cell.removeRule("owner", {
+        agent: "all",
+        tool: "search_history",
+        match: { kind: "regex", field: "query", value: SECRET_WORD_PATTERN },
+      }),
+    ).rejects.toThrow(
+      `this rule is part of the release: all search_history (query ~ /${SECRET_WORD_PATTERN}/i) -> ask first`,
     );
     await expect(
       test.cell.removeRule("person", { agent: "lead", tool: "handoff" }),

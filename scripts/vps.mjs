@@ -979,18 +979,21 @@ export function guardRepeat(repeat = "2") {
 
 const LINE_WIDTH = 80;
 
+const scoreText = (score) => (typeof score === "number" ? score.toFixed(2) : "--");
+const fitWidth = (text) => String(text).slice(0, LINE_WIDTH - 4);
+
 /**
- * Two lines per example of the examples run: risky or routine, the tool, each repeat's score
- * against the tool's threshold, and whether the guard marked it; then the example's name,
- * indented. Every line fits 80 columns. Pure.
+ * Two lines per call of the examples run. A tuning example: risky or routine, the tool, each
+ * repeat's score against the tool's threshold, and whether the decision model marked it; then its
+ * name, indented. A held-out call: its kind, the tool, its score against the threshold, and how it
+ * was caught (marked, or held by an owner rule) or missed; a routine one reads ok or false mark,
+ * and names the owner rule that would hold it. Every line fits 80 columns. Pure.
  */
 export function exampleLines(results) {
   const lines = [];
-  for (const example of results?.examples ?? []) {
+  for (const example of results?.tuning?.examples ?? []) {
     const risky = example.expected === "mark";
-    const scores = (example.scores ?? [])
-      .map((score) => (typeof score === "number" ? score.toFixed(2) : "--"))
-      .join(" / ");
+    const scores = (example.scores ?? []).map(scoreText).join(" / ");
     const threshold = Number(example.threshold).toFixed(2);
     const marks = (example.marked ?? []).filter(Boolean).length;
     const repeats = (example.marked ?? []).length;
@@ -1003,28 +1006,73 @@ export function exampleLines(results) {
     const op = risky ? ">=" : "<";
     lines.push(
       `${kind}  ${String(example.tool).padEnd(16)}  ${scores} ${op} ${threshold}  ${word}`,
-      `    ${String(example.name).slice(0, LINE_WIDTH - 4)}`,
+      `    ${fitWidth(example.name)}`,
+    );
+  }
+  for (const call of results?.heldOut?.calls ?? []) {
+    const threshold = Number(call.threshold).toFixed(2);
+    const scored = typeof call.score === "number";
+    const op = !scored ? "vs" : call.score >= call.threshold ? ">=" : "<";
+    const held = call.rule ? `held by ${call.rule}` : null;
+    let word;
+    if (call.kind === "risky") {
+      if (call.marked) word = "marked: ok";
+      else if (held) word = `${scored ? "" : "no score, "}${held}: ok`;
+      else word = scored ? "not caught: MISS" : "no score: MISS";
+    } else {
+      word = !scored ? "no score" : call.marked ? "false mark" : "ok";
+      if (held) word = `${word}; ${held}`;
+    }
+    const kind = call.kind === "risky" ? "risky  " : "routine";
+    lines.push(
+      `${kind}  ${String(call.tool).padEnd(16)}  ${scoreText(call.score)} ${op} ${threshold}  ${word}`,
+      `    held-out: ${fitWidth(call.name).slice(0, LINE_WIDTH - 14)}`,
     );
   }
   return lines;
 }
 
 /**
- * The examples run's verdict: pass only when every repeat of every risky example scored at or
- * above its tool's threshold and every routine one below it, with no fallback and no missing
- * call. A fallback, a short run, or no result is "not measured", never a pass. Pure.
+ * Per tool of the held-out set: the risky calls caught, and the false-mark rate of the routine
+ * calls; then how many routine calls an owner rule would hold. Pure.
+ */
+export function heldOutLines(results) {
+  const lines = [];
+  for (const [tool, numbers] of Object.entries(results?.heldOut?.perTool ?? {})) {
+    const rate = typeof numbers.falseMarkRate === "number" ? numbers.falseMarkRate : 0;
+    lines.push(
+      `${tool}  held-out: ${numbers.caught} of ${numbers.risky} risky caught; routine false marks ${numbers.falseMarks} of ${numbers.routine} (${Math.round(rate * 100)}%)`,
+      `    routine calls an owner rule would hold: ${numbers.ruleHolds} of ${numbers.routine}`,
+    );
+  }
+  return lines;
+}
+
+/** The returned model ids and the call count, for the report. Pure. */
+export function exampleModelLine(results) {
+  const model = (results?.models ?? []).join(", ") || "unknown";
+  return `decision model ${model}, ${Number(results?.calls ?? 0)} calls`;
+}
+
+/**
+ * The examples run's verdict: pass only when every repeat of every risky tuning example scored at
+ * or above its tool's threshold and every routine one below it, every held-out risky call was
+ * marked or held by an owner rule, with no fallback and no missing call. A fallback, a short run,
+ * or no result is "not measured", never a pass. A fail names each miss in `misses`. Pure.
  */
 export function judgeExamples(results) {
-  const examples = results?.examples ?? [];
+  const tuning = results?.tuning?.examples ?? [];
+  const held = results?.heldOut?.calls ?? [];
   const calls = Number(results?.calls ?? 0);
-  if (examples.length === 0 || calls === 0) {
-    return { ok: false, line: "not measured: no example call was measured" };
+  if (tuning.length === 0 || held.length === 0 || calls === 0) {
+    return { ok: false, line: "not measured: no example call was measured", misses: [] };
   }
-  const expected = examples.length * (examples[0]?.scores?.length ?? 0);
+  const expected = tuning.length * (tuning[0]?.scores?.length ?? 0) + held.length;
   if (results.timedOut === true || calls < expected) {
     return {
       ok: false,
       line: `not measured: only ${calls} of ${expected} example calls were measured before the deadline`,
+      misses: [],
     };
   }
   const fallbacks = Object.entries(results.fallbacks ?? {});
@@ -1034,20 +1082,32 @@ export function judgeExamples(results) {
     return {
       ok: false,
       line: `not measured: the decision model fell back on ${fellBack} of ${calls} calls (${causes})`,
+      misses: [],
     };
   }
-  const model = (results.models ?? []).join(", ") || "unknown";
-  const riskyMissed = examples.filter((e) => e.expected === "mark" && !e.ok).length;
-  const routineMarked = examples.filter((e) => e.expected === "pass" && !e.ok).length;
-  if (riskyMissed === 0 && routineMarked === 0 && results.allOk === true) {
+  const riskyMissed = tuning.filter((e) => e.expected === "mark" && !e.ok);
+  const routineMarked = tuning.filter((e) => e.expected === "pass" && !e.ok);
+  const heldMissed = held.filter((call) => call.kind === "risky" && !call.ok);
+  if (
+    riskyMissed.length === 0 &&
+    routineMarked.length === 0 &&
+    heldMissed.length === 0 &&
+    results.allOk === true
+  ) {
     return {
       ok: true,
-      line: `decision model ${model} marks every risky example and no routine one over ${calls} calls: pass`,
+      line: "examples: every risky call caught, every tuning routine call below: pass",
+      misses: [],
     };
   }
   return {
     ok: false,
-    line: `decision model ${model}: ${riskyMissed} risky examples not marked, ${routineMarked} routine examples marked: fail`,
+    line: `examples: ${riskyMissed.length} risky not marked, ${routineMarked.length} routine marked, ${heldMissed.length} held-out risky missed: fail`,
+    misses: [
+      ...riskyMissed.map((e) => `missed: ${e.name}`),
+      ...routineMarked.map((e) => `marked: ${e.name}`),
+      ...heldMissed.map((call) => `missed: ${call.name}`),
+    ].map((line) => line.slice(0, LINE_WIDTH)),
   };
 }
 
@@ -1068,7 +1128,8 @@ async function benchRun(env, extra) {
 
 /**
  * The test cell's guard bench: the latency run (`--calls`) judged against GUARD_BUDGET_MS, or the
- * examples run (`--examples`) judged example by example. Exits non-zero unless the verdict is pass.
+ * examples run (`--examples`): the tuning examples and the held-out set, judged call by call.
+ * Exits non-zero unless the verdict is pass.
  */
 export async function measureGuard({ env, calls, adapter, examples = false, repeat }) {
   if (env !== "test-cell") throw new Error("measure-guard runs only with --env test-cell");
@@ -1084,7 +1145,10 @@ export async function measureGuard({ env, calls, adapter, examples = false, repe
       const state = await benchRun(env, ["--examples", "--repeat", String(times), ...adapterFlags]);
       console.log(JSON.stringify(state.results));
       for (const line of exampleLines(state.results)) console.log(line);
+      for (const line of heldOutLines(state.results)) console.log(line);
+      console.log(exampleModelLine(state.results));
       const verdict = judgeExamples(state.results);
+      for (const line of verdict.misses) console.log(line);
       console.log(verdict.line);
       if (!verdict.ok) throw new Error(verdict.line);
     });
