@@ -170,7 +170,7 @@ describe("the reviewer and shadow verdicts in the person's views", () => {
     expect(result.code).toBe(0);
     const lines = result.out.split("\n");
     expect(lines.slice(2, 7)).toEqual([
-      "TIME   AGENT      TOOL OR JOB              VERDICT       LAYER       COST",
+      "TIME   AGENT      TOOL OR JOB              VERDICT       LAYER          COST",
       "11:20  lead       set_reminder             would block   reviewer  $0.0061",
       "         shadow: reminder text holds a card number; the call ran",
       "09:15  household  pay_test                 refused       rule      $0.0000",

@@ -23,11 +23,9 @@ import type {
 } from "@secbot/cell-harness";
 import { errorFields, logEvent } from "@secbot/cell-harness";
 import { HOUSEHOLD_CELL_NAME, isRefusedHouseholdChange } from "@secbot/household-cell";
+import { INTERNAL_ATTEMPTS, postInternal } from "./internal-rpc.ts";
 import type { HouseholdNamespaceLike, HouseholdStubLike } from "./person-cell.ts";
 
-export const OPERATOR_HEADER = "x-secbot-operator";
-const ATTEMPTS = 3;
-const RETRY_MS = 250;
 const CALL_TIMEOUT_MS = 30_000;
 
 /** The household cell's methods a person cell calls; the HTTP path is the same name. */
@@ -57,57 +55,49 @@ export class HouseholdCallError extends Error {
   }
 }
 
-const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-
 /** A client over HTTP: three attempts on a network error or a 5xx, the same body each time. */
 export function httpHouseholdClient(
   url: string,
   key: string,
   fetcher: typeof fetch = (input, init) => fetch(input, init),
 ): HouseholdClient {
-  const base = url.replace(/\/+$/, "");
   const call = async <T>(method: HouseholdMethod, body: unknown): Promise<T> => {
-    let lastError: unknown;
-    let tried = 0;
-    for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
-      tried = attempt;
-      try {
-        const response = await fetcher(`${base}/internal/household/${method}`, {
-          method: "POST",
-          headers: { "content-type": "application/json", [OPERATOR_HEADER]: key },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(CALL_TIMEOUT_MS),
-        });
-        const answer = (await response.json().catch(() => ({}))) as { error?: string } & T;
-        if (response.ok) {
-          logEvent("household.call", {
-            transport: "http",
-            method,
-            outcome: attempt === 1 ? "ok" : "retried",
-            attempts: attempt,
-          });
-          return answer;
-        }
-        lastError = new HouseholdCallError(
-          answer.error ?? `household ${method} answered ${response.status}`,
-          response.status,
-        );
-        // A refusal (4xx) is final; a retry would be refused the same way.
-        if (response.status < 500) break;
-      } catch (error) {
-        lastError = error;
-      }
-      if (attempt < ATTEMPTS) await pause(RETRY_MS * attempt);
+    const outcome = await postInternal<T>({
+      url,
+      key,
+      path: `/internal/household/${method}`,
+      body,
+      attempts: INTERNAL_ATTEMPTS,
+      timeoutMs: CALL_TIMEOUT_MS,
+      fetcher,
+    });
+    if (outcome.kind === "ok") {
+      logEvent("household.call", {
+        transport: "http",
+        method,
+        outcome: outcome.attempts === 1 ? "ok" : "retried",
+        attempts: outcome.attempts,
+        duration_ms: outcome.durationMs,
+      });
+      return outcome.value;
     }
-    const refused = lastError instanceof HouseholdCallError && lastError.status < 500;
+    const lastError =
+      outcome.status === null
+        ? outcome.cause
+        : new HouseholdCallError(
+            outcome.message ?? `household ${method} answered ${outcome.status}`,
+            outcome.status,
+          );
+    const refused = outcome.kind === "refused";
     logEvent(
       "household.call",
       {
         transport: "http",
         method,
         outcome: refused ? "refused" : "failed",
-        attempts: tried,
-        status: lastError instanceof HouseholdCallError ? lastError.status : null,
+        attempts: outcome.attempts,
+        status: outcome.status,
+        duration_ms: outcome.durationMs,
         ...errorFields(lastError),
       },
       refused ? "warn" : "error",

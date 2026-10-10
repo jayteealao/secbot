@@ -7,13 +7,16 @@
  *   authorization, cookie, credential, private key; any case and separator);
  * - token-shaped text anywhere in a string (`Bearer …`, `sk-…`, `ghp_…`, JWT-shaped text, and
  *   hex or base64 runs over 32 characters);
- * - any literal value the caller names, and every secret value this process has learned
- *   (`addKnownSecretValues`: the values the secrets cell granted to this cell's agents), so the
- *   activity record, guard logs, approval prompts, the decision model's state, and the reviewer's
- *   input all redact them without passing them at each call site.
+ * - any literal value the caller names, and every secret value a cell of this process has
+ *   learned (`setKnownSecretValues` and `addKnownSecretValues`: the values the secrets cell granted
+ *   to that cell's agents), so the activity record, guard logs, approval prompts, the decision
+ *   model's state, and the reviewer's input all redact them without passing them at each call site.
  *
- * Over-redaction is the safe direction: a long identifier that only looks like a token is hidden
- * too, and a value learned by one cell of a process is hidden in every cell of that process.
+ * Learned values are kept per cell: a cell's reload replaces its own set, and a closed cell's set
+ * is dropped (`clearKnownSecretValues(cell)`). Redaction reads every cell's set, because
+ * over-redaction is the safe direction: a long identifier that only looks like a token is hidden
+ * too, and a value learned by one cell of a process is hidden in every cell of that process. A
+ * UUID is an identifier, not a token, so it is kept.
  */
 import type { JsonValue } from "@earendil-works/chord";
 
@@ -22,23 +25,40 @@ export const REDACTED = "[redacted]";
 /** A value shorter than this is never replaced (it would match ordinary text). */
 const SHORTEST_VALUE = 4;
 
-/** Secret values learned in this process; kept in memory only, never stored or logged. */
-const knownSecretValues = new Set<string>();
+/** Secret values learned per cell; kept in memory only, never stored or logged. */
+const knownByCell = new Map<string, Set<string>>();
+/** The set of values learned with no cell named. */
+const ANY_CELL = "";
 
-/** Every later redaction also replaces these values. */
-export function addKnownSecretValues(values: Iterable<string>): void {
-  for (const value of values) {
-    if (typeof value === "string" && value.length >= SHORTEST_VALUE) knownSecretValues.add(value);
-  }
+const usable = (values: Iterable<string>) =>
+  [...values].filter((value) => typeof value === "string" && value.length >= SHORTEST_VALUE);
+
+/** Every later redaction also replaces these values, learned by `cell`. */
+export function addKnownSecretValues(values: Iterable<string>, cell = ANY_CELL): void {
+  const set = knownByCell.get(cell) ?? new Set<string>();
+  for (const value of usable(values)) set.add(value);
+  if (set.size > 0) knownByCell.set(cell, set);
 }
 
-/** Tests: forget the learned values. */
-export function clearKnownSecretValues(): void {
-  knownSecretValues.clear();
+/** Replaces the values `cell` learned (a reload of its granted values). */
+export function setKnownSecretValues(cell: string, values: Iterable<string>): void {
+  const set = new Set(usable(values));
+  if (set.size === 0) knownByCell.delete(cell);
+  else knownByCell.set(cell, set);
 }
 
-const withKnown = (values: readonly string[]): readonly string[] =>
-  knownSecretValues.size === 0 ? values : [...values, ...knownSecretValues];
+/** Forgets the values `cell` learned, or every learned value when no cell is named (tests). */
+export function clearKnownSecretValues(cell?: string): void {
+  if (cell === undefined) knownByCell.clear();
+  else knownByCell.delete(cell);
+}
+
+function withKnown(values: readonly string[]): readonly string[] {
+  if (knownByCell.size === 0) return values;
+  const all = [...values];
+  for (const set of knownByCell.values()) all.push(...set);
+  return all;
+}
 
 /** The largest redacted argument object a record keeps, in UTF-8 bytes. */
 export const ARGUMENTS_LIMIT = 2_048;
@@ -59,6 +79,16 @@ const HEX_RUN = /\b[0-9a-fA-F]{33,}\b/g;
 /** A run of base64 characters over 32 long that holds both a letter and a digit. */
 const BASE64_RUN = /[A-Za-z0-9+/_-]{33,}={0,2}/g;
 
+/** A UUID (any version): an identifier, never redacted for its shape alone. */
+const UUID = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/g;
+
+/** True when a base64-like run is token-shaped once the UUIDs inside it are set aside. */
+function tokenLike(run: string): boolean {
+  return run
+    .split(UUID)
+    .some((part) => part.length > 32 && /[A-Za-z]/.test(part) && /[0-9]/.test(part));
+}
+
 /** True when a field name looks like it holds a secret. */
 export function isSecretKey(key: string): boolean {
   return SECRET_KEY.test(key.toLowerCase().replace(/[^a-z0-9]/g, ""));
@@ -69,7 +99,16 @@ export function redactText(text: string, values: readonly string[] = []): string
   return replaceText(text, withKnown(values));
 }
 
-function replaceText(text: string, values: readonly string[]): string {
+/**
+ * `text` with the named literal values, the learned values, and the distinctive token shapes
+ * (`Bearer …`, `sk-…`, `ghp_…`, JWT) replaced, but not the generic hex and base64 runs: for a
+ * service's answer, whose long ids and names are data the agent needs.
+ */
+export function redactTokens(text: string, values: readonly string[] = []): string {
+  return replaceTokens(text, withKnown(values));
+}
+
+function replaceTokens(text: string, values: readonly string[]): string {
   let result = text;
   // Longest first, so a value that contains another is replaced whole.
   for (const value of [...values]
@@ -78,10 +117,14 @@ function replaceText(text: string, values: readonly string[]): string {
     result = result.split(value).join(REDACTED);
   }
   for (const shape of TOKEN_SHAPES) result = result.replace(shape, REDACTED);
-  result = result.replace(HEX_RUN, (run) => (/[0-9]/.test(run) ? REDACTED : run));
-  return result.replace(BASE64_RUN, (run) =>
-    /[A-Za-z]/.test(run) && /[0-9]/.test(run) ? REDACTED : run,
+  return result;
+}
+
+function replaceText(text: string, values: readonly string[]): string {
+  const result = replaceTokens(text, values).replace(HEX_RUN, (run) =>
+    /[0-9]/.test(run) ? REDACTED : run,
   );
+  return result.replace(BASE64_RUN, (run) => (tokenLike(run) ? REDACTED : run));
 }
 
 export interface RedactOptions {
@@ -109,10 +152,20 @@ function redactValue(value: JsonValue, values: readonly string[]): JsonValue {
 
 const bytes = (value: JsonValue) => new TextEncoder().encode(JSON.stringify(value)).length;
 
+/** A kept text field over the cap is cut to this many characters. */
+export const KEPT_TEXT_LIMIT = 512;
+
+const cut = (text: string) =>
+  text.length > KEPT_TEXT_LIMIT
+    ? `${text.slice(0, KEPT_TEXT_LIMIT)} [cut from ${text.length} characters]`
+    : text;
+
 /**
  * `value` with secret-looking fields and text replaced. With `maxBytes`, a top-level object over
  * the cap drops its largest fields first, never a `keep` field, and lists what it dropped under
- * `"…dropped"`.
+ * `"…dropped"`; when the kept fields alone are still over the cap, each kept text is cut to
+ * KEPT_TEXT_LIMIT characters, so an agent's long value never passes the cap whole. A rule decides
+ * on the whole value before this runs.
  */
 export function redact(value: JsonValue, options: RedactOptions = {}): JsonValue {
   const redacted = redactValue(value, withKnown(options.values ?? []));
@@ -129,15 +182,22 @@ export function redact(value: JsonValue, options: RedactOptions = {}): JsonValue
   const keep = new Set(options.keep ?? []);
   const fields = { ...redacted };
   const dropped: string[] = [];
+  const size = new Map(Object.keys(fields).map((key) => [key, bytes(fields[key] ?? null)]));
   const candidates = Object.keys(fields)
     .filter((key) => !keep.has(key))
-    .sort((a, b) => bytes(fields[b] ?? null) - bytes(fields[a] ?? null));
+    .sort((a, b) => (size.get(b) ?? 0) - (size.get(a) ?? 0));
   const shaped = (): JsonValue =>
     dropped.length === 0 ? fields : { ...fields, "…dropped": dropped };
   for (const key of candidates) {
     if (bytes(shaped()) <= maxBytes) break;
     delete fields[key];
     dropped.push(key);
+  }
+  if (bytes(shaped()) > maxBytes) {
+    for (const key of keep) {
+      const kept = fields[key];
+      if (typeof kept === "string") fields[key] = cut(kept);
+    }
   }
   return shaped();
 }

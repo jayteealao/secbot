@@ -38,6 +38,7 @@ import {
   isDecisionAdapter,
   isGuardMode,
   logEvent,
+  logName,
   MONTH,
   NoHeldCall,
   openCellHarness,
@@ -48,6 +49,7 @@ import {
   SECRETS_UNAVAILABLE,
   type SecretsClient,
   SecretsRefused,
+  SecretsUnavailable,
   type SessionStream,
 } from "@secbot/cell-harness";
 import {
@@ -653,7 +655,7 @@ export class PersonCell {
   ): Promise<Response> {
     const secrets = secretsClientOf(this.env);
     try {
-      if (secrets === undefined) throw new Error(SECRETS_UNAVAILABLE);
+      if (secrets === undefined) throw new SecretsUnavailable();
       if (route === "/secrets" && request.method === "GET") {
         return json({ person, secrets: await secrets.list(person) });
       }
@@ -667,7 +669,18 @@ export class PersonCell {
       if (!(await cell.status()).roles.includes(agent)) {
         const reason = `no agent named ${agent}`;
         const action = request.method === "POST" ? "grant" : "revoke";
-        logEvent("secret.refused", { cell: person, action, person, agent, secret, reason }, "warn");
+        logEvent(
+          "secret.refused",
+          {
+            cell: person,
+            action,
+            person,
+            agent: logName(agent),
+            secret: logName(secret),
+            reason: `no agent named ${logName(agent)}`,
+          },
+          "warn",
+        );
         return json({ error: `refused: ${reason}` }, 400);
       }
       if (request.method === "POST") {
@@ -677,6 +690,8 @@ export class PersonCell {
       return json({ person, secret, agent, ...(await secrets.revoke(person, secret, agent)) });
     } catch (error) {
       if (error instanceof SecretsRefused) return json({ error: `refused: ${error.message}` }, 400);
+      // Only "the secrets cell did not answer" is 503; any other failure is the route's own (500).
+      if (!(error instanceof SecretsUnavailable)) throw error;
       logEvent("secrets.unreachable", { cell: person, route, ...errorFields(error) }, "warn");
       return json({ error: `refused: ${SECRETS_UNAVAILABLE}` }, 503);
     }

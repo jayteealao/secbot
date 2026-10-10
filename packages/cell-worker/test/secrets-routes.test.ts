@@ -4,14 +4,14 @@
 //
 // - The owner adds a secret and allowlists it for research; the person grants it. A grant outside
 //   the allowlist, for an agent not on the roster, of a missing secret, or of another person's
-//   secret is refused on stderr with exit 1 (AC-39).
+//   secret is refused on stderr with exit 1.
 // - research reads the value; the lead and the household specialist are refused, and so is research
-//   for a secret not granted to it. Each refusal is a `secrets`-layer row in `secbot activity`
-//   (AC-38), and each logs one `secret.refused` line (AC-45).
+//   for a secret not granted to it. Each refusal is a `secrets`-layer row in `secbot activity`,
+//   and each logs one `secret.refused` line.
 // - A brokered health call reaches a local fake target with the token in its header and returns
-//   the answer; no agent ever sees the token (AC-40).
+//   the answer; no agent ever sees the token.
 // - The value and the token appear in no activity record, log line, held call's approval prompt,
-//   decision-model request, or reviewer input (AC-42).
+//   decision-model request, or reviewer input.
 // With SECBOT_EVIDENCE_DIR set, each command's stdout, stderr, and exit code are written there.
 
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -285,7 +285,7 @@ describe("secrets end to end on the stand-in", () => {
       ).code,
     ).toBe(0);
 
-    // AC-39: the person grants inside the allowlist only.
+    // The person grants inside the allowlist only.
     const refusals: [string[], { person?: "owner" | "second" }, string][] = [
       [
         ["test-secret", "household"],
@@ -323,7 +323,7 @@ describe("secrets end to end on the stand-in", () => {
       "",
     ]);
 
-    // AC-38: research reads the value; the lead, household, and research for "spare" are refused.
+    // Research reads the value; the lead, household, and research for "spare" are refused.
     const harness = setup.harness("owner");
     const sawValue = () =>
       setup.gateway.requests.some(
@@ -343,7 +343,7 @@ describe("secrets end to end on the stand-in", () => {
       );
     await until(async () => (await secretsRows()).length === 3);
 
-    // AC-40: the health specialist's brokered call returns the answer, never the token.
+    // The health specialist's brokered call returns the answer, never the token.
     await leadSays(
       setup,
       handoff(
@@ -362,7 +362,7 @@ describe("secrets end to end on the stand-in", () => {
     expect(targetSeen).toEqual([{ path: "/v1/sleep", header: BROKER_TOKEN }]);
     expect(brokered()?.lastText).toContain("The service answered 200.");
 
-    // AC-42: a call the decision model and the reviewer look at, and a held call, both carrying
+    // A call the decision model and the reviewer look at, and a held call, both carrying
     // the value research read.
     stub.decision = riskyAt(0.9);
     await leadSays(
@@ -396,7 +396,7 @@ describe("secrets end to end on the stand-in", () => {
     const [first] = held;
     await harness.answer(first?.number ?? 0, "deny", { device: "laptop" });
 
-    // AC-38: each refusal is a `secrets` row with its reason.
+    // Each refusal is a `secrets` row with its reason.
     const activity = await secbot(setup, {}, "activity");
     await evidence("activity.txt", "activity", activity);
     expect(activity.code).toBe(0);
@@ -414,7 +414,7 @@ describe("secrets end to end on the stand-in", () => {
     }
     expect(activity.out.split("\n").every((line) => line.length <= 80)).toBe(true);
 
-    // AC-42: the value and the token are nowhere they must not be.
+    // The value and the token are nowhere they must not be.
     const records = JSON.stringify(await harness.activity({ limit: 200 }));
     const prompts = JSON.stringify(held);
     const decisions = JSON.stringify(stub.seen);
@@ -436,7 +436,7 @@ describe("secrets end to end on the stand-in", () => {
     expect(seenByAgents).not.toContain(BROKER_TOKEN);
     expect(seenByAgents).not.toContain(SPARE_VALUE);
 
-    // AC-45: one `secret.refused` line per refusal, with no value: five refused grants (one for the evidence capture), three reads.
+    // One `secret.refused` line per refusal, with no value: five refused grants (one for the evidence capture), three reads.
     const refusedLines = loggedEvents([...log.mock.calls, ...warn.mock.calls]).filter(
       (event) => event.event === "secret.refused",
     );

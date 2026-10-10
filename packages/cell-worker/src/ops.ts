@@ -36,26 +36,27 @@
  */
 import {
   type BudgetBoard,
-  budgetLine,
   type CostView,
+  costFromReport,
   DEFAULT_DEVELOPER_BUDGET_USD,
   DEVELOPER_ROLE,
   errorFields,
   type HeartbeatState,
   type HouseholdClient,
+  householdCostView,
   logEvent,
   SECRETS_UNAVAILABLE,
   type SecretInput,
   type SecretsClient,
   SecretsRefused,
   SecretsUnavailable,
-  type SpendReport,
 } from "@secbot/cell-harness";
 import type { CellDump } from "@secbot/cell-storage";
 import { isRefusedHouseholdChange } from "@secbot/household-cell";
 import { sameHex, sha256Hex } from "./device-auth.ts";
 import { contractStep } from "./health.ts";
-import { HouseholdCallError, OPERATOR_HEADER } from "./household-client.ts";
+import { HouseholdCallError } from "./household-client.ts";
+import { OPERATOR_HEADER } from "./internal-rpc.ts";
 
 /** What the operator routes need from a cell's stub (celld JS RPC). */
 export interface SnapshotStub {
@@ -145,19 +146,24 @@ export async function hasOperatorKey(request: Request, env: OpsEnv): Promise<boo
 }
 
 /** The cells a request names (`?cells=`), each one served by this fleet; all of them by default. */
-function cellsOf(url: URL, deps: OpsDeps): { cells: string[] } | { error: string } {
+function cellsOf(
+  url: URL,
+  deps: OpsDeps,
+): { cells: string[] } | { error: string; status: 400 | 404 } {
   const named = (url.searchParams.get("cells") ?? "")
     .split(",")
     .map((name) => name.trim())
     .filter(Boolean)
     .map((name) => (name === "person" ? "second" : name));
-  if (named.includes(SECRETS_CELL)) return { error: "the secrets cell is never snapshotted" };
+  if (named.includes(SECRETS_CELL)) {
+    return { error: "the secrets cell is never snapshotted", status: 400 };
+  }
   const cells =
     named.length === 0 ? deps.cells.filter((cell) => cell !== SECRETS_CELL) : [...new Set(named)];
   const foreign = cells.find((cell) => !deps.cells.includes(cell));
   return foreign === undefined
     ? { cells }
-    : { error: `cell ${foreign} is served by another fleet` };
+    : { error: `cell ${foreign} is served by another fleet`, status: 404 };
 }
 
 const snapshotKey = (id: string, cell: string) => `snapshots/${id}/${cell}.json`;
@@ -181,6 +187,7 @@ const RULE_BODY_LIMIT = 16 * 1024;
 async function guardRoute(request: Request, url: URL, deps: OpsDeps): Promise<Response> {
   const raw = url.searchParams.get("cell") ?? "";
   const cell = raw === "person" ? "second" : raw;
+  if (cell === "") return json({ error: "send ?cell=<person>" }, 400);
   if (!deps.cells.includes(cell)) {
     return json({ error: `cell ${cell} is served by another fleet` }, 404);
   }
@@ -201,6 +208,10 @@ async function guardRoute(request: Request, url: URL, deps: OpsDeps): Promise<Re
   }
   if (request.method === "GET" && url.pathname === "/ops/mode") {
     return reply((await guard.guardModeOf?.(cell)) as Answer<unknown>);
+  }
+  // The decision model is switched with PUT and read with GET /ops/mode.
+  if (request.method === "GET" && url.pathname === "/ops/decision-model") {
+    return json({ error: "not found" }, 404);
   }
   if (request.method === "GET") return reply(await guard.ownerRules(cell));
   const writes = modeRoute ? ["PUT"] : ["POST", "DELETE"];
@@ -237,45 +248,7 @@ async function guardRoute(request: Request, url: URL, deps: OpsDeps): Promise<Re
   return reply(answer, 200, "removed");
 }
 
-/** A person's cost from the household board: a cell another fleet serves, as it last reported. */
-export function costFromReport(
-  report: SpendReport,
-  board: BudgetBoard,
-): CostView & { readonly asOf: number } {
-  const developerLimit = board.settings.developerLimitUsd ?? DEFAULT_DEVELOPER_BUDGET_USD;
-  const line = budgetLine(report.spentUsd, report.limitUsd);
-  return {
-    person: report.cell,
-    month: report.month,
-    timeZone: report.timeZone,
-    resetsAt: 0,
-    mode: report.mode,
-    modeSince: report.modeSince,
-    spentUsd: report.spentUsd,
-    limitUsd: report.limitUsd,
-    percent: line.percent,
-    line: line.line,
-    byLayer: report.byLayer,
-    byRole: report.byRole,
-    hours: {},
-    waiting: [],
-    developer: budgetLine(board.developerUsd, developerLimit),
-    asOf: report.at,
-  };
-}
-
-/** One person's row in the household view. */
-export interface HouseholdCostRow {
-  readonly person: string;
-  readonly spentUsd: number;
-  readonly limitUsd: number;
-  readonly percent: number;
-  readonly line: string;
-  readonly mode: string;
-  readonly modeSince: number | null;
-  /** When the row was read: now for this fleet's cells, the report time for another fleet's. */
-  readonly asOf: number;
-}
+export { costFromReport, type HouseholdCostRow } from "@secbot/cell-harness";
 
 const readBody = async (request: Request): Promise<Record<string, unknown> | undefined> => {
   const text = await request.text().catch(() => "");
@@ -329,55 +302,12 @@ async function budgetRoute(request: Request, url: URL, deps: OpsDeps): Promise<R
       return json(costFromReport(report, read));
     }
     const read = await board();
-    const rows: HouseholdCostRow[] = [];
-    let live: CostView | undefined;
+    const live: CostView[] = [];
     for (const person of persons) {
       const answer = await deps.guardOf?.(person)?.costOf?.(person);
-      if (answer === undefined || !answer.ok) continue;
-      live ??= answer.value;
-      const view = answer.value;
-      rows.push({
-        person,
-        spentUsd: view.spentUsd,
-        limitUsd: view.limitUsd,
-        percent: view.percent,
-        line: view.line,
-        mode: view.mode,
-        modeSince: view.modeSince,
-        asOf: Date.now(),
-      });
+      if (answer?.ok === true) live.push(answer.value);
     }
-    const month = live?.month ?? read?.reports[0]?.month ?? "";
-    for (const report of read?.reports ?? []) {
-      if (rows.some((row) => row.person === report.cell) || report.month !== month) continue;
-      const view = costFromReport(report, read as BudgetBoard);
-      rows.push({
-        person: report.cell,
-        spentUsd: view.spentUsd,
-        limitUsd: view.limitUsd,
-        percent: view.percent,
-        line: view.line,
-        mode: view.mode,
-        modeSince: view.modeSince,
-        asOf: report.at,
-      });
-    }
-    rows.sort((a, b) => (a.person === "owner" ? -1 : b.person === "owner" ? 1 : 0));
-    // This fleet's cell knows its own developer spend now; the board adds the other fleet's.
-    const developer =
-      live?.developer ??
-      budgetLine(
-        read?.developerUsd ?? 0,
-        read?.settings.developerLimitUsd ?? DEFAULT_DEVELOPER_BUDGET_USD,
-      );
-    const totalUsd = rows.reduce((sum, row) => sum + row.spentUsd, 0) + developer.spentUsd;
-    return json({
-      month,
-      timeZone: live?.timeZone ?? read?.settings.timeZone ?? "UTC",
-      totalUsd: Math.round(totalUsd * 100) / 100,
-      persons: rows,
-      developer,
-    });
+    return json(householdCostView(live, read, Date.now()));
   }
 
   if (request.method !== "PUT") return json({ error: "not found" }, 404);
@@ -561,7 +491,7 @@ export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise
   }
 
   const selected = cellsOf(url, deps);
-  if ("error" in selected) return json({ error: selected.error }, 404);
+  if ("error" in selected) return json({ error: selected.error }, selected.status);
   const { cells } = selected;
 
   if (route === "POST /ops/snapshot") {

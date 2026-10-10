@@ -11,6 +11,7 @@ import type { SqliteDatabase } from "@earendil-works/pi-durable/storage/sqlite";
 import {
   CELL_NAME,
   logEvent,
+  logName,
   type RotateResult,
   type SecretInput,
   type SecretKind,
@@ -118,17 +119,22 @@ export class SecretStore {
     return this.ready;
   }
 
-  /** Logs one `secret.refused` and returns the refusal to throw. */
-  private refuse(context: RefusalContext, reason: string): RefusedSecretRequest {
+  /**
+   * Logs one `secret.refused` and returns the refusal to throw. `detail` is for the log only,
+   * where the person and agent may read more than the refusal tells an agent.
+   */
+  private refuse(context: RefusalContext, reason: string, detail?: string): RefusedSecretRequest {
     logEvent(
       "secret.refused",
       {
         cell: "secrets",
         action: context.action,
-        person: context.person,
-        agent: context.agent ?? null,
-        secret: context.secret ?? null,
+        // Not yet checked when a check refuses: a value pasted as a name is never logged.
+        person: logName(context.person),
+        agent: logName(context.agent),
+        secret: logName(context.secret),
         reason,
+        ...(detail === undefined ? {} : { detail }),
       },
       "warn",
     );
@@ -167,10 +173,13 @@ export class SecretStore {
   private async grantedRow(context: Required<RefusalContext>): Promise<Row> {
     this.check(context);
     await this.init();
+    // One refusal for a missing secret and an ungranted one, so an agent cannot learn which of
+    // its person's secret names exist; the log keeps the difference.
+    const refusal = `${context.secret} is not granted to ${context.agent}`;
     const row = await this.row(context.person, context.secret);
-    if (row === undefined) throw this.refuse(context, `no secret named ${context.secret}`);
+    if (row === undefined) throw this.refuse(context, refusal, "no such secret");
     if (!(await this.granted(context.person, context.secret, context.agent))) {
-      throw this.refuse(context, `${context.secret} is not granted to ${context.agent}`);
+      throw this.refuse(context, refusal);
     }
     return row;
   }
@@ -199,7 +208,11 @@ export class SecretStore {
     }
     await this.init();
     const sealed = await seal(input.person, input.name, input.value, this.custody);
-    const replaced = (await this.row(input.person, input.name)) !== undefined;
+    const before = await this.row(input.person, input.name);
+    const replaced = before !== undefined;
+    // A secret that changes between plain and broker loses its grants: an agent granted a broker
+    // secret must never read its token because it was added again without its broker target.
+    const kindChanged = replaced && (before.broker === null) !== (broker === undefined);
     await this.database.run(
       `INSERT OR REPLACE INTO secrets
         (person, name, key_id, salt, iv, wrap_iv, wrapped_key, ciphertext, broker, created_at)
@@ -215,6 +228,20 @@ export class SecretStore {
       broker === undefined ? null : JSON.stringify(broker),
       this.now(),
     );
+    if (kindChanged) {
+      await this.database.run(
+        "DELETE FROM grants WHERE person = ? AND secret = ?",
+        input.person,
+        input.name,
+      );
+      logEvent("secrets.kind_changed", {
+        cell: "secrets",
+        person: input.person,
+        secret: input.name,
+        broker: broker?.kind ?? null,
+        grants: "revoked",
+      });
+    }
     return { keyId: sealed.keyId, replaced };
   }
 

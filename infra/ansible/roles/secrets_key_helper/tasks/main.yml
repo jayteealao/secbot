@@ -1,7 +1,9 @@
-# The secrets cell's host key helper: one secbot-key-helper@<env> unit per environment, run as the
-# celld user on a loopback port, holding that environment's master keys in
-# /etc/secbot/secrets-keys/<env>/ (celld, 0700; each key file celld, 0400). The first key is made
-# here once and never shown, copied, or committed; a rotation makes the next one on the host.
+# The secrets cell's host key helper: one secbot-key-helper@<env> unit per environment, run as its
+# own system user (secbot-keys) on a loopback port, holding that environment's master keys in
+# /etc/secbot/secrets-keys/<env>/ (secbot-keys, 0700; each key file secbot-keys, 0400). It answers
+# only the celld user's sockets, and the celld units cannot see the key directory. The first key
+# is made here once and never shown, copied, or committed; a rotation makes the next one on the
+# host.
 # The role installs no package or runtime: it stops with a message when /usr/bin/python3 is
 # missing or older than 3.8.
 - name: Choose the environments this run sets up a key helper for
@@ -25,6 +27,14 @@
       never installs a runtime. Found: {{ secrets_key_helper_python.stdout | default('none', true) }}.
     quiet: true
 
+- name: Create the key helper's own system user (no login, no home)
+  ansible.builtin.user:
+    name: secbot-keys
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    home: /nonexistent
+
 - name: Install the key helper
   ansible.builtin.copy:
     src: secbot-key-helper
@@ -42,14 +52,24 @@
     group: root
     mode: "0755"
 
-- name: Create each environment's key directory (celld only)
+- name: Create each environment's key directory (the key helper's user only)
   ansible.builtin.file:
     path: "/etc/secbot/secrets-keys/{{ item }}"
     state: directory
-    owner: celld
-    group: celld
+    owner: secbot-keys
+    group: secbot-keys
     mode: "0700"
   loop: "{{ secrets_key_helper_envs }}"
+
+# A host set up before the helper had its own user keeps its keys: their owner moves, modes stay.
+- name: Give every existing key file to the key helper's user
+  ansible.builtin.file:
+    path: "/etc/secbot/secrets-keys/{{ item }}"
+    owner: secbot-keys
+    group: secbot-keys
+    recurse: true
+  loop: "{{ secrets_key_helper_envs }}"
+  notify: Restart the key helpers
 
 # Made once: `creates:` keeps a repeat run from replacing a key the secrets cell sealed under.
 - name: Create each environment's first master key once (never shown)
@@ -63,11 +83,11 @@
   loop: "{{ secrets_key_helper_envs }}"
   no_log: true
 
-- name: Give the first master key to the celld user, readable by it alone
+- name: Give the first master key to the key helper's user, readable by it alone
   ansible.builtin.file:
     path: "/etc/secbot/secrets-keys/{{ item }}/k1.key"
-    owner: celld
-    group: celld
+    owner: secbot-keys
+    group: secbot-keys
     mode: "0400"
   loop: "{{ secrets_key_helper_envs }}"
 
@@ -76,8 +96,8 @@
   ansible.builtin.copy:
     dest: "/etc/secbot/secrets-keys/{{ item }}/current"
     content: "k1\n"
-    owner: celld
-    group: celld
+    owner: secbot-keys
+    group: secbot-keys
     mode: "0400"
     force: false
   loop: "{{ secrets_key_helper_envs }}"

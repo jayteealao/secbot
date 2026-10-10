@@ -3,7 +3,7 @@
  * reports, routine runs (every reminder included), and the next model request of a specialist's
  * running job wait here until the owner raises the limit or the month resets; nothing is dropped.
  * The lead's conversation never passes the gate, and neither does the guard: a guard call costs
- * money, and safety wins over the limit (shape NFR "Cost", `yields-to: C1`).
+ * money, and safety wins over the limit.
  *
  * A wait lists its task in `secbot.budget-waits` (what, since when), so the activity view and the
  * limit notice can show it and the wake-time reader can time it at the month reset; then it waits

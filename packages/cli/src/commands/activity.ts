@@ -41,7 +41,7 @@ type ActivityAnswer = {
   live?: ActivityRecord[];
 };
 
-const HEADER = "TIME   AGENT      TOOL OR JOB              VERDICT       LAYER       COST";
+const HEADER = "TIME   AGENT      TOOL OR JOB              VERDICT       LAYER          COST";
 const STARTS = [0, 7, 18, 43, 57, 67];
 /** Records per page: the route's default page size. */
 export const PAGE_SIZE = 50;

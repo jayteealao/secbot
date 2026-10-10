@@ -146,6 +146,35 @@ describe("the held-call block", () => {
     expect(two.join("\n")).not.toContain("/always 2");
   });
 
+  it("keeps a long header inside 80 columns by moving the time to lapse to its own line", () => {
+    const block = heldBlock({ ...HELD, agent: "household", summary: "handoff -> research" }, 2);
+    expect(block.slice(0, 2)).toEqual([
+      "[ HELD #1 of 2 ] the household specialist wants to run a tool",
+      `${" ".repeat(59)}lapses in 23 h 58 m`,
+    ]);
+    expect(plainText(block.join("\n"))).toBe(true);
+  });
+
+  it("names the arguments left out of a long call instead of showing them", () => {
+    const block = heldBlock(
+      { ...HELD, arguments: { to: "ann@example.com", "\u2026dropped": ["body"] } },
+      1,
+    );
+    expect(block).toContain("  arguments  to = ann@example.com");
+    expect(block).toContain("  not shown  (too long): body");
+    expect(block.join("\n")).not.toContain("dropped");
+  });
+
+  it("shows control and format characters from an agent as ?", () => {
+    const block = heldBlock(
+      { ...HELD, tool: "send\u001b[2Jmail", arguments: { to: "evil\u202Emoc.example" } },
+      1,
+    );
+    expect(block).toContain("  tool       send?[2Jmail");
+    expect(block).toContain("  arguments  to = evil?moc.example");
+    for (const line of block) expect(line).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+  });
+
   it("takes only an exact /allow N, /always N, or /deny N as an answer", () => {
     expect(answerOf("/allow 1")).toEqual({ kind: "answer", choice: "allow", number: 1 });
     expect(answerOf("/always 12")).toEqual({ kind: "answer", choice: "always", number: 12 });

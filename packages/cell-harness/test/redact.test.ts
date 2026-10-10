@@ -6,9 +6,12 @@ import {
   addKnownSecretValues,
   clearKnownSecretValues,
   isSecretKey,
+  KEPT_TEXT_LIMIT,
   REDACTED,
   redact,
   redactText,
+  redactTokens,
+  setKnownSecretValues,
 } from "../src/redact.ts";
 
 describe("redact", () => {
@@ -92,6 +95,33 @@ describe("redact", () => {
       ARGUMENTS_LIMIT,
     );
   });
+  it("cuts a kept text when the kept fields alone pass the cap", () => {
+    const long = "w ".repeat(5_000);
+    const capped = redact(
+      { brief: long, extra: "e".repeat(100) },
+      { keep: ["brief"], maxBytes: ARGUMENTS_LIMIT },
+    ) as Record<string, unknown>;
+    expect(capped.extra).toBeUndefined();
+    expect(String(capped.brief).startsWith(long.slice(0, KEPT_TEXT_LIMIT))).toBe(true);
+    expect(String(capped.brief)).toContain(`[cut from ${long.length} characters]`);
+    expect(new TextEncoder().encode(JSON.stringify(capped)).length).toBeLessThanOrEqual(
+      ARGUMENTS_LIMIT,
+    );
+  });
+
+  it("keeps a UUID, alone or in a path, and still hides a token-like run", () => {
+    const id = "123e4567-e89b-12d3-a456-426614174000";
+    expect(redactText(`item ${id}`)).toBe(`item ${id}`);
+    expect(redactText(`/v1/items/${id}/next`)).toBe(`/v1/items/${id}/next`);
+    expect(redactText("key Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZmdoaWpr")).toBe(`key ${REDACTED}`);
+  });
+
+  it("redacts only token forms in a service's answer", () => {
+    const run = "Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZmdoaWpr";
+    expect(redactTokens(`id ${run}, token tok-value-1234`, ["tok-value-1234"])).toBe(
+      `id ${run}, token ${REDACTED}`,
+    );
+  });
 });
 
 describe("learned secret values", () => {
@@ -123,6 +153,17 @@ describe("learned secret values", () => {
     );
     expect(capped).toEqual({ note: `remember ${REDACTED}`, "…dropped": ["filler"] });
     expect(JSON.stringify(capped)).not.toContain(LEARNED);
+  });
+
+  it("keeps each cell's values apart, and a reload replaces only that cell's", () => {
+    setKnownSecretValues("owner", [LEARNED, "old granted value"]);
+    addKnownSecretValues(["second cell value"], "second");
+    expect(redactText(`${LEARNED} / second cell value`)).toBe(`${REDACTED} / ${REDACTED}`);
+    setKnownSecretValues("owner", [LEARNED]);
+    expect(redactText("old granted value")).toBe("old granted value");
+    expect(redactText("second cell value")).toBe(REDACTED);
+    clearKnownSecretValues("second");
+    expect(redactText("second cell value")).toBe("second cell value");
   });
 
   it("ignores values too short to replace safely, and forgets on clear", () => {

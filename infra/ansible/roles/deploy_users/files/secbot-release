@@ -333,6 +333,11 @@ render_app() {
   secrets_url="http://$(listen_of "$(fleet_of_cell "$target_env" secrets)")"
   # The key helper's loopback address goes only to the fleet that serves the secrets cell.
   [[ " $(fleet_cells "$fleet") " == *" secrets "* ]] && serves_secrets=1
+  # Without its key helper the secrets cell refuses to start and every cell check after the
+  # deploy fails; stop here instead, with the step that fixes it.
+  if [ -n "$serves_secrets" ] && ! /usr/bin/systemctl is-active --quiet "secbot-key-helper@$target_env"; then
+    die "the secrets cell's key helper (secbot-key-helper@$target_env) is not running; run host setup (mise run host:setup) before this release"
+  fi
   local copy
   copy="$(mktemp -d)"
   cp -a "$app/." "$copy/"
@@ -813,8 +818,16 @@ do_lab() {
       path="/lab/alarm?set=$at"
       ;;
   esac
-  curl -sS --fail --max-time 120 -X "$method" "http://$(listen_of test)$path"
+  # The guard bench starts paid model calls, so the worker asks for the operator key there.
+  local header=""
+  case "$lab_route" in
+    guard-bench | guard-bench-state) header="$(operator_header "$(env_of_fleet test)")" ;;
+  esac
+  local status=0
+  curl -sS --fail --max-time 120 -X "$method" ${header:+-H "@$header"} "http://$(listen_of test)$path" || status=$?
+  [ -z "$header" ] || rm -f "$header"
   echo
+  return "$status"
 }
 
 do_crash() {

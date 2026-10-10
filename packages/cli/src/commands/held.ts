@@ -8,7 +8,7 @@
 import type { CellClient } from "../client.ts";
 import { CliError } from "../config.ts";
 import type { Io } from "../io.ts";
-import { matchText, RULE, type Rule, rightAligned, toolText } from "../text.ts";
+import { matchText, plain, RULE, type Rule, rightAligned, toolText } from "../text.ts";
 
 export type HeldCall = {
   number: number;
@@ -52,11 +52,11 @@ export function answerOf(
 }
 
 const LINE = 78;
+/** The key under which the cell lists the argument fields it left out of a long call. */
+const DROPPED_KEY = "\u2026dropped";
+
 const VALUE = 13;
 const ANSWER_TEXT = 26;
-
-/** Control characters (a value from an agent could hold them) shown as `?`. */
-const plain = (text: string) => text.replace(/\p{Cc}/gu, "?");
 
 /** `23 h 58 m`. */
 export function timeToLapse(ms: number): string {
@@ -130,22 +130,30 @@ export function heldBlock(call: HeldCall, count: number): string[] {
   const n = call.number;
   const tag = count > 1 ? `[ HELD #${n} of ${count} ]` : `[ HELD #${n} ]`;
   const lines = [
-    rightAligned(
+    ...rightAligned(
       `${tag} ${agentPhrase(call.agent)} wants to run a tool`,
       `lapses in ${timeToLapse(call.remainingMs)}`,
-    ),
+    ).split("\n"),
     `  agent      ${plain(call.agent)}`,
     `  tool       ${plain(call.tool)}`,
   ];
-  const args =
+  let args =
     call.arguments !== null && typeof call.arguments === "object" && !Array.isArray(call.arguments)
       ? Object.entries(call.arguments as Record<string, unknown>)
       : [];
+  // The cell lists the fields it left out of a long call under DROPPED_KEY; they are named, never
+  // shown as an argument.
+  const dropped = args.find(([key]) => key === DROPPED_KEY)?.[1];
+  args = args.filter(([key]) => key !== DROPPED_KEY);
   if (args.length === 0) lines.push("  arguments  (none)");
   args.forEach(([key, value], index) => {
     const prefix = index === 0 ? "  arguments  " : " ".repeat(VALUE);
     lines.push(...fill(prefix, words(argumentText(key, value)), VALUE + 2));
   });
+  if (Array.isArray(dropped) && dropped.length > 0) {
+    const names = dropped.map((name) => plain(String(name))).join(", ");
+    lines.push(...fill("  not shown  ", words(`(too long): ${names}`), VALUE));
+  }
   lines.push(...fill("  why held   ", words(call.reason), VALUE));
   lines.push(`  answer     ${answerCell(`/allow ${n}`)}allow once`);
   if (call.always.offered && call.always.rule !== null) {

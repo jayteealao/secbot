@@ -65,21 +65,21 @@ async function secbot(setup: GuardSetup, ...argv: string[]) {
 const FIRST_RUN = [
   "OWNER RULES (you cannot loosen these)",
   "------------------------------------------------------------------------------",
-  "AGENT   TOOL               MATCH                          VERDICT",
-  "all     pay tools          any                            prohibit",
-  String.raw`all     set_reminder       text ~ /\b\d(?:[ \-\u2010-\u2015]?\d){12,18}\b/i`,
-  "                                                          ask first",
-  String.raw`all     search_history     query ~ /\b(?:password|passcode|pin|token|api[ _\-]?k`,
-  String.raw`                           ey)\b/i                        ask first`,
+  "AGENT      TOOL               MATCH                          VERDICT",
+  "all        pay tools          any                            prohibit",
+  String.raw`all        set_reminder       text ~ /\b\d(?:[ \-\u2010-\u2015]?\d){12,18}\b/i`,
+  "                                                             ask first",
+  String.raw`all        search_history     query ~ /\b(?:password|passcode|pin|token|api[ _\-`,
+  String.raw`                              ]?key)\b/i                     ask first`,
   "",
   "YOUR RULES",
 
   "------------------------------------------------------------------------------",
-  "AGENT   TOOL               MATCH                          VERDICT",
-  "all     handoff            any                            permit",
-  "all     household_change   any                            permit",
-  "all     set_reminder       any                            permit",
-  "all     search_history     any                            permit",
+  "AGENT      TOOL               MATCH                          VERDICT",
+  "all        handoff            any                            permit",
+  "all        household_change   any                            permit",
+  "all        set_reminder       any                            permit",
+  "all        search_history     any                            permit",
   "",
 ].join("\n");
 
@@ -107,7 +107,7 @@ describe("secbot rules against the cell routes", () => {
     });
     const listed = await secbot(s, "rules", "list");
     expect(listed.out).toContain(
-      "lead    set_reminder       text ~ /card/i                 prohibit\n",
+      "lead       set_reminder       text ~ /card/i                 prohibit\n",
     );
     expect(fits(listed.out)).toBe(true);
     const removed = await secbot(
@@ -181,7 +181,7 @@ describe("secbot rules against the cell routes", () => {
     });
     const listed = await secbot(s, "rules", "list");
     expect(listed.out).toContain(
-      "all     handoff            specialist = developer         ask first\n",
+      "all        handoff            specialist = developer         ask first\n",
     );
   });
 });
@@ -222,7 +222,7 @@ describe("secbot activity against the cell routes", () => {
     expect(lines[0]).toMatch(/^ACTIVITY {2}owner {2}\w+ \d{4} +\[ total: \$0\.00 \]$/);
     expect(lines[0]).toHaveLength(78);
     expect(lines[2]).toBe(
-      "TIME   AGENT      TOOL OR JOB              VERDICT       LAYER       COST",
+      "TIME   AGENT      TOOL OR JOB              VERDICT       LAYER          COST",
     );
     // Newest first: the allowed call, then the refused one; each with its reason below.
     expect(lines[3]).toMatch(

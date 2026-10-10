@@ -4,7 +4,7 @@
 product
 
 ## Users
-Two adults in one household: the owner, who runs the system and holds the operator key, and one other member. Both use Secbot as a general personal agent between other tasks, mostly from the phone app (wave 3 onward) and, until then, from the `secbot` command line. The owner is technical; the other member uses the agent, not its internals.
+Two adults in one household: the owner, who runs the system and holds the operator key, and one other member. Both use Secbot as a general personal agent between other tasks, mostly from the phone app once it ships and, until then, from the `secbot` command line. The owner is technical; the other member uses the agent, not its internals.
 
 ## Brand Personality
 - **Instrument panel** — every view reads like a gauge: a label, a value, and a state, framed and aligned.
@@ -17,8 +17,8 @@ Two adults in one household: the owner, who runs the system and holds the operat
 Calm and plain, like a trusted instrument: short factual lines, the state first, then the reason. An approval prompt or a limit notice is serious but never alarming. It must not feel like a security product (shields, threat levels, sirens), an enterprise admin console, or a playful chatbot.
 
 ## Positive References
-- Resource overview panel (reference image 1, `.ai/workflows/safety-core/design/source/reference/ref-1-resource-overview.jpg`) — the `[ label: value ]` bracket frame, the segmented display title, the stacked warm bar chart, and the hairline-ruled breakdown box.
-- DeerFlow AIoT dashboard (reference image 2, `.ai/workflows/safety-core/design/source/reference/ref-2-deerflow-dashboard.jpg`) — dot-matrix numerals and figures, small uppercase labels, one orange accent for state, and quiet near-black cards.
+- Resource overview panel (reference image 1) — the `[ label: value ]` bracket frame, the segmented display title, the stacked warm bar chart, and the hairline-ruled breakdown box.
+- DeerFlow AIoT dashboard (reference image 2) — dot-matrix numerals and figures, small uppercase labels, one orange accent for state, and quiet near-black cards.
 - The Claude Code permission prompt — a held tool call with its arguments and a short allow-once, allow-always, deny choice.
 
 ## Anti-references

@@ -5,6 +5,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ActivityRecord } from "../src/activity.ts";
+import { NOT_OFFERED_REVIEWER } from "../src/approvals.ts";
 import { createDecisionModels, type DecisionModels } from "../src/decision-model.ts";
 import { REVIEWER_UNAVAILABLE } from "../src/guard.ts";
 import {
@@ -105,7 +106,7 @@ const toolResults = (t: TestCell) =>
     .map((request) => request.lastText);
 
 describe("decision model then reviewer (enforce mode)", () => {
-  it("runs a call below the threshold with no review, and sends one at the threshold to the reviewer (AC-8)", async () => {
+  it("runs a call below the threshold with no review, and sends one at the threshold to the reviewer", async () => {
     spies();
     const t = await open({ enforce: true });
     stub.decision = routineAt(0.1);
@@ -129,7 +130,7 @@ describe("decision model then reviewer (enforce mode)", () => {
     });
   });
 
-  it("sends the call to the reviewer on every decision-model failure, and it never runs past a block (AC-9)", async () => {
+  it("sends the call to the reviewer on every decision-model failure, and it never runs past a block", async () => {
     const { warn } = spies();
     const t = await open({ enforce: true });
     reviewerAnswer = () => verdictJson("block", "not without a working check");
@@ -160,7 +161,7 @@ describe("decision model then reviewer (enforce mode)", () => {
     expect(fallbacks[0]).toMatchObject({ cell: "owner", role: "lead", tool: "search_history" });
   });
 
-  it("holds an ask-first match for the person even when both models would allow it (AC-10)", async () => {
+  it("holds an ask-first match for the person even when both models would allow it", async () => {
     spies();
     const t = await open({ enforce: true });
     await t.cell.addRule("person", { agent: "lead", tool: "handoff", verdict: "ask-first" });
@@ -175,7 +176,7 @@ describe("decision model then reviewer (enforce mode)", () => {
     expect(reviews(t)).toHaveLength(0);
   });
 
-  it("runs, refuses, or holds a marked call on the reviewer's allow, block, or ask (AC-11)", async () => {
+  it("runs, refuses, or holds a marked call on the reviewer's allow, block, or ask", async () => {
     spies();
     const t = await open({ enforce: true });
     stub.decision = riskyAt(0.9);
@@ -195,6 +196,8 @@ describe("decision model then reviewer (enforce mode)", () => {
     expect((await t.cell.heldCalls())[0]).toMatchObject({
       reason: "reviewer: the reminder text holds a card number",
       reasonSource: "reviewer",
+      // A permit rule never skips the reviewer, so allow always is not offered for its hold.
+      always: { offered: false, rule: null, note: NOT_OFFERED_REVIEWER },
     });
     expect(await newest(t)).toMatchObject({
       kind: "held",
@@ -213,7 +216,7 @@ describe("decision model then reviewer (enforce mode)", () => {
     ],
     ["answers with no JSON", () => "I think it is fine."],
     ["hangs past its timeout", () => new Promise<string>((r) => setTimeout(() => r("{}"), 2_000))],
-  ])("holds the call with reviewer unavailable when the reviewer %s (AC-12)", async (_, answer) => {
+  ])("holds the call with reviewer unavailable when the reviewer %s", async (_, answer) => {
     spies();
     const t = await open({ enforce: true });
     stub.decision = riskyAt(0.9);
@@ -226,7 +229,7 @@ describe("decision model then reviewer (enforce mode)", () => {
     });
   });
 
-  it("keeps an injected instruction inside marked untrusted data (AC-13)", async () => {
+  it("keeps an injected instruction inside marked untrusted data", async () => {
     spies();
     const t = await open({ enforce: true });
     // A permitted call: both models see the injected text only inside the marked data.
@@ -255,7 +258,7 @@ describe("decision model then reviewer (enforce mode)", () => {
     expect(reviews(t)).toHaveLength(1);
   });
 
-  it("starts on Jev, uses the other adapter from the next call, and logs each returned model id (AC-14)", async () => {
+  it("starts on Jev, uses the other adapter from the next call, and logs each returned model id", async () => {
     const { log } = spies();
     const t = await open({ enforce: true });
     await call(t, "household_read", { document: "shopping" }, 2);
@@ -295,7 +298,7 @@ describe("decision model then reviewer (enforce mode)", () => {
 });
 
 describe("shadow mode", () => {
-  it("is every new cell's mode; a marked call the reviewer would block runs, and rules still enforce (AC-43, AC-44)", async () => {
+  it("is every new cell's mode; a marked call the reviewer would block runs, and rules still enforce", async () => {
     spies();
     const t = await open();
     const mode = await t.cell.guardMode();
@@ -341,7 +344,7 @@ describe("shadow mode", () => {
     expect(await t.cell.heldCalls()).toHaveLength(0);
   });
 
-  it("enforces the next marked call after the owner switches to enforce (AC-44)", async () => {
+  it("enforces the next marked call after the owner switches to enforce", async () => {
     spies();
     const t = await open();
     stub.decision = riskyAt(0.9);
@@ -355,7 +358,7 @@ describe("shadow mode", () => {
   });
 });
 
-describe("guard events (AC-45, model part)", () => {
+describe("guard events (model part)", () => {
   it("logs one guard.fallback, guard.error, and guard.mode each, and each is in the activity record", async () => {
     const { log, warn, error } = spies();
     let failNext = false;

@@ -9,13 +9,14 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-# The celld user: the helper answers only that user's sockets, and it alone can read the keys.
-User=celld
-Group=celld
+# The helper's own user alone can read the keys; it answers only the celld user's sockets, and
+# the celld units cannot see the key directory (InaccessiblePaths in celld@.service).
+User=secbot-keys
+Group=secbot-keys
 UMask=0077
 EnvironmentFile=/etc/secbot/secbot-key-helper-%i.env
 # Loopback only: the helper binds 127.0.0.1 and never another address.
-ExecStart=/usr/local/bin/secbot-key-helper --key-dir /etc/secbot/secrets-keys/%i --port ${SECBOT_KEY_HELPER_PORT}
+ExecStart=/usr/local/bin/secbot-key-helper --key-dir /etc/secbot/secrets-keys/%i --port ${SECBOT_KEY_HELPER_PORT} --peer-user celld
 Restart=always
 RestartSec=2
 NoNewPrivileges=true

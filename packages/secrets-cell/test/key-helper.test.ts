@@ -1,7 +1,7 @@
 // The real key helper (a python3 process) with real key files and modes: the secrets cell refuses
 // to start, logs the reason, and answers 503 for a missing key file or one another user can read,
-// and starts with a correct one (AC-37); the helper's derivation equals the stand-in custody's;
-// a repeated rotate makes one new key (AC-41 on the real helper); no key bytes reach its output;
+// and starts with a correct one; the helper's derivation equals the stand-in custody's;
+// a repeated rotate makes one new key (on the real helper); no key bytes reach its output;
 // and a peer socket of another user is refused.
 //
 // Linux with python3 only: the modes are real there (WSL2 or CI). Key directories go under the
@@ -123,7 +123,7 @@ const events = (calls: readonly unknown[][]) =>
   calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
 
 describe.skipIf(!runnable)("the key helper on Linux", () => {
-  it("refuses to start the cell without a key file and logs why (AC-37)", async () => {
+  it("refuses to start the cell without a key file and logs why", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const { dir } = await keyDir(null);
     const helper = await startHelper(dir);
@@ -140,7 +140,7 @@ describe.skipIf(!runnable)("the key helper on Linux", () => {
   });
 
   it.each([0o440, 0o644, 0o404])(
-    "refuses to start the cell with a key file of mode %o (AC-37)",
+    "refuses to start the cell with a key file of mode %o",
     async (mode) => {
       const error = vi.spyOn(console, "error").mockImplementation(() => {});
       const { dir } = await keyDir(mode);
@@ -171,7 +171,7 @@ describe.skipIf(!runnable)("the key helper on Linux", () => {
     await chmod(dir, 0o700);
   });
 
-  it("starts with a correct key file, seals, and opens (AC-37)", async () => {
+  it("starts with a correct key file, seals, and opens", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
     const { dir } = await keyDir(0o400);
@@ -220,7 +220,7 @@ describe.skipIf(!runnable)("the key helper on Linux", () => {
     expect(output).not.toContain(answer.key);
   });
 
-  it("makes one new key for a repeated rotate, and the cell re-wraps under it (AC-41)", async () => {
+  it("makes one new key for a repeated rotate, and the cell re-wraps under it", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const { dir } = await keyDir(0o400);
     const helper = await startHelper(dir);

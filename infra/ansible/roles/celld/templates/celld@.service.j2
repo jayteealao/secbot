@@ -32,6 +32,8 @@ Restart=always
 RestartSec=2
 NoNewPrivileges=true
 ProtectSystem=strict
+# The secrets cell's master keys belong to the key helper's user; no cell can read them.
+InaccessiblePaths=-/etc/secbot/secrets-keys
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true

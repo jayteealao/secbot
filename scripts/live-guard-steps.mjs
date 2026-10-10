@@ -95,7 +95,7 @@ export const STEPS = [
     checks: ["rules-list"],
     evidence: "rules-list-live.txt",
     actions: [
-      { kind: "cmd", argv: ["rules", "list"], expect: [/YOUR RULES/, /all {5}handoff {12}any/] },
+      { kind: "cmd", argv: ["rules", "list"], expect: [/YOUR RULES/, /all {8}handoff {12}any/] },
       {
         kind: "cmd",
         argv: ["rules", "add", "lead", "search_history", "prohibit", "--exact", "query=livecheck"],
@@ -226,7 +226,7 @@ export const STEPS = [
         argv: ["rules", "add", "lead", "handoff", "ask-first"],
         expect: [/^added: lead handoff \(any\) -> ask first$/m],
       },
-      { kind: "cmd", argv: ["rules", "list"], expect: [/lead {4}handoff {12}any {28}ask first/] },
+      { kind: "cmd", argv: ["rules", "list"], expect: [/lead {7}handoff {12}any {28}ask first/] },
     ],
   },
   {
@@ -255,7 +255,7 @@ export const STEPS = [
       {
         kind: "cmd",
         argv: ["rules", "list"],
-        expect: [/lead {4}handoff {12}specialist = research {10}permit/, /added by allow always/],
+        expect: [/lead {7}handoff {12}specialist = research {10}permit/, /added by allow always/],
       },
       { kind: "cmd", argv: ["activity"], expect: [/handoff -> research {6}allowed {7}person/] },
     ],

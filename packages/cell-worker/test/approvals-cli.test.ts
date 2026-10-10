@@ -103,10 +103,10 @@ describe("the charter scenario, steps 1-6, against the cell routes", () => {
     });
     const listed = await secbot("rules", "list");
     expect(listed.out).toContain(
-      "YOUR RULES\n------------------------------------------------------------------------------\nAGENT   TOOL               MATCH                          VERDICT\nall     handoff            any                            permit\n",
+      "YOUR RULES\n------------------------------------------------------------------------------\nAGENT      TOOL               MATCH                          VERDICT\nall        handoff            any                            permit\n",
     );
     expect(listed.out).toContain(
-      "lead    handoff            any                            ask first\n",
+      "lead       handoff            any                            ask first\n",
     );
 
     // The session: the cell's own frames, printed by the command line's renderer.
@@ -155,7 +155,7 @@ describe("the charter scenario, steps 1-6, against the cell routes", () => {
     await until(() => briefs("research") === 1);
     const afterAlways = await secbot("rules", "list");
     expect(afterAlways.out).toMatch(
-      /lead {4}handoff {12}specialist = research {10}permit\n {10}added by allow always, \d{1,2} \w{3} \d\d:\d\d\n/,
+      /lead {7}handoff {12}specialist = research {10}permit\n {13}added by allow always, \d{1,2} \w{3} \d\d:\d\d\n/,
     );
     const activity3 = await secbot("activity");
     expect(activity3.out).toMatch(/lead {7}handoff -> research {6}allowed {7}person/);

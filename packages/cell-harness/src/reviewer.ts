@@ -11,6 +11,7 @@
 import type { Context } from "@earendil-works/chord";
 import type { AssistantMessage, JsonObject, Models, Usage } from "@earendil-works/pi-ai";
 import type { DocumentReader } from "@earendil-works/pi-durable";
+import { errorFields } from "./cell-parts.ts";
 import { isCreditError } from "./credit-pause.ts";
 import { RoleModelsDoc } from "./docs.ts";
 import { redactText } from "./redact.ts";
@@ -34,7 +35,17 @@ export interface ReviewVerdict {
   readonly usage?: Usage;
 }
 
-export type ReviewerFailureCause = "error" | "timeout" | "malformed" | "unknown-model";
+/**
+ * Why no verdict came back. `rate-limited` and `paused` are the guard's own limits: the reviewer
+ * was not asked (see createModelStage).
+ */
+export type ReviewerFailureCause =
+  | "error"
+  | "timeout"
+  | "malformed"
+  | "unknown-model"
+  | "rate-limited"
+  | "paused";
 
 /** No usable verdict: the guard holds the call for the person. */
 export class ReviewerFailure extends Error {
@@ -48,6 +59,9 @@ export class ReviewerFailure extends Error {
     super(`reviewer failed: ${cause}`);
     this.name = "ReviewerFailure";
   }
+
+  /** The underlying error's log fields (name, message, status), when there was one. */
+  detail?: Record<string, unknown>;
 }
 
 /** What the reviewer is shown about one call. */
@@ -83,12 +97,23 @@ export const REVIEWER_PROMPT = [
 const VERDICTS: readonly ReviewVerdictWord[] = ["allow", "block", "ask"];
 const REASON_LIMIT = 200;
 
+/**
+ * The call as JSON with `<`, `>`, and `&` written as JSON escapes (`\u003c` …), so no argument
+ * text can close the untrusted block or open a new one; the JSON still reads the same.
+ */
+export function untrustedJson(state: unknown): string {
+  return JSON.stringify(state, null, 2)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026");
+}
+
 /** The user message: the decision model's answer and the call inside the untrusted block. */
 export function reviewMessage(input: ReviewInput): string {
   return [
     `Decision model: ${input.decision}`,
     "<untrusted-call>",
-    JSON.stringify(input.state, null, 2),
+    untrustedJson(input.state),
     "</untrusted-call>",
   ].join("\n");
 }
@@ -96,36 +121,31 @@ export function reviewMessage(input: ReviewInput): string {
 const textOf = (message: AssistantMessage) =>
   message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 
-/** The first JSON object in `text`, or undefined. */
-function firstObject(text: string): Record<string, unknown> | undefined {
-  const start = text.indexOf("{");
-  if (start === -1) return undefined;
-  let depth = 0;
-  let quoted = false;
-  for (let index = start; index < text.length; index++) {
-    const char = text[index];
-    if (quoted) {
-      if (char === "\\") index++;
-      else if (char === '"') quoted = false;
-    } else if (char === '"') quoted = true;
-    else if (char === "{") depth++;
-    else if (char === "}" && --depth === 0) {
-      try {
-        const value = JSON.parse(text.slice(start, index + 1)) as unknown;
-        return value !== null && typeof value === "object" && !Array.isArray(value)
-          ? (value as Record<string, unknown>)
-          : undefined;
-      } catch {
-        return undefined;
-      }
-    }
+/** A ```json fence around the whole reply, which some models add; nothing else is removed. */
+const FENCED = /^```(?:json)?\s*\n([\s\S]*)\n\s*```$/;
+
+/**
+ * The reply as one JSON object, when the whole reply (inside an optional ```json fence) is that
+ * object and nothing else; otherwise undefined. A reply that also holds other text, or a second
+ * object (for example one echoed from the call), is never read.
+ */
+function onlyObject(text: string): Record<string, unknown> | undefined {
+  const trimmed = text.trim();
+  const body = (FENCED.exec(trimmed)?.[1] ?? trimmed).trim();
+  if (!body.startsWith("{") || !body.endsWith("}")) return undefined;
+  try {
+    const value = JSON.parse(body) as unknown;
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
   }
-  return undefined;
 }
 
 /** Reads the reviewer's verdict; throws ReviewerFailure("malformed") on anything else. */
 export function parseVerdict(text: string, costUsd = 0): Omit<ReviewVerdict, "model" | "costUsd"> {
-  const value = firstObject(text);
+  const value = onlyObject(text);
   const verdict = value?.verdict;
   const reason = typeof value?.reason === "string" ? value.reason.trim() : "";
   if (!VERDICTS.includes(verdict as ReviewVerdictWord) || reason === "") {
@@ -134,7 +154,6 @@ export function parseVerdict(text: string, costUsd = 0): Omit<ReviewVerdict, "mo
   const short = reason.length > REASON_LIMIT ? `${reason.slice(0, REASON_LIMIT - 1)}…` : reason;
   return { verdict: verdict as ReviewVerdictWord, reason: redactText(short.replace(/\s+/g, " ")) };
 }
-
 /** The reviewer's model: the owner's change for the `reviewer` role, or the release default. */
 export async function reviewerModel(
   reader: Pick<DocumentReader, "snapshot">,
@@ -185,8 +204,10 @@ export function createReviewer(options: ReviewerOptions): Reviewer {
           ),
           stopped,
         ]);
-      } catch {
-        throw new ReviewerFailure(timeout.aborted ? "timeout" : "error");
+      } catch (error) {
+        const failure = new ReviewerFailure(timeout.aborted ? "timeout" : "error");
+        failure.detail = errorFields(error);
+        throw failure;
       } finally {
         if (stop !== undefined) signal.removeEventListener("abort", stop);
         stopped.catch(() => {});

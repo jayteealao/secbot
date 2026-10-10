@@ -93,17 +93,18 @@ test("the fleet env file, which the release tool sources, carries no log filter"
   assert.doesNotMatch(read(role, "templates", "celld.env.j2"), /RUST_LOG/);
 });
 
-// The secrets cell's key helper: its unit runs as the celld user on loopback with hardening, the
-// first master key is made once on the host and never shown, and no key file is in the repo.
+// The secrets cell's key helper: its unit runs as its own user on loopback with hardening and
+// answers the celld user's sockets, the celld units cannot see the keys, the first master key is
+// made once on the host and never shown, and no key file is in the repo.
 const helperRole = join(root, "infra", "ansible", "roles", "secrets_key_helper");
 const helperUnit = read(helperRole, "templates", "secbot-key-helper@.service.j2");
 const helperTasks = yaml.load(read(helperRole, "tasks", "main.yml"));
 
-test("the key helper unit runs as celld, hardened, and writes only its own key directory", () => {
+test("the key helper unit runs as its own user, hardened, and writes only its own key directory", () => {
   const service = section(helperUnit, "Service");
   for (const line of [
-    "User=celld",
-    "Group=celld",
+    "User=secbot-keys",
+    "Group=secbot-keys",
     "UMask=0077",
     "NoNewPrivileges=true",
     "ProtectSystem=strict",
@@ -120,8 +121,23 @@ test("the key helper unit runs as celld, hardened, and writes only its own key d
   assert.equal(
     start,
     // biome-ignore lint/suspicious/noTemplateCurlyInString: a systemd variable in the unit, not JS
-    "ExecStart=/usr/local/bin/secbot-key-helper --key-dir /etc/secbot/secrets-keys/%i --port ${SECBOT_KEY_HELPER_PORT}",
+    "ExecStart=/usr/local/bin/secbot-key-helper --key-dir /etc/secbot/secrets-keys/%i --port ${SECBOT_KEY_HELPER_PORT} --peer-user celld",
   );
+});
+
+test("the celld units cannot see the key directory", () => {
+  const celldUnit = read(role, "templates", "celld@.service.j2");
+  assert.ok(section(celldUnit, "Service").includes("InaccessiblePaths=-/etc/secbot/secrets-keys"));
+});
+
+test("the key helper's user exists and owns every key file, old hosts included", () => {
+  const user = helperTasks.find((t) => t["ansible.builtin.user"] !== undefined);
+  assert.equal(user["ansible.builtin.user"].name, "secbot-keys");
+  assert.equal(user["ansible.builtin.user"].system, true);
+  const migrate = helperTasks.find((t) => /every existing key file/.test(t.name));
+  assert.equal(migrate["ansible.builtin.file"].owner, "secbot-keys");
+  assert.equal(migrate["ansible.builtin.file"].recurse, true);
+  assert.equal(migrate["ansible.builtin.file"].mode, undefined);
 });
 
 test("the key helper binds loopback only", () => {
@@ -137,8 +153,8 @@ test("the first master key is made once, with umask 077, and never logged", () =
   assert.match(task["ansible.builtin.shell"], /umask 077/);
   assert.match(task["ansible.builtin.shell"], /head -c 32 \/dev\/urandom/);
   assert.equal(task.args.creates, "/etc/secbot/secrets-keys/{{ item }}/k1.key");
-  const owner = helperTasks.find((t) => /first master key to the celld user/.test(t.name));
-  assert.equal(owner["ansible.builtin.file"].owner, "celld");
+  const owner = helperTasks.find((t) => /first master key to the key helper's user/.test(t.name));
+  assert.equal(owner["ansible.builtin.file"].owner, "secbot-keys");
   assert.equal(owner["ansible.builtin.file"].mode, "0400");
   const current = helperTasks.find((t) => /first key current/.test(t.name));
   assert.equal(current["ansible.builtin.copy"].force, false);
@@ -199,6 +215,24 @@ test("the guard-bench routes run only on the test cell, as POST with calls and G
   );
   assert.match(lab, /guard-bench-state\) method=GET ;;/);
   assert.match(shellFunction("test_cell_only"), /\[ "\$env" = "test-cell" \] \|\| die/);
+});
+
+test("a deploy to the fleet that serves the secrets cell stops early without its key helper", () => {
+  const render = shellFunction("render_app");
+  assert.match(
+    render,
+    /\[ -n "\$serves_secrets" \] && ! \/usr\/bin\/systemctl is-active --quiet "secbot-key-helper@\$target_env"; then\n\s+die "the secrets cell's key helper/,
+  );
+});
+
+test("the guard-bench routes send the operator key, which the worker asks for there", () => {
+  const lab = shellFunction("do_lab");
+  assert.match(
+    lab,
+    /guard-bench \| guard-bench-state\) header="\$\(operator_header "\$\(env_of_fleet test\)"\)" ;;/,
+  );
+  assert.match(lab, /\$\{header:\+-H "@\$header"\}/);
+  assert.ok(lab.includes('[ -z "$header" ] || rm -f "$header"'));
 });
 
 test("the guard bench's examples run: --examples [--repeat 1-3] sends examples=1 with the repeat", () => {

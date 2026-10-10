@@ -30,7 +30,7 @@ const events = (calls: readonly unknown[][]) =>
   calls.map((call) => JSON.parse(String(call[0])) as Record<string, unknown>);
 
 describe("grants and the allowlist", () => {
-  it("stores a grant inside the allowlist and refuses one outside it (AC-39)", async () => {
+  it("stores a grant inside the allowlist and refuses one outside it", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const cell = setup();
@@ -72,7 +72,7 @@ describe("grants and the allowlist", () => {
     expect(JSON.stringify(warn.mock.calls)).not.toContain(VALUE);
   });
 
-  it("gives the value to the granted agent only, and logs one secret.refused per refusal (AC-38, AC-45)", async () => {
+  it("gives the value to the granted agent only, and logs one secret.refused per refusal", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const cell = setup();
@@ -99,19 +99,76 @@ describe("grants and the allowlist", () => {
       { ok: false, status: 400, error: "test-secret is not granted to lead" },
       { ok: false, status: 400, error: "test-secret is not granted to household" },
       { ok: false, status: 400, error: "other-secret is not granted to research" },
-      { ok: false, status: 400, error: "no secret named test-secret" },
+      // The second person has no such secret: the agent reads the same refusal as for an
+      // ungranted one, so it cannot learn which names exist; the log keeps the difference.
+      { ok: false, status: 400, error: "test-secret is not granted to research" },
     ]);
     const refused = events(warn.mock.calls).filter((event) => event.event === "secret.refused");
     expect(refused).toHaveLength(4);
     for (const event of refused) {
       expect(event).toMatchObject({ cell: "secrets", action: "get" });
-      expect(Object.keys(event).sort()).toEqual(
-        ["action", "agent", "cell", "event", "level", "person", "reason", "secret"].sort(),
-      );
+      expect(
+        Object.keys(event)
+          .filter((key) => key !== "detail")
+          .sort(),
+      ).toEqual(["action", "agent", "cell", "event", "level", "person", "reason", "secret"].sort());
     }
+    expect(refused.map((event) => event.detail ?? null)).toEqual([
+      null,
+      null,
+      null,
+      "no such secret",
+    ]);
     const logged = JSON.stringify([...log.mock.calls, ...warn.mock.calls]);
     expect(logged).not.toContain(VALUE);
     expect(logged).not.toContain("other-value-0001");
+  });
+
+  it("revokes a secret's grants when it is added again as another kind", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cell = setup();
+    const broker = {
+      kind: "health" as const,
+      url: "https://health.example.test/api",
+      header: "authorization",
+    };
+    await cell.add({ person: "owner", name: "health-test", value: TOKEN, broker });
+    await cell.allowlist({
+      person: "owner",
+      secret: "health-test",
+      agent: "health",
+      action: "add",
+    });
+    await cell.grant({ person: "owner", secret: "health-test", agent: "health" });
+    // Added again with the broker target forgotten: the agent must not read the token.
+    await cell.add({ person: "owner", name: "health-test", value: TOKEN });
+    expect(await cell.get({ person: "owner", agent: "health", name: "health-test" })).toEqual({
+      ok: false,
+      status: 400,
+      error: "health-test is not granted to health",
+    });
+    // The same kind again keeps the grants.
+    await cell.add({ person: "owner", name: "health-test", value: TOKEN, broker });
+    await cell.grant({ person: "owner", secret: "health-test", agent: "health" });
+    await cell.add({ person: "owner", name: "health-test", value: TOKEN, broker });
+    const listed = await cell.list({ person: "owner" });
+    expect(listed.ok && listed.value.find((each) => each.name === "health-test")?.grants).toEqual([
+      "health",
+    ]);
+  });
+
+  it("logs a name that fails its check only by its length", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cell = setup();
+    const pasted = "Pasted Secret Value 1234!"; // gitleaks:allow (fake test value)
+    await cell.add({ person: "owner", name: pasted, value: VALUE });
+    const refused = events(warn.mock.calls).filter((event) => event.event === "secret.refused");
+    expect(refused).toEqual([
+      expect.objectContaining({ secret: `<invalid, ${pasted.length} chars>` }),
+    ]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain(pasted);
   });
 
   it("never returns a broker secret, revokes on allowlist removal, and lists without values", async () => {

@@ -3,7 +3,7 @@
  * and returns only the answer, with the token (and any token-shaped text) redacted, so the agent
  * never holds the token. The target's address is data the owner stored with the secret.
  */
-import { type BrokerAnswer, type BrokerRequest, redactText } from "@secbot/cell-harness";
+import { type BrokerAnswer, type BrokerRequest, redactTokens } from "@secbot/cell-harness";
 
 /** A broker target, stored with its secret. */
 export interface BrokerTarget {
@@ -63,17 +63,24 @@ export function checkTarget(target: unknown): BrokerTarget {
   };
 }
 
+/** A dot segment, also when its dots are percent-encoded (`%2e%2e`, `.%2E`). */
+const DOT_SEGMENT = /^(?:\.|%2e){1,2}$/i;
+/** An encoded slash or backslash, which a target might decode into another path. */
+const ENCODED_SEPARATOR = /%(?:2f|5c)/i;
+
 /** The request's check: a known method and a path under the target, never another host. */
 export function checkRequest(request: BrokerRequest): BrokerRequest {
   if (!METHODS.has(request.method)) throw new BrokerRequestRefused("the method is not allowed");
+  const path = typeof request.path === "string" ? request.path : "";
+  const pathPart = path.split("?")[0] ?? "";
   if (
-    typeof request.path !== "string" ||
-    !request.path.startsWith("/") ||
-    request.path.startsWith("//") ||
-    request.path.includes("\\") ||
-    request.path.length > 2_048 ||
-    /[\s#]/.test(request.path) ||
-    request.path.split(/[/?]/).includes("..")
+    !path.startsWith("/") ||
+    path.startsWith("//") ||
+    path.includes("\\") ||
+    path.length > 2_048 ||
+    /[\s#]/.test(path) ||
+    pathPart.split("/").some((segment) => DOT_SEGMENT.test(segment)) ||
+    ENCODED_SEPARATOR.test(pathPart)
   ) {
     throw new BrokerRequestRefused(
       "the path must start with / and stay under the service's address",
@@ -88,28 +95,76 @@ export function checkRequest(request: BrokerRequest): BrokerRequest {
   return request;
 }
 
+/**
+ * The address a request goes to. The URL parser resolves what the checks above let through; the
+ * result must still have the target's origin and sit under the target's path, or it is refused.
+ */
+export function requestUrl(target: BrokerTarget, path: string): URL {
+  const base = new URL(target.url);
+  const url = new URL(`${target.url}${path}`);
+  const root = base.pathname.replace(/\/+$/, "");
+  if (
+    url.origin !== base.origin ||
+    (url.pathname !== root && !url.pathname.startsWith(`${root}/`))
+  ) {
+    throw new BrokerRequestRefused(
+      "the path must start with / and stay under the service's address",
+    );
+  }
+  return url;
+}
+
 /** The token and its forms a target might echo (with or without a `Bearer ` scheme). */
 export function tokenForms(token: string): string[] {
   const bare = token.replace(/^bearer\s+/i, "");
   return bare === token ? [token] : [token, bare];
 }
 
+/** How a broker call went, for the secrets cell's log; never the token, the path, or the body. */
+export interface BrokerTiming {
+  /** Why the target gave no answer: it timed out, or the connection failed. */
+  readonly cause: "timeout" | "network" | null;
+  readonly durationMs: number;
+}
+
+/** Reads at most twice the body limit, so a large answer is never held whole. */
+async function readCapped(response: Response, limit: number): Promise<string> {
+  const reader = response.body?.getReader();
+  if (reader === undefined) return "";
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    while (text.length <= limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+  return text;
+}
+
 /**
  * Calls `target` with `token` in its header. Redirects are not followed (a redirect must not carry
- * the token to another address); the answer body is redacted and capped. A target that does not
- * answer gives status 0 with the cause.
+ * the token to another address); the answer body is read up to twice its cap, redacted, and cut.
+ * A target that does not answer gives status 0 with the cause. `observe` gets the timing.
  */
 export async function brokerCall(
   target: BrokerTarget,
   token: string,
   request: BrokerRequest,
   fetcher: typeof fetch = (input, init) => fetch(input, init),
+  observe: (timing: BrokerTiming) => void = () => {},
 ): Promise<BrokerAnswer> {
   const checked = checkRequest(request);
+  const url = requestUrl(target, checked.path);
   const values = tokenForms(token);
+  const started = Date.now();
   let response: Response;
   try {
-    response = await fetcher(`${target.url}${checked.path}`, {
+    response = await fetcher(url.href, {
       method: checked.method,
       headers: {
         [target.header]: token,
@@ -121,13 +176,18 @@ export async function brokerCall(
     });
   } catch (error) {
     const timedOut = error instanceof Error && error.name === "TimeoutError";
+    observe({ cause: timedOut ? "timeout" : "network", durationMs: Date.now() - started });
     return {
       status: 0,
       body: timedOut ? "The service did not answer in time." : "The service did not answer.",
     };
   }
-  // Redacted before the cut, so a token that crosses the cut is never left half shown.
-  const text = redactText(await response.text().catch(() => ""), values);
+  const raw = await readCapped(response, 2 * BROKER_BODY_LIMIT).catch(() => "");
+  observe({ cause: null, durationMs: Date.now() - started });
+  // Only the token's forms are replaced: the answer is the service's data, and ids or long names
+  // in it must reach the agent whole. Redacted before the cut, so a token that crosses the cut is
+  // never left half shown.
+  const text = redactTokens(raw, values);
   const body =
     text.length > BROKER_BODY_LIMIT ? `${text.slice(0, BROKER_BODY_LIMIT)}\n[cut at 64 KiB]` : text;
   return { status: response.status, body };

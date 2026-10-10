@@ -9,6 +9,11 @@
  * lookup by request id: a rerun finds the record and waits on it again; it never makes a second
  * record, a second number, or a second prompt.
  *
+ * Where the answer lives. Held calls and their answers are cell documents (ApprovalDoc,
+ * ApprovalKeyDoc, ApprovalsDoc), not pi-durable's memo: the record must exist before the wait and
+ * survive a crash during it, which the crash test checks for these documents. Anything that shows
+ * or answers held calls later reads these documents.
+ *
  * Binding. A record binds a request id and a SHA-256 digest of the normalized arguments. The same
  * request id with other arguments is a new held call. Consuming an allowed record is one commit
  * that names the consuming call, so two calls cannot share one allow-once answer, and a crash
@@ -112,6 +117,10 @@ export const NOT_OFFERED_OWNER = "allow always is not offered: an owner rule ask
 export const NOT_OFFERED_PERSON =
   "allow always is not offered: your rule for this exact match asks first";
 export const NOT_OFFERED_AGENT = "allow always is not offered for this agent";
+export const NOT_OFFERED_BROAD =
+  "allow always is not offered: it would permit this tool for every argument";
+export const NOT_OFFERED_REVIEWER =
+  "allow always is not offered: the reviewer checks this kind of call each time";
 
 /** No held call has this number. */
 export class NoHeldCall extends Error {
@@ -202,7 +211,8 @@ export function summaryOf(tool: string, args: Readonly<Record<string, JsonValue>
  * The allow-always offer for a held call: a person permit rule for the agent, the tool, and an
  * exact match on the field the holding rule matched (or the tool's key field). Offered only when
  * the rules with that candidate added decide permit, so an owner ask-first rule, or the person's
- * own ask-first rule on the same exact match, means it is not offered.
+ * own ask-first rule on the same exact match, means it is not offered. A call with no field to
+ * match exactly is not offered either.
  */
 export function alwaysOffer(
   rules: { readonly owner: readonly Rule[]; readonly person: readonly Rule[] },
@@ -219,15 +229,17 @@ export function alwaysOffer(
     typeof raw === "string" && raw.trim() !== "" && raw.length <= 500
       ? normalizeMatchValue("exact", raw)
       : undefined;
-  const rule: RuleInput =
-    field !== undefined && value !== undefined && value !== ""
-      ? {
-          agent: call.role,
-          tool: call.tool,
-          verdict: "permit",
-          match: { kind: "exact", field, value },
-        }
-      : { agent: call.role, tool: call.tool, verdict: "permit" };
+  // Only an exact match is offered: a rule with no argument match would permit the tool for every
+  // argument (every secret, path, and method), and outrank the person's own broader ask-first rule.
+  if (field === undefined || value === undefined || value === "") {
+    return { offered: false, rule: null, note: NOT_OFFERED_BROAD };
+  }
+  const rule: RuleInput = {
+    agent: call.role,
+    tool: call.tool,
+    verdict: "permit",
+    match: { kind: "exact", field, value },
+  };
   const candidate: Rule = { ...rule, id: -1, source: "allow-always", addedAt: 0 };
   const decided = decide(rules.owner, [...rules.person, candidate], call);
   if (decided.verdict === "permit" && looserThan(rule, rules.owner) === undefined) {
@@ -415,7 +427,19 @@ function lapsedEvent(person: string, call: HeldCall, cause: LapseCause, now: num
   });
 }
 
-export function heldEvent(person: string, call: HeldCall): void {
+/** What the guard knew when it held a call: the same wide fields `guard.verdict` carries. */
+export interface HeldEventFields {
+  readonly layer: string;
+  readonly ruleId: number | null;
+  readonly taskId: string;
+  readonly callId: string;
+  readonly ruleMs: number | null;
+  readonly durationMs: number;
+  readonly model?: GuardModelFields;
+}
+
+export function heldEvent(person: string, call: HeldCall, fields?: HeldEventFields): void {
+  const model = fields?.model;
   logEvent("approval.held", {
     cell: person,
     role: call.agent,
@@ -424,6 +448,23 @@ export function heldEvent(person: string, call: HeldCall): void {
     call_no: call.number,
     reason_source: call.reasonSource,
     expires_at: new Date(call.expiresAt).toISOString(),
+    ...(fields === undefined
+      ? {}
+      : {
+          layer: fields.layer,
+          rule_id: fields.ruleId,
+          task_id: fields.taskId,
+          call_id: fields.callId,
+          mode: model?.mode ?? null,
+          decision: model?.decision.outcome ?? null,
+          decision_score: model?.decision.score ?? null,
+          decision_model: model?.decision.model ?? null,
+          fallback: model?.fallback ?? null,
+          reviewer_cause: model?.reviewerCause ?? null,
+          cost_usd: model?.costUsd ?? 0,
+          rule_ms: fields.ruleMs,
+          duration_ms: fields.durationMs,
+        }),
   });
 }
 

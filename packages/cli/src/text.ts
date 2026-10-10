@@ -6,6 +6,13 @@
 
 export const WIDTH = 80;
 
+/**
+ * Control and format characters shown as `?`. A value from an agent, a model, or a person can hold
+ * escape sequences, bidirectional overrides, or zero-width characters; none of them reach the
+ * terminal, so a printed line reads the same as what was stored.
+ */
+export const plain = (text: string) => text.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "?");
+
 /** The rule under a section title: 78 dashes. */
 export const RULE = "-".repeat(78);
 
@@ -20,7 +27,7 @@ export function columns(cells: readonly string[], starts: readonly number[]): st
       line = "";
     }
     const room = Math.max(1, WIDTH - start);
-    let rest = cell;
+    let rest = plain(cell);
     while (rest.length > room) {
       lines.push(line.padEnd(start) + rest.slice(0, room));
       line = "";
@@ -37,7 +44,7 @@ export function wrap(text: string, indent: number): string[] {
   const room = Math.max(10, WIDTH - indent);
   const lines: string[] = [];
   let line = "";
-  for (const word of text.split(/\s+/).filter(Boolean)) {
+  for (const word of plain(text).split(/\s+/).filter(Boolean)) {
     let rest = word;
     while (rest.length > room) {
       if (line !== "") lines.push(line);
@@ -56,9 +63,17 @@ export function wrap(text: string, indent: number): string[] {
   return lines.map((each) => `${" ".repeat(indent)}${each}`);
 }
 
-/** `left` with `right` ending at column 78 (at least two spaces between them). */
+/**
+ * `left` with `right` ending at column 78 (at least two spaces between them). When both do not fit
+ * on one line, `right` goes on its own line, still ending at column 78.
+ */
 export function rightAligned(left: string, right: string): string {
-  return `${left}  `.padEnd(78 - right.length) + right;
+  const shownLeft = plain(left);
+  const shownRight = plain(right);
+  if (shownLeft.length + 2 + shownRight.length > 78) {
+    return `${shownLeft}\n${shownRight.padStart(78)}`;
+  }
+  return `${shownLeft}  `.padEnd(78 - shownRight.length) + shownRight;
 }
 
 export const money4 = (usd: number) => `$${usd.toFixed(4)}`;

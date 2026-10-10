@@ -175,7 +175,7 @@ async function agentCall(setup: GuardSetup, line: string) {
 const kinds = async (setup: GuardSetup) =>
   (await setup.harness("owner").activity({ limit: 200 })).records;
 
-describe("secbot activity against the cell routes (AC-33)", () => {
+describe("secbot activity against the cell routes", () => {
   it("prints every kind with its verdict or state, layer, reason, and cost under the month's spend", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -283,7 +283,7 @@ describe("secbot activity against the cell routes (AC-33)", () => {
     );
     expect(lines[1]).toBe(RULE);
     expect(lines[2]).toBe(
-      "TIME   AGENT      TOOL OR JOB              VERDICT       LAYER       COST",
+      "TIME   AGENT      TOOL OR JOB              VERDICT       LAYER          COST",
     );
     const expected: [string, string, string?][] = [
       [
@@ -356,7 +356,7 @@ describe("the empty state, old months, and paging", () => {
     });
   });
 
-  it("lists records older than 90 days by month (AC-35) and pages a long month", async () => {
+  it("lists records older than 90 days by month and pages a long month", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     let clock = Date.UTC(2026, 5, 10, 9, 0);
     const setup = await openSetup({ now: () => clock });
@@ -426,7 +426,7 @@ describe("the empty state, old months, and paging", () => {
   }, 30_000);
 });
 
-describe("the person check and the owner's read (AC-34)", () => {
+describe("the person check and the owner's read", () => {
   it("refuses another person's device key, refuses a device key as the operator key, and shows the owner a person's activity", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const setup = await openSetup();

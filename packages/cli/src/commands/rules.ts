@@ -48,8 +48,8 @@ export function operatorTarget(client: OperatorClient, person: string): GuardTar
 
 type RuleLists = { owner: Rule[]; person: Rule[]; timeZone?: string };
 
-const STARTS = [0, 8, 27, 58];
-const HEADER = "AGENT   TOOL               MATCH                          VERDICT";
+const STARTS = [0, 11, 30, 61];
+const HEADER = "AGENT      TOOL               MATCH                          VERDICT";
 
 function table(title: string, rules: readonly Rule[], timeZone: string): string[] {
   const lines = [title, RULE, HEADER];
@@ -62,7 +62,7 @@ function table(title: string, rules: readonly Rule[], timeZone: string): string[
       ),
     );
     if (rule.source === "allow-always" && rule.addedAt !== undefined) {
-      lines.push(`          added by allow always, ${dayTime(rule.addedAt, timeZone)}`);
+      lines.push(`             added by allow always, ${dayTime(rule.addedAt, timeZone)}`);
     }
   }
   return lines;

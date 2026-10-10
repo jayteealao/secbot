@@ -73,7 +73,7 @@ with `mise run <task> -- <flags>`. The tasks that reach the VPS run the release 
 | Task | Flags | Prints |
 | --- | --- | --- |
 | `smoke:r2` | none; reads `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` | `smoke:r2: PASS` when the bucket refuses a second create of the same key with 412, else the failure. Run it before replication is turned on. |
-| `host:setup` | Ansible extra vars: `-e celld_replication_confirmed=true` (start the test fleet), `-e celld_production=true -e celld_production_confirmed=true` (set up and start the production fleets) | The Ansible diff and recap. A second run reports `changed=0`. Fails with `set <NAME> in your shell before host setup …` for a missing value. |
+| `host:setup` | Ansible extra vars: `-e celld_replication_confirmed=true` (start the test fleet), `-e celld_production=true -e celld_production_confirmed=true` (set up and start the production fleets) | The Ansible diff and recap. A second run reports `changed=0`. Fails with `set <NAME> in your shell before host setup …` for a missing value. Installs the secrets cell's key helper under its own user and creates each environment's first master key once, never replacing one; stops with a message when `/usr/bin/python3` 3.8 or later is missing on the VPS (it never installs a runtime). |
 | `probe:ports` | none | Checks from your machine that every celld port refuses a connection from outside the private network. |
 | `infra:check` | none | `tofu fmt` and `validate`, `ansible-lint`, and the playbook syntax check. |
 | `infra:plan` / `infra:apply` | `TF_VAR_*` in your shell | The OpenTofu plan of the buckets, their tokens, and the heartbeats; apply runs the reviewed plan. Owner only. |

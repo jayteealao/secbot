@@ -15,19 +15,13 @@
  * The cell is never snapshotted or restored: the release tool skips it, and a lost cell is rebuilt
  * and its credentials rotated (scripts/vps.mjs restore).
  */
-import type { Context } from "@earendil-works/chord";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, defineExtension, Harness } from "@earendil-works/pi-durable";
+import type { Harness } from "@earendil-works/pi-durable";
 import {
   type AlarmReport,
   alarmVerdict,
   type BrokerAnswer,
   type BrokerRequest,
   CellAlarm,
-  createHeartbeatRoutine,
-  createReportGate,
-  ensureRoutines,
   errorFields,
   HarnessSlot,
   type HeartbeatEnv,
@@ -35,24 +29,26 @@ import {
   heartbeatState,
   logEvent,
   type NextWake,
-  nextWake,
+  openRoutineHarness,
   type RotateResult,
   SECRETS_UNAVAILABLE,
   type SecretInput,
   type SecretListing,
   type WakeSummary,
-  wakesOf,
 } from "@secbot/cell-harness";
 import {
   type CelldAlarmInfo,
   type CelldCellStorage,
   openCelldStorageWithDatabase,
 } from "@secbot/cell-storage";
-import { BrokerRequestRefused, brokerCall } from "./broker.ts";
+import { BrokerRequestRefused, type BrokerTiming, brokerCall } from "./broker.ts";
 import { RefusedSecretRequest, SecretStore } from "./grant-store.ts";
 import { helperCustody, type KeyCustody, KeyCustodyUnavailable } from "./key-custody.ts";
 
 export const SECRETS_CELL_NAME = "secrets";
+
+/** A refused start with an unchanged reason is logged again after this many attempts. */
+const REFUSED_LOG_EVERY = 50;
 
 export interface SecretsCellState {
   readonly storage: CelldCellStorage;
@@ -98,6 +94,12 @@ interface Opened {
 
 const text = (value: unknown): string => (typeof value === "string" ? value : "");
 
+/** The caller's request id for the log, when it is a short id; never other text. */
+const requestIdOf = (input: { requestId?: unknown }): string | null =>
+  typeof input.requestId === "string" && /^[A-Za-z0-9:_-]{1,128}$/.test(input.requestId)
+    ? input.requestId
+    : null;
+
 export class SecretsCell {
   /** The routine harness: closed and opened again when celld closes the database under it. */
   private readonly slot: HarnessSlot<Opened>;
@@ -106,6 +108,8 @@ export class SecretsCell {
   private readonly alarms: CellAlarm;
   private readonly now: () => number;
   private readonly custody: KeyCustody;
+  /** The reason the last open was refused, and how many opens it refused in a row. */
+  private refused: { readonly reason: string; count: number } | undefined;
 
   constructor(
     private readonly state: SecretsCellState,
@@ -139,64 +143,51 @@ export class SecretsCell {
     return opening;
   }
 
-  private async openNow(
-    onReport: (error: unknown) => void,
-    context: Context = BACKGROUND_CONTEXT,
-  ): Promise<Opened> {
+  private async openNow(onReport: (error: unknown) => void): Promise<Opened> {
     // No route answers without a usable key: the key files are checked before anything opens.
     const health = await this.custody.health();
     if (!health.ok) {
-      logEvent(
-        "secrets.refused_start",
-        { cell: SECRETS_CELL_NAME, reason: health.reason },
-        "error",
-      );
+      this.refusedStart(health.reason);
       throw new KeyCustodyUnavailable(health.reason);
     }
+    this.refused = undefined;
     const { storage, database } = await openCelldStorageWithDatabase(this.state.storage);
-    const hooks = { cell: SECRETS_CELL_NAME, onWakeChange: () => this.rearmSoon() };
-    const heartbeat = createHeartbeatRoutine(this.env, hooks, this.options.fetch);
-    const registry = createRegistry();
-    registry.install(defineExtension({ name: "secbot-routines", tasks: [heartbeat.task] }));
-    // The first storage-gone report is logged and closes this harness through the slot; later
-    // ones are counted into one harness.reports_suppressed line.
-    const reports = createReportGate(SECRETS_CELL_NAME, onReport);
-    const harness = await Harness.open(
-      storage,
-      { models: createModels(), registry, now: this.now, onReport: reports.report },
-      context,
-    );
-    try {
-      await harness.root(context);
-      await ensureRoutines(harness, [{ routine: heartbeat }], this.now(), context);
-      harness.resume();
-      const opened: Opened = {
-        store: new SecretStore(database, this.custody, this.now),
-        harness,
-        wakes: async () => {
-          const summary = wakesOf(await harness.inspect(context));
-          return { summary, next: nextWake(summary, this.now()) };
-        },
-        close: async () => {
-          // First, so the count goes out even when the close below never finishes.
-          reports.flush();
-          await harness.close(context);
-        },
-      };
-      await this.alarms.rearm(opened);
-      logEvent("secrets.started", {
+    const routine = await openRoutineHarness(
+      {
         cell: SECRETS_CELL_NAME,
-        key_id: health.current,
-        key_ids: health.keyIds.length,
-      });
-      return opened;
-    } catch (error) {
-      reports.flush();
-      await harness.close(context).catch(() => {});
-      throw error;
-    }
+        storage,
+        env: this.env,
+        now: this.now,
+        onReport,
+        onWakeChange: () => this.rearmSoon(),
+        ...(this.options.fetch === undefined ? {} : { fetch: this.options.fetch }),
+      },
+      (opened) => this.alarms.rearm(opened),
+    );
+    logEvent("secrets.started", {
+      cell: SECRETS_CELL_NAME,
+      key_id: health.current,
+      key_ids: health.keyIds.length,
+    });
+    return { ...routine, store: new SecretStore(database, this.custody, this.now) };
   }
 
+  /**
+   * Logs `secrets.refused_start` when the reason is new, then once every REFUSED_LOG_EVERY
+   * attempts with the count, so a helper outage does not log a line for every request.
+   */
+  private refusedStart(reason: string): void {
+    const refused = this.refused?.reason === reason ? this.refused : { reason, count: 0 };
+    refused.count++;
+    this.refused = refused;
+    if (refused.count === 1 || refused.count % REFUSED_LOG_EVERY === 0) {
+      logEvent(
+        "secrets.refused_start",
+        { cell: SECRETS_CELL_NAME, reason, attempts: refused.count },
+        "error",
+      );
+    }
+  }
   private rearmSoon(): void {
     const opening = this.slot.current();
     if (opening === undefined) return;
@@ -242,6 +233,7 @@ export class SecretsCell {
     person: string;
     agent: string;
     name: string;
+    requestId?: string;
   }): Promise<SecretsAnswer<{ value: string }>> {
     return this.answer("get", async (store) => {
       const value = await store.get(text(input.person), text(input.agent), text(input.name));
@@ -250,6 +242,7 @@ export class SecretsCell {
         person: input.person,
         agent: input.agent,
         secret: input.name,
+        request_id: requestIdOf(input),
       });
       return { value };
     });
@@ -261,20 +254,20 @@ export class SecretsCell {
     agent: string;
     name: string;
     request: BrokerRequest;
+    requestId?: string;
   }): Promise<SecretsAnswer<BrokerAnswer>> {
     return this.answer("broker", async (store) => {
       const person = text(input.person);
       const agent = text(input.agent);
       const name = text(input.name);
       const { target, token } = await store.brokerSecret(person, agent, name);
+      const request = input.request ?? ({} as BrokerRequest);
       let answer: BrokerAnswer;
+      let timing: BrokerTiming = { cause: null, durationMs: 0 };
       try {
-        answer = await brokerCall(
-          target,
-          token,
-          input.request ?? ({} as BrokerRequest),
-          this.options.fetch,
-        );
+        answer = await brokerCall(target, token, request, this.options.fetch, (seen) => {
+          timing = seen;
+        });
       } catch (error) {
         if (error instanceof BrokerRequestRefused) {
           throw store.refusedBroker(person, agent, name, error.message);
@@ -287,7 +280,11 @@ export class SecretsCell {
         agent,
         secret: name,
         kind: target.kind,
+        method: typeof request.method === "string" ? request.method : null,
         status: answer.status,
+        cause: timing.cause,
+        duration_ms: timing.durationMs,
+        request_id: requestIdOf(input),
       });
       return answer;
     });

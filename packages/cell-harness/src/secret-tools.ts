@@ -22,7 +22,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { appendRecord, recordOf } from "./activity.ts";
 import { errorFields, logEvent } from "./cell-parts.ts";
-import { addKnownSecretValues } from "./redact.ts";
+import { addKnownSecretValues, setKnownSecretValues } from "./redact.ts";
 import { roleOf } from "./telemetry.ts";
 
 /** What a person sees when the secrets cell does not answer. */
@@ -82,12 +82,19 @@ export interface RotateResult {
  * no answer throws `SecretsUnavailable`.
  */
 export interface SecretsClient {
-  get(person: string, agent: string, name: string): Promise<{ readonly value: string }>;
+  /** `requestId` ties the secrets cell's log lines to the call (`<task>:<call>`). */
+  get(
+    person: string,
+    agent: string,
+    name: string,
+    requestId?: string,
+  ): Promise<{ readonly value: string }>;
   broker(
     person: string,
     agent: string,
     name: string,
     request: BrokerRequest,
+    requestId?: string,
   ): Promise<BrokerAnswer>;
   list(person: string): Promise<readonly SecretListing[]>;
   grant(person: string, secret: string, agent: string): Promise<{ readonly granted: boolean }>;
@@ -126,6 +133,10 @@ export const secretsReason = (error: unknown): string =>
 
 const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
 
+/** The id that ties a secrets request to its tool call in every cell's log. */
+const requestIdOf = (api: Pick<ToolExecutionApi, "taskId" | "callId">) =>
+  `${String(api.taskId)}:${api.callId}`;
+
 export interface SecretsExtensionOptions {
   readonly now: () => number;
   readonly timeZone: string;
@@ -141,7 +152,8 @@ export function redactionLoader(person: string, client: () => SecretsClient | un
     const secrets = client();
     if (secrets === undefined) return Promise.resolve();
     loaded ??= secrets.redactionValues(person).then(
-      (values) => addKnownSecretValues(values),
+      // A load replaces this cell's learned values, so a value no longer granted is let go.
+      (values) => setKnownSecretValues(person, values),
       (error: unknown) => {
         loaded = undefined;
         logEvent("secrets.redaction_unloaded", { cell: person, ...errorFields(error) }, "warn");
@@ -190,6 +202,8 @@ export function createSecretsExtension(
         cell: person,
         role: fields.agent,
         tool: fields.label,
+        task_id: api.taskId,
+        call_id: api.callId,
         outcome: "refused",
         reason: record.reason,
       },
@@ -210,9 +224,16 @@ export function createSecretsExtension(
       try {
         if (secrets === undefined) throw new SecretsUnavailable();
         await loadRedaction();
-        const { value } = await secrets.get(person, agent, args.name);
-        addKnownSecretValues([value]);
-        logEvent("secrets.request", { cell: person, role: agent, tool: label, outcome: "ok" });
+        const { value } = await secrets.get(person, agent, args.name, requestIdOf(api));
+        addKnownSecretValues([value], person);
+        logEvent("secrets.request", {
+          cell: person,
+          role: agent,
+          tool: label,
+          task_id: api.taskId,
+          call_id: api.callId,
+          outcome: "ok",
+        });
         return { ...text(value), details: { name: args.name } };
       } catch (error) {
         const reason = secretsReason(error);
@@ -252,11 +273,13 @@ export function createSecretsExtension(
       try {
         if (secrets === undefined) throw new SecretsUnavailable();
         await loadRedaction();
-        const answer = await secrets.broker(person, agent, args.secret, request);
+        const answer = await secrets.broker(person, agent, args.secret, request, requestIdOf(api));
         logEvent("secrets.request", {
           cell: person,
           role: agent,
           tool: label,
+          task_id: api.taskId,
+          call_id: api.callId,
           outcome: "ok",
           status: answer.status,
         });

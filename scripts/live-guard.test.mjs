@@ -92,11 +92,11 @@ test("the owner-rule matchers read the rules list, the held call, and the denial
   const rules = [
     "OWNER RULES (you cannot loosen these)",
     "------------------------------------------------------------------------------",
-    "AGENT   TOOL               MATCH                          VERDICT",
-    "all     pay tools          any                            prohibit",
-    "all     set_reminder       text ~ /\\b\\d(?:[ \\-\\u2010-\\u2015]?\\d){12,18}\\b/i",
+    "AGENT      TOOL               MATCH                          VERDICT",
+    "all        pay tools          any                            prohibit",
+    "all        set_reminder       text ~ /\\b\\d(?:[ \\-\\u2010-\\u2015]?\\d){12,18}\\b/i",
     "                                                          ask first",
-    "all     search_history     query ~ /\\b(?:password|passcode|pin|token|api[ _\\-]?",
+    "all        search_history     query ~ /\\b(?:password|passcode|pin|token|api[ _\\-]?",
     "                           key)\\b/i",
     "                                                          ask first",
   ].join("\n");

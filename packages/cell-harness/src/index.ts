@@ -8,6 +8,7 @@ export {
   type GuardModelFields,
   MONTH,
   monthItemCost,
+  monthKey,
   monthOf,
 } from "./activity.ts";
 export {
@@ -54,6 +55,7 @@ export {
   type LogLevel,
   type LogListener,
   logEvent,
+  logName,
   onLogEvent,
   RefusedChange,
   safeErrorText,
@@ -136,6 +138,13 @@ export {
   type ReportSpendResult,
   type SpendReport,
 } from "./household-contract.ts";
+export {
+  costFromReport,
+  type HouseholdCostRow,
+  type HouseholdCostView,
+  householdCostView,
+  rowOf,
+} from "./household-cost.ts";
 export { doneRecord, jobLabel, liveJobs } from "./jobs.ts";
 export {
   type BudgetLine,
@@ -179,9 +188,12 @@ export {
   addKnownSecretValues,
   clearKnownSecretValues,
   isSecretKey,
+  KEPT_TEXT_LIMIT,
   REDACTED,
   redact,
   redactText,
+  redactTokens,
+  setKnownSecretValues,
 } from "./redact.ts";
 export {
   CARD_NUMBER_PATTERN,
@@ -219,6 +231,11 @@ export {
   type ReviewVerdict,
   reviewMessage,
 } from "./reviewer.ts";
+export {
+  openRoutineHarness,
+  type RoutineHarness,
+  type RoutineHarnessOptions,
+} from "./routine-harness.ts";
 export {
   createRoutineTask,
   defineRoutine,

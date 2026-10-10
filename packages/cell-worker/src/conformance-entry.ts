@@ -1,6 +1,7 @@
 // The test-cell worker: the person-cell routes, the household and secrets cells, the in-cell storage
 // conformance run, the durability lab, the guard bench, and the fake health target for the
 // secrets cell's broker.
+import { logEvent } from "@secbot/cell-harness";
 import { ConformanceCell } from "./conformance-cell.ts";
 import { DurabilityLabCell } from "./durability-lab.ts";
 import { GuardBenchCell } from "./guard-bench.ts";
@@ -13,6 +14,7 @@ import {
   SecretsCell,
   type WorkerEnv,
 } from "./index.ts";
+import { hasOperatorKey } from "./ops.ts";
 
 export type { DurableObjectNamespaceLike, DurableObjectStubLike } from "./index.ts";
 export {
@@ -69,6 +71,11 @@ export default {
       return fakeTarget(request, url);
     }
     if (url.pathname.startsWith("/lab/guard-bench")) {
+      // The guard bench makes paid model calls: only the operator key starts or reads it.
+      if (!(await hasOperatorKey(request, env))) {
+        logEvent("ops.refused", { route: url.pathname, reason: "operator_key" }, "warn");
+        return Response.json({ error: "refused: operator_key" }, { status: 401 });
+      }
       if (env.GUARD_BENCH === undefined) {
         return Response.json({ error: "no GUARD_BENCH binding" }, { status: 503 });
       }

@@ -34,19 +34,29 @@ starting zone.
 ## The key helper's first setup
 
 The secrets cell never holds a master key. A small host process, the key helper, holds each
-environment's master keys in a directory readable by the celld user alone, and gives the cell only
-a key derived for one record. `mise run host:setup` installs it and creates each environment's
-first master key once, on the host; the key is never printed or copied off the host. The host
-needs Python 3.8 or later; host setup stops with a message when it is missing and never installs
-one.
+environment's master keys and gives the cell only a key derived for one record. It runs as its own
+system user (`secbot-keys`), which alone can read the key directory; it answers only the celld
+user's connections, and the celld units cannot see the key directory at all.
+`mise run host:setup` creates the user, installs the helper, and creates each environment's first
+master key once, on the host; the key is never printed or copied off the host. On a host set up
+before the helper had its own user, host setup gives the existing key files to that user and
+keeps them. The host needs Python 3.8 or later; host setup stops with a message when it is
+missing and never installs one.
+
+Run host setup before the first release that carries the secrets cell, for the test cell and,
+with `celld_production`, for production. A deploy to a fleet that serves the secrets cell stops
+early when its key helper is not running, and names this step.
 
 When the key helper is missing or its key file is unreadable, the secrets cell refuses to start and
 every `secbot secrets` command prints `secbot: refused: secrets cell unavailable`. Run
-`mise run host:setup` again; it does not replace a key that exists.
+`mise run host:setup` again; it does not replace a key that exists. The
+[secrets cell runbook](../runbooks/secrets-cell-refused.md) covers the other causes, including a
+lost key directory.
 
 ## Add a secret
 
-`add` reads the value from standard input, so it never appears in your shell history or on screen:
+`add` reads the value from standard input. Send it from a file, as below, so it never appears in
+your shell history or on screen; typed at a terminal, the value shows as you type it:
 
 ```
 $ secbot secrets add --person sam test-secret < value.txt
@@ -54,8 +64,14 @@ $ secbot secrets add --person sam health-test --broker health --url "$HEALTH_URL
 ```
 
 A broker secret is never given to an agent: the agent asks the secrets cell to make the call and
-gets the answer without the token. Keep `HEALTH_URL` in your shell. `secbot secrets list --person
-sam` lists that person's secrets by name.
+gets the answer without the token. Add every token for health data or a production system with
+`--broker health` or `--broker production`: a secret added without `--broker` is a plain secret,
+and an agent granted it reads its value. Keep `HEALTH_URL` in your shell. `secbot secrets list
+--person sam` lists that person's secrets by name.
+
+Adding a secret again replaces its value and keeps its grants. Adding it again as the other kind
+(plain instead of broker, or the reverse) revokes its grants, so an agent never reads a broker
+token because the `--broker` flags were left off; grant it again if that was meant.
 
 ## The allowlist and grants
 
@@ -76,14 +92,21 @@ $ secbot secrets rotate
 ```
 
 The next master key becomes current and every secret is re-wrapped under it; the line says how
-many are left under the old key. Run it again when that number is not 0.
+many are left under the old key. Run it again when that number is not 0. A rotation request is
+sent once and never retried on its own, so a lost answer does not make a second key.
+
+A rotation that stops partway (the cell restarted, or the command lost its connection) leaves
+some secrets under the old key. Both keys stay on the host and both still open their secrets, so
+nothing is lost: run `secbot secrets rotate` again. A rotation cannot be undone; never delete an
+old key file while any secret is still under it.
 
 ## The decision-model setting
 
 Each cell names its decision model. A new cell starts on Jev (`jev`); Clef (`clef`) and Clef Flash
 (`clef-flash`) are the other settings. Read it with `secbot mode show <person>`; change it with
 `secbot mode decision <person> <model>`, from the next call. When the decision model fails or is
-too slow, the guard falls back as the [model outage runbook](../runbooks/model-outage.md) says.
+too slow, the call goes to the reviewer, and when the reviewer fails the call is held for the
+person; the [guard fallback runbook](../runbooks/guard-fallback.md) says what to check.
 
 The release thresholds are 0.10 for `set_reminder` and 0.30 for `search_history`: a call that
 scores at or above its tool's threshold is marked. Change one only after the example check below
@@ -105,15 +128,19 @@ three can be removed (`refused: this rule is part of the release: …`), and a p
 than one of them is refused: a permit for every reminder or every history search is refused,
 naming the owner rule. A call these rules hold is not offered `allow always`.
 
-## Switch from shadow to enforce
+`allow always` is offered only for a call a rule held, and only as an exact match on one
+argument (for example `specialist = research`). A call the reviewer held, or a tool with no
+argument to match exactly (`broker_call`, `secret_get`), is answered with `/allow` or `/deny`
+each time.
 
+## Switch from shadow to enforce
 
 Every cell starts in shadow mode: rules and approvals apply, and the decision model and the
 reviewer record what they would have done. Read at least a week of shadow verdicts in
-`secbot activity --person <name>` first. With the low release thresholds, watch the reminders and
-history searches the decision model would mark: many marks on plain calls mean many held calls
-once the cell enforces. Then:
+`secbot activity --person <name>` first.
 
+With the low release thresholds, watch the reminders and history searches the decision model
+would mark. Many marks on plain calls mean many held calls once the cell enforces. Then:
 
 ```
 $ secbot mode set sam enforce
@@ -139,7 +166,8 @@ and keep every value in your shell.
    release defaults do not change. The charter in steps 7 and 9 refuses to start until this step
    has run.
 5. Measure the guard's added time with Jev:
-   `mise run measure:guard -- --env test-cell --calls 100 --adapter jev`. It passes when the p95
+   `mise run measure:guard -- --env test-cell --calls 100 --adapter jev`. The bench makes paid
+   model calls, so its routes take the operator key; the release tool sends it. It passes when the p95
    is under 800 ms. A run where the decision model fell back on half the calls or more is
    `not measured`.
 6. Check that Jev marks the risky example calls:
@@ -163,7 +191,6 @@ and keep every value in your shell.
    that the test cell lists both release owner rules, that a reminder holding a test card number
    and a search for a password are held by those rules (and denied), and that a reminder with no
    card number is not; they write `owner-rules-live.txt`.
-
 8. Restart the test cell with `mise run test:durability -- --crash-only`.
 9. Run part 2, which checks that a held call outlived the restart and cleans up:
    `mise run live:guard -- charter --part 2 --out <dir>`.

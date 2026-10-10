@@ -17,7 +17,7 @@ afterEach(async () => {
 });
 
 describe("seal and open", () => {
-  it("keeps only ciphertext, a wrapped data key, a key id, and the salt and IVs (AC-36)", async () => {
+  it("keeps only ciphertext, a wrapped data key, a key id, and the salt and IVs", async () => {
     const custody = testCustody();
     const record = await seal("owner", "test-secret", VALUE, custody);
     expect(Object.keys(record).sort()).toEqual(
@@ -33,7 +33,7 @@ describe("seal and open", () => {
     expect(await openSealed(record, custody)).toBe(VALUE);
   });
 
-  it("refuses a ciphertext copied to another person's or another name's record (AC-36)", async () => {
+  it("refuses a ciphertext copied to another person's or another name's record", async () => {
     const custody = testCustody();
     const record = await seal("owner", "test-secret", VALUE, custody);
     await expect(openSealed({ ...record, person: "second" }, custody)).rejects.toThrow();
@@ -71,7 +71,7 @@ describe("seal and open", () => {
   });
 });
 
-describe("rotation in the cell (AC-41)", () => {
+describe("rotation in the cell", () => {
   it("re-wraps every secret under k2, and a read between batches still decrypts", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const custody = testCustody();

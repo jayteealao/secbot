@@ -265,7 +265,7 @@ describe("a held call", () => {
     await t.cell.submit(CALL("set_reminder", { text: "bins out", at }), "r-1");
     await until(async () => (await t.cell.heldCalls()).length === 1);
     const [own] = await t.cell.heldCalls();
-    // The owner card-number rule does not accept "bins out", so allow always stays on offer (AC-19).
+    // The owner card-number rule does not accept "bins out", so allow always stays on offer.
     expect(own).toMatchObject({
       reasonSource: "your-rule",
       always: {
@@ -282,7 +282,7 @@ describe("a held call", () => {
     const answered = await t.cell.answer(own?.number ?? 0, "always", { device: "laptop" });
     expect(answered.rule).toMatchObject({ source: "allow-always", tool: "set_reminder" });
 
-    // A card number in a reminder: held by the owner rule, allow always not offered (AC-49).
+    // A card number in a reminder: held by the owner rule, allow always not offered.
     await t.cell.submit(
       CALL("set_reminder", { text: "pay with card 4111 1111 1111 1111", at }),
       "r-2",

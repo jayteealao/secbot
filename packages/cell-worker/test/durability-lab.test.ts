@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import conformanceWorker, { type ConformanceEnv } from "../src/conformance-entry.ts";
 import { DurabilityLabCell, type LabEnv } from "../src/durability-lab.ts";
 
-import { OPERATOR_HEADER } from "../src/household-client.ts";
+import { OPERATOR_HEADER } from "../src/internal-rpc.ts";
 import { PersonCell } from "../src/person-cell.ts";
 
 const labs: DurabilityLabCell[] = [];

@@ -38,9 +38,7 @@ device key is what proves the caller.
 | `secbot model list` | Each role's model and whether it is the release default or your change. The last row is the guard's `reviewer`, which judges the calls the decision model marks. |
 | `secbot model set <role> <model-id>` | Changes a role's model from its next turn (the reviewer's from its next review). An unknown role or model is refused (exit 1) and nothing changes. |
 | `secbot specialist add <name> --instruction "..." [--model <id>]` | Adds a specialist. The lead can hand work to it from its next turn. |
-
-| `secbot rules list` | The owner's rules (you cannot loosen these), then your own rules: agent, tool, argument match, verdict. The owner's rules always include the release ones: agents never pay, a reminder holding a card number asks first, and a history search naming a password, PIN, token, or API key asks first. |
-
+| `secbot rules list` | The owner's rules (you cannot loosen these), then your own rules: agent, tool, argument match, verdict. The owner's rules always include the release ones: agents never pay, a reminder holding a card number asks first, and a history search naming a password, passcode, PIN, token, or API key asks first. |
 | `secbot rules add <agent> <tool> <permit\|ask-first\|prohibit> [match]` | Adds one of your rules. A rule looser than an owner rule is refused on stderr, naming the owner rule (exit 1). |
 | `secbot rules remove <agent> <tool> [match]` | Removes the rule with that agent, tool, and match (give the match it was added with). |
 | `secbot secrets list` | Your secrets: name, kind (`secret`, `health`, or `production`), and the agents each is granted to. Never a value. |
@@ -149,7 +147,7 @@ number as the usage line and `secbot cost`):
 ```
 ACTIVITY  sam  October 2026                                  [ total: $11.52 ]
 ------------------------------------------------------------------------------
-TIME   AGENT      TOOL OR JOB              VERDICT       LAYER       COST
+TIME   AGENT      TOOL OR JOB              VERDICT       LAYER          COST
 14:02  lead       handoff -> research      allowed       person    $0.0000
          allowed once by sam
 13:58  lead       handoff -> research      held          rule      $0.0000
@@ -203,8 +201,9 @@ call.
 
 ### Secrets (owner)
 
-On the owner's machine, with the operator key. `add` reads the value from standard input, so it
-never appears in your shell history or on screen:
+On the owner's machine, with the operator key. `add` reads the value from standard input. Send it
+from a file, as below, so it never appears in your shell history or on screen; typed at a
+terminal, the value shows as you type it:
 
 ```
 $ secbot secrets add --person sam test-secret < value.txt

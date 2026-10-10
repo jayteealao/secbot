@@ -31,7 +31,7 @@ import {
   type ActivityView,
   listActivity,
   monthItemCost,
-  monthOf,
+  monthKey,
 } from "./activity.ts";
 import { type AlertEnv, createAlerts } from "./alerts.ts";
 import {
@@ -328,7 +328,9 @@ export class CellHarness implements CellParts {
       { ...query, now, timeZone: this.timeZone },
       context,
     );
-    const current = page.month === monthOf(now, this.timeZone) && query.before === undefined;
+    const ledger = await this.harness.snapshot(MonthLedgerDoc, context);
+    const current =
+      page.month === monthKey(now, this.timeZone, ledger) && query.before === undefined;
     const live = current
       ? await liveJobs(
           this.harness,
@@ -340,10 +342,10 @@ export class CellHarness implements CellParts {
   }
 
   /**
-   * The person's spend in `month`: the month ledger's month to date when the months agree, the
+   * The person's spend in `month`: the month ledger's month to date for the current month, the
    * total the ledger kept when the month ended, else the sum of the month's stored item costs (a
-   * month before the ledger kept totals, or a month key that differs because activity months use
-   * the cell's zone and the ledger the household zone).
+   * month before the ledger kept totals). Activity pages are keyed by the ledger's months
+   * (`monthKey`), so the current page and the ledger name the same month.
    */
   private async monthSpent(month: string, context: Context): Promise<number> {
     const { spend, person } = await this.budgetState(context);
@@ -376,14 +378,23 @@ export class CellHarness implements CellParts {
   /**
    * Every durable wake time and the cell's next alarm, from the live tasks' checkpoints. Work
    * waiting above a limit is timed at the month reset, and the month reset is always a wake, so an
-   * idle cell rolls its month on time.
+   * idle cell rolls its month on time. A reset that has passed is rolled here (the limit watch's
+   * evaluation rolls the ledger and lets waiting work continue), so the alarm is never set again
+   * to a time already past; when the roll did not happen, the next try is a minute later.
    */
   async wakes(
     context: Context = BACKGROUND_CONTEXT,
   ): Promise<{ readonly summary: WakeSummary; readonly next: NextWake | undefined }> {
-    const ledger = await this.harness.snapshot(MonthLedgerDoc, context);
+    let ledger = await this.harness.snapshot(MonthLedgerDoc, context);
+    if (ledger !== undefined && ledger.month !== "" && ledger.endsAt <= this.now()) {
+      this.budget.watch.trigger();
+      await this.budget.watch.settled();
+      ledger = await this.harness.snapshot(MonthLedgerDoc, context);
+    }
     const waits = await this.harness.snapshot(BudgetWaitsDoc, context);
-    const resetsAt = ledger === undefined || ledger.month === "" ? undefined : ledger.endsAt;
+    const endsAt = ledger === undefined || ledger.month === "" ? undefined : ledger.endsAt;
+    const resetsAt =
+      endsAt !== undefined && endsAt <= this.now() ? this.now() + MONTH_ROLL_RETRY_MS : endsAt;
     const summary = wakesOf(
       await this.harness.inspect(context),
       resetsAt === undefined
@@ -495,6 +506,9 @@ export class CellHarness implements CellParts {
 
 /** How often a harness logs the count of storage-gone reports it did not log: 60 s. */
 export const REPORT_SUMMARY_MS = 60_000;
+
+/** A month reset that passed but did not roll is tried again this much later. */
+export const MONTH_ROLL_RETRY_MS = 60_000;
 
 /** A harness's background failures on their way to the log and to `options.onReport`. */
 export interface ReportGate {
@@ -643,6 +657,7 @@ export async function openCellHarness(
     // call does; the call's own outcome stays the guard's (fail closed).
     onCredit: (status) =>
       monitor.report({ kind: "failure", error: `${status} credit limit`, credit: true }),
+    now,
   });
   // The guard is first in every role's list and in the default list, so every role (and a
   // specialist added after start) runs it before any tool call.

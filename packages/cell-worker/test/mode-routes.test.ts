@@ -67,6 +67,9 @@ describe("the guard-mode routes (operator key)", () => {
     expect(adapter.status).toBe(200);
     expect(await adapter.json()).toMatchObject({ decisionModel: "clef", mode: "enforce" });
     expect((await s.harness("owner").guardMode()).decisionModel).toBe("clef");
+    // The decision model is read through GET /ops/mode; a GET of its own route is not found.
+    expect((await call(s, "GET", "/ops/decision-model?cell=owner", operator)).status).toBe(404);
+    expect((await call(s, "GET", "/ops/mode", operator)).status).toBe(400);
 
     const events = log.mock.calls.map(([line]) => JSON.parse(String(line)) as { event: string });
     expect(events.filter((event) => event.event === "guard.mode")).toHaveLength(1);

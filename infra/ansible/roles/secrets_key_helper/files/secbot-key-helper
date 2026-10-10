@@ -2,8 +2,12 @@
 # secbot-key-helper: keeps the secrets cell's master keys on this host and answers only the
 # celld user's own processes on a loopback port. Python 3.8+ standard library only.
 #
-#   secbot-key-helper --key-dir /etc/secbot/secrets-keys/<env> --port <port>
+#   secbot-key-helper --key-dir /etc/secbot/secrets-keys/<env> --port <port> [--peer-user celld]
 #   (--port 0 picks a free port and prints "listening <port>", for the tests)
+#
+# On the host the helper runs as its own user, which alone owns the keys, and answers only the
+# sockets of --peer-user (the celld user that runs the secrets cell). Without --peer-user it
+# answers its own user's sockets.
 #
 # Routes (JSON):
 #   GET  /health          {ok, current, keyIds} or {ok: false, reason}
@@ -15,7 +19,8 @@
 #
 # The key directory and every key file must be owned by this process's user with no group or
 # other permission bits; the check runs on every request, so a mode change after start is caught.
-# Every connection's peer must be a socket owned by this process's user (/proc/net/tcp, tcp6).
+# Every connection's peer must be a socket owned by the peer user (/proc/net/tcp, tcp6). A
+# connection that sends nothing for 5 seconds is closed, so idle sockets cannot hold every thread.
 # Journal lines carry the route, the outcome, and a reason only, never key material.
 import argparse
 import base64
@@ -23,6 +28,7 @@ import hashlib
 import hmac
 import json
 import os
+import pwd
 import re
 import secrets
 import socket
@@ -35,6 +41,7 @@ KEY_ID = re.compile(r"^k[1-9][0-9]{0,5}$")
 KEY_BYTES = 32
 INFO_LIMIT = 512
 BODY_LIMIT = 4096
+CONNECTION_TIMEOUT_S = 5
 ROTATE_LOCK = threading.Lock()
 
 
@@ -178,10 +185,12 @@ def endpoint(text):
     return (socket.inet_ntop(socket.AF_INET6, raw), port)
 
 
-def make_handler(keys, proc):
+def make_handler(keys, proc, peer_uid):
     class Handler(BaseHTTPRequestHandler):
         server_version = "secbot-key-helper"
         sys_version = ""
+        # A stalled or idle connection is dropped instead of holding a thread.
+        timeout = CONNECTION_TIMEOUT_S
 
         def log_message(self, *args):
             # The standard access log is replaced by the route, outcome, and reason lines.
@@ -203,10 +212,13 @@ def make_handler(keys, proc):
             client = (host[7:] if host.startswith("::ffff:") else host, port)
             server = (local[0][7:] if local[0].startswith("::ffff:") else local[0], local[1])
             owner = socket_owner(proc, client, server)
-            return owner is not None and owner == keys.uid
+            return owner is not None and owner == peer_uid
 
         def body(self):
-            length = int(self.headers.get("content-length") or "0")
+            text = (self.headers.get("content-length") or "0").strip()
+            if not text.isdigit():
+                raise ValueError("the content length is not a number")
+            length = int(text)
             if length > BODY_LIMIT:
                 raise ValueError("the body is too large")
             try:
@@ -290,11 +302,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="secbot-key-helper")
     parser.add_argument("--key-dir", required=True)
     parser.add_argument("--port", required=True, type=int)
+    parser.add_argument("--peer-user", default=None)
     # Tests only: the /proc root whose net/tcp tables name the peers.
     parser.add_argument("--proc", default="/proc", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     keys = Keys(args.key_dir)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(keys, args.proc))
+    peer_uid = keys.uid if args.peer_user is None else pwd.getpwnam(args.peer_user).pw_uid
+    handler = make_handler(keys, args.proc, peer_uid)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
     server.daemon_threads = True
     try:
         keys.check()

@@ -237,6 +237,21 @@ describe("the month", () => {
     expect((await cell.budgetState()).person.spentUsd).toBeCloseTo(0.3, 10);
   });
 
+  it("rolls a passed month when an idle cell's alarm asks for its wakes, never waking in the past", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    let clock = Date.UTC(2026, 9, 31, 23, 59);
+    test = await openTestCell({ env: { SECBOT_TIME_ZONE: "Europe/London" }, now: () => clock });
+    const cell = test.cell;
+    await addSpend(cell, 0.5);
+    expect((await cell.wakes()).next).toEqual({ at: Date.UTC(2026, 10, 1), source: "month-reset" });
+    // The alarm fires at the reset with no request and no spend: only the wake check runs.
+    clock = Date.UTC(2026, 10, 1, 0, 0, 5);
+    const { next } = await cell.wakes();
+    // The next wake is the heartbeat's or December's reset, never the November reset that passed.
+    expect(next?.at ?? 0).toBeGreaterThan(clock);
+    if (next?.source === "month-reset") expect(next.at).toBe(Date.UTC(2026, 11, 1));
+  });
+
   it("keeps the month's start when the household zone changes, and uses the new zone next month", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     let clock = Date.UTC(2026, 9, 15, 12);

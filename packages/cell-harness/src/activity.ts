@@ -10,7 +10,7 @@
 import type { Context, JsonValue } from "@earendil-works/chord";
 import type { Usage } from "@earendil-works/pi-ai";
 import type { DocumentReader, Tx } from "@earendil-works/pi-durable";
-import { ActivityDoc, ActivityPageDoc } from "./docs.ts";
+import { ActivityDoc, ActivityPageDoc, MonthLedgerDoc } from "./docs.ts";
 import { ARGUMENTS_LIMIT, redact, redactText } from "./redact.ts";
 
 export const ACTIVITY_PAGE_SIZE = 200;
@@ -97,6 +97,8 @@ export type GuardModelFields = {
   readonly costUsd: number;
   /** Shadow mode: the reviewer's block or ask, which did not stop the call. */
   readonly verdictWord?: "would block" | "would ask";
+  /** Why the reviewer gave no verdict (for example `timeout`, `malformed`), for the log only. */
+  readonly reviewerCause?: string;
   /** Each layer's usage, added to the calling conversation's `pi.usage` with the record. */
   readonly usage?: { readonly decision?: Usage; readonly reviewer?: Usage };
 };
@@ -126,6 +128,25 @@ export function monthOf(at: number, timeZone: string): string {
 
 export const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/;
 
+/** The part of the month ledger that says which month a time is in. */
+export interface LedgerMonth {
+  readonly month: string;
+  readonly zone: string;
+  readonly startsAt: number;
+  readonly endsAt: number;
+}
+
+/**
+ * The month `at` is in, from the same source as the spend: the ledger's current month while `at`
+ * falls in it, else the month in the ledger's zone; the cell's own zone only before the ledger
+ * has a month. So `secbot activity` and `secbot cost` always name the same month for one moment.
+ */
+export function monthKey(at: number, timeZone: string, ledger: LedgerMonth | undefined): string {
+  if (ledger === undefined || ledger.month === "") return monthOf(at, timeZone);
+  if (at >= ledger.startsAt && at < ledger.endsAt) return ledger.month;
+  return monthOf(at, ledger.zone);
+}
+
 /** A record ready to store: reason and arguments redacted, the matched fields kept whole. */
 export function recordOf(
   fields: Omit<ActivityRecord, "arguments" | "reason"> & {
@@ -154,7 +175,7 @@ export async function appendRecord(
 ): Promise<boolean> {
   const activity = await tx.doc(ActivityDoc);
   if (activity.recent.includes(record.key)) return false;
-  const month = monthOf(record.at, timeZone);
+  const month = monthKey(record.at, timeZone, await tx.doc(MonthLedgerDoc));
   const counts = activity.months[month] ?? { pages: 1, total: 0 };
   let page = await tx.doc(ActivityPageDoc, `${month}:${counts.pages}`, null);
   if (page.records.length >= ACTIVITY_PAGE_SIZE) {
@@ -171,7 +192,7 @@ export async function appendRecord(
 }
 
 export interface ActivityQuery {
-  /** `YYYY-MM`; the current month in the cell's time zone when absent. */
+  /** `YYYY-MM`; the current month (the spend ledger's) when absent. */
   readonly month?: string;
   /** Only records numbered below this (the `next` of an earlier page). */
   readonly before?: number;
@@ -204,7 +225,9 @@ export async function listActivity(
   query: ActivityQuery & { readonly now: number; readonly timeZone: string },
   context: Context,
 ): Promise<ActivityPage> {
-  const month = query.month ?? monthOf(query.now, query.timeZone);
+  const month =
+    query.month ??
+    monthKey(query.now, query.timeZone, await reader.snapshot(MonthLedgerDoc, context));
   const limit = Math.min(200, Math.max(1, Math.floor(query.limit ?? 50)));
   const counts = (await reader.snapshot(ActivityDoc, context))?.months[month];
   const total = counts?.total ?? 0;

@@ -111,7 +111,7 @@ async function agentCall(setup: GuardSetup, tool: string, args: Record<string, u
   await until(async () => (await setup.harness("owner").activity()).total > before);
 }
 
-describe("the reviewer role in secbot model (AC-16)", () => {
+describe("the reviewer role in secbot model", () => {
   it("lists the reviewer with Claude Sonnet 5.5, and set changes it", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const setup = await openSetup();
@@ -141,7 +141,7 @@ describe("the reviewer role in secbot model (AC-16)", () => {
   });
 });
 
-describe("shadow verdicts in secbot activity (AC-43)", () => {
+describe("shadow verdicts in secbot activity", () => {
   it("shows the marked call the reviewer would block as run, and the prohibit match as refused", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -182,7 +182,7 @@ describe("shadow verdicts in secbot activity (AC-43)", () => {
   });
 });
 
-describe("secbot mode with the operator key (AC-44)", () => {
+describe("secbot mode with the operator key", () => {
   it("shows a fresh cell in shadow, switches it to enforce, and the next marked call is refused; a device key cannot switch", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});

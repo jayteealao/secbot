@@ -1,6 +1,6 @@
 # Design
 
-Secbot has two surfaces: the `secbot` command line (now) and the app on phone, tablet, and desktop web (wave 3, the primary surface). Both follow one quiet instrument-panel style, taken from two reference images the owner chose. The command line renders it in plain text. The app renders it with the tokens below. The confirmed boards for the guard screens are in `.ai/workflows/safety-core/design/r1/`.
+Secbot has two surfaces: the `secbot` command line (now) and the app on phone, tablet, and desktop web (the primary surface, once it ships). Both follow one quiet instrument-panel style, taken from two reference images the owner chose. The command line renders it in plain text. The app renders it with the tokens below.
 
 ## Colors
 App only. The command line prints no color.
@@ -47,14 +47,14 @@ No component library yet. The patterns, shared by both surfaces:
 - **Icons** — thin line icons, 1.6px stroke, 22px.
 
 ## Design Tokens
-The tokens above are the source until the app wave adds a token file. The command line has no tokens: it uses the text patterns in Components.
+The tokens above are the source until the app adds a token file. The command line has no tokens: it uses the text patterns in Components.
 
 ## Elevation and Shadows
 Cards and sheets carry one soft drop shadow (dark: `0 24px 48px -28px` near-black; light: `0 24px 48px -30px` warm grey) over a 1px hairline border. Dialogs carry a deeper shadow over a dimmed, lightly blurred page. No glow on buttons or text; only state dots and ring tips carry a faint 5px glow. The command line has no shadows.
 
 ## Notes
 - Command-line output is plain UTF-8 text with ASCII framing (`[`, `]`, `#`, `.`, `-`, `->`). It has no color, no box-drawing characters, no spinners, and no terminal control codes, so it reads the same in a log file and in a test with no TTY.
-- The app ships a dark theme and a light theme from wave 3; every screen is designed in both.
+- The app ships a dark theme and a light theme from its first release; every screen is designed in both.
 - App viewports: phone (390x844), tablet (820x1180), and desktop web (1440x900).
 - Touch targets are at least 44x44px; desktop-only pointer controls at least 32x32px.
 - Motion (app): 150–250 ms state changes; the usage ring animates only when spend changes, never on a loop.

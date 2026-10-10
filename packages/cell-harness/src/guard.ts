@@ -1,16 +1,15 @@
 /**
  * The guard: one `beforeTool` hook on every role (the first extension of the lead's list, the
  * specialists' list, and the harness default), in front of every tool call. It runs an ordered
- * list of stages; the first stage that refuses or holds decides. This release has one stage, the
- * rule stage; later stages (the decision model, the reviewer) join the same list in the guard's
- * fixed precedence, after the rules, so no model can loosen a rule.
+ * list of stages; the first stage that refuses or holds decides. The rule stage runs first and the
+ * model stage (the decision model, then the reviewer) after it, in the guard's fixed precedence,
+ * so no model can loosen a rule.
  *
  * The record exists before the call runs: after the stages decide, the guard commits one activity
  * record, logs one `guard.verdict` event, and then lets the call run or blocks it. Hooks run with
  * no transaction open, before the call's intent commit, and a block settles the call with
- * `Tool call blocked: <reason>` without running it (installed pi-durable 1.0.3,
- * node_modules/.pnpm/@earendil-works+pi-durable@_39a2d184757a80d838824f8a34b421a0/node_modules/
- * @earendil-works/pi-durable/dist/harness/tool.js:35-54). No other hook runs after the guard's, so
+ * `Tool call blocked: <reason>` without running it (pi-durable 1.0.3,
+ * dist/harness/tool.js:35-54). No other hook runs after the guard's, so
  * the arguments it checks are the arguments that run.
  *
  * A hold waits for the person (approvals.ts): the held-call record is committed before the wait,
@@ -66,6 +65,7 @@ import {
   holdCall,
   LAPSED_TEXT,
   lapseHeld,
+  NOT_OFFERED_REVIEWER,
   type ReasonSource,
   readHeld,
   type SetTimer,
@@ -207,6 +207,57 @@ export interface ModelStageOptions {
    * failure holds the call).
    */
   readonly onCredit?: (status: string) => void;
+  /** The clock for the reviewer's limits; defaults to Date.now. */
+  readonly now?: () => number;
+}
+
+/**
+ * Reviewer requests one cell sends per minute at most. Above it, a call the decision model marked
+ * (or could not judge) is held for the person without a review, so an outage of the decision
+ * model cannot turn every tool call into a paid review.
+ */
+export const REVIEWER_CALLS_PER_MINUTE = 30;
+/** After this many reviewer failures in a row, the reviewer is not asked for REVIEWER_PAUSE_MS. */
+export const REVIEWER_FAILURES_TO_PAUSE = 5;
+export const REVIEWER_PAUSE_MS = 60_000;
+
+/**
+ * The reviewer behind the cell's limits: a request over the per-minute cap, or during the pause
+ * after repeated failures, fails at once with `rate-limited` or `paused` and costs nothing.
+ */
+export function limitedReviewer(
+  reviewer: Reviewer,
+  now: () => number,
+  cell: () => string,
+): Reviewer {
+  let recent: number[] = [];
+  let failures = 0;
+  let pausedUntil = 0;
+  return {
+    async review(input, context) {
+      const at = now();
+      if (at < pausedUntil) throw new ReviewerFailure("paused");
+      recent = recent.filter((sent) => at - sent < 60_000);
+      if (recent.length >= REVIEWER_CALLS_PER_MINUTE) throw new ReviewerFailure("rate-limited");
+      recent.push(at);
+      try {
+        const verdict = await reviewer.review(input, context);
+        failures = 0;
+        return verdict;
+      } catch (error) {
+        if (error instanceof ReviewerFailure && ++failures >= REVIEWER_FAILURES_TO_PAUSE) {
+          failures = 0;
+          pausedUntil = now() + REVIEWER_PAUSE_MS;
+          logEvent(
+            "guard.reviewer_paused",
+            { cell: cell(), cause: error.cause, until: new Date(pausedUntil).toISOString() },
+            "warn",
+          );
+        }
+        throw error;
+      }
+    },
+  };
 }
 
 /** A guard model call's usage: the reported usage, or its cost alone when no usage came back. */
@@ -237,7 +288,10 @@ export const REVIEWER_UNAVAILABLE = "reviewer unavailable";
  * In shadow mode every outcome runs the call and the record says what would have happened.
  */
 export function createModelStage(options: ModelStageOptions): GuardStage {
+  let person = "";
+  const reviewer = limitedReviewer(options.reviewer, options.now ?? Date.now, () => person);
   return async (call, api, context) => {
+    person = call.person;
     const { mode } = await readGuardMode(api, context);
     const adapter = await readDecisionAdapter(api, context);
     const rules = await api.snapshot(RulesDoc, context);
@@ -307,19 +361,36 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
     });
     let review: ReviewVerdict;
     try {
-      review = await options.reviewer.review({ state, decision: asked }, context);
+      review = await reviewer.review({ state, decision: asked }, context);
     } catch (error) {
       if (!(error instanceof ReviewerFailure) || context.abortSignal?.aborted === true) throw error;
       costUsd += error.costUsd;
       reviewerUsage = usageOf(error.usage, error.costUsd);
       if (error.credit) options.onCredit?.("reviewer");
+      logEvent(
+        "guard.reviewer_failed",
+        {
+          cell: call.person,
+          role: call.role,
+          tool: call.tool,
+          cause: error.cause,
+          credit: error.credit,
+          mode,
+          ...(error.detail ?? {}),
+        },
+        "warn",
+      );
+      const failed = {
+        ...fields(mode === "shadow" ? "would ask" : undefined),
+        reviewerCause: error.cause,
+      };
       if (mode === "shadow") {
         return {
           kind: "pass",
           layer: "reviewer",
           reason: `shadow: ${REVIEWER_UNAVAILABLE}; the call ran`,
           matched,
-          model: fields("would ask"),
+          model: failed,
         };
       }
       return {
@@ -328,7 +399,7 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
         reason: REVIEWER_UNAVAILABLE,
         reasonSource: "reviewer-unavailable",
         matched,
-        model: fields(),
+        model: failed,
       };
     }
     costUsd += review.costUsd;
@@ -444,6 +515,7 @@ export function createGuardExtension(
       decision_score: model?.decision.score ?? null,
       decision_model: model?.decision.model ?? null,
       fallback: model?.fallback ?? null,
+      reviewer_cause: model?.reviewerCause ?? null,
       cost_usd: model?.costUsd ?? 0,
       rule_ms: fields.ruleMs ?? null,
       duration_ms: Date.now() - started,
@@ -619,7 +691,12 @@ export function createGuardExtension(
             const result = await runStages(timed, call, api, context);
             if (result.kind === "hold") {
               const matched = result.matched ?? [];
-              const always = await offerFor(call, matched, api, context);
+              // A permit rule never skips the model layers, so allow always would not stop the
+              // next hold of a call the reviewer held: it is offered for a rule's hold only.
+              const always: AlwaysOffer =
+                result.layer === "rule"
+                  ? await offerFor(call, matched, api, context)
+                  : { offered: false, rule: null, note: NOT_OFFERED_REVIEWER };
               const heldAt = options.now();
               const held = await harness().commit(async (tx) => {
                 const made = await holdCall(
@@ -650,7 +727,15 @@ export function createGuardExtension(
                 await addModelUsage(tx, call.conversationId, result.model);
                 return made;
               }, context);
-              heldEvent(person, held);
+              heldEvent(person, held, {
+                layer: result.layer,
+                ruleId: result.ruleId ?? null,
+                taskId: call.taskId,
+                callId: call.callId,
+                ruleMs,
+                durationMs: Date.now() - started,
+                ...(result.model === undefined ? {} : { model: result.model }),
+              });
               return await settleHeld(held, call, callKey, api, started, context);
             }
             return await verdict(

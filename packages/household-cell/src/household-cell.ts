@@ -14,19 +14,13 @@
  * crates/celld/js/harness.js:2875-2879 and 5387-5398; docs/cloudflare-compat.md "Compatibility
  * flags").
  */
-import type { Context } from "@earendil-works/chord";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, defineExtension, Harness } from "@earendil-works/pi-durable";
+import type { Harness } from "@earendil-works/pi-durable";
 import {
   type AlarmReport,
   alarmVerdict,
   type BudgetBoard,
   type BudgetSettings,
   CellAlarm,
-  createHeartbeatRoutine,
-  createReportGate,
-  ensureRoutines,
   errorFields,
   HarnessSlot,
   type HeartbeatEnv,
@@ -37,10 +31,9 @@ import {
   heartbeatState,
   logEvent,
   type NextWake,
-  nextWake,
+  openRoutineHarness,
   type ReportSpendResult,
   type WakeSummary,
-  wakesOf,
 } from "@secbot/cell-harness";
 import {
   type CellDump,
@@ -137,53 +130,28 @@ export class HouseholdCell {
     return opening;
   }
 
-  private async openNow(
-    onReport: (error: unknown) => void,
-    context: Context = BACKGROUND_CONTEXT,
-  ): Promise<Opened> {
+  private async openNow(onReport: (error: unknown) => void): Promise<Opened> {
     const { storage, database } = await openCelldStorageWithDatabase(this.state.storage);
     const log = new ChangeLog(database, this.now);
-    const hooks = { cell: HOUSEHOLD_CELL_NAME, onWakeChange: () => this.rearmSoon() };
-    const heartbeat = createHeartbeatRoutine(this.env, hooks, this.options.fetch);
-    const registry = createRegistry();
-    registry.install(defineExtension({ name: "secbot-routines", tasks: [heartbeat.task] }));
-    // The first storage-gone report is logged and closes this harness through the slot; later
-    // ones are counted into one harness.reports_suppressed line.
-    const reports = createReportGate(HOUSEHOLD_CELL_NAME, onReport);
-    const harness = await Harness.open(
-      storage,
-      { models: createModels(), registry, now: this.now, onReport: reports.report },
-      context,
+    const routine = await openRoutineHarness(
+      {
+        cell: HOUSEHOLD_CELL_NAME,
+        storage,
+        env: this.env,
+        now: this.now,
+        onReport,
+        onWakeChange: () => this.rearmSoon(),
+        ...(this.options.fetch === undefined ? {} : { fetch: this.options.fetch }),
+      },
+      (opened) => this.alarms.rearm(opened),
     );
-    try {
-      await harness.root(context);
-      await ensureRoutines(harness, [{ routine: heartbeat }], this.now(), context);
-      harness.resume();
-      const opened: Opened = {
-        log,
-        board: new BudgetBoardStore(database, this.now),
-        harness,
-        database,
-        wakes: async () => {
-          const summary = wakesOf(await harness.inspect(context));
-          return { summary, next: nextWake(summary, this.now()) };
-        },
-        close: async () => {
-          // First, so the count goes out even when the close below never finishes.
-          reports.flush();
-          await harness.close(context);
-        },
-      };
-      await this.alarms.rearm(opened);
-      return opened;
-    } catch (error) {
-      // An opened harness must not stay running while the next event opens another one.
-      reports.flush();
-      await harness.close(context).catch(() => {});
-      throw error;
-    }
+    return {
+      ...routine,
+      log,
+      board: new BudgetBoardStore(database, this.now),
+      database,
+    };
   }
-
   private rearmSoon(): void {
     const opening = this.slot.current();
     if (opening === undefined) return;

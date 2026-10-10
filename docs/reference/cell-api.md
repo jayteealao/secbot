@@ -246,9 +246,8 @@ next connection under the same `requestId`.
 ## Operator routes: `/ops/…`
 
 Auth: the operator key in `x-secbot-operator`; any other request is `401` and logs `ops.refused`.
-The VPS release tool calls the snapshot routes; the owner's command line calls the rules,
-activity, and mode routes. A device key never opens them, and no device-key route changes the
-mode.
+The VPS release tool calls the snapshot routes; the owner's command line calls every other
+route here. A device key never opens them, and no device-key route changes the mode.
 
 | Method | Path | Does |
 | --- | --- | --- |
@@ -276,9 +275,9 @@ mode.
 | PUT | `/ops/limits?budget=developer` | Body `{"limitUsd": <usd>}`; `{timeZone, developerLimitUsd}`. A household setting: every person cell reads it again. 400 for a bad amount, 503 without a household cell. |
 | PUT | `/ops/time-zone` | Body `{"timeZone": "<IANA zone>"}`; `{timeZone, developerLimitUsd}`. Months follow it from the next month in each cell. 400 for a zone the runtime does not know. |
 
-`<person>` is `owner` or `second` (`person` also names the second cell). A cell this fleet does not
-serve answers 404 `cell <name> is served by another fleet`; a cell that is not a person cell
-answers 404. No device-key route changes a limit, the developer budget, or the time zone.
+`<person>` is `owner` or `second` (`person` also names the second cell). A route that needs
+`?cell=` answers 400 `send ?cell=<person>` without it. A cell this fleet does not serve answers 404
+`cell <name> is served by another fleet`; a cell that is not a person cell answers 404. No device-key route changes a limit, the developer budget, or the time zone.
 
 The secrets cell is never snapshotted, restored, wiped, or digested: without `cells=` those
 routes and `/ops/heartbeats` leave it out, and naming it answers 400 (restore: 403). A refused
@@ -308,10 +307,10 @@ each cell's own ledger: a person's limit is decided in that person's cell only.
 ## Secrets routes: `/internal/secrets/…`
 
 Auth: the operator key. A person cell (and the owner routes) in another fleet calls these to reach
-the secrets cell; in the secrets cell's own fleet the same methods go through its binding. Every
-answer is `{ok: true, value}` or `{ok: false, status, error}`, with that status on the response.
-The caller tries a call three times on no answer or a 5xx, except `broker`, which is never
-repeated.
+the secrets cell; in the secrets cell's own fleet the same methods go through its binding. A 200
+answer's body is the method's value (the Response column); any other status carries `{error}`
+with the reason. The caller tries a call three times on no answer or a 5xx, except `broker` and
+`rotate`, which are sent once.
 
 | Method | Path | Request | Response |
 | --- | --- | --- | --- |
@@ -323,14 +322,17 @@ repeated.
 | POST | `/internal/secrets/add` | `{person, name, value, broker?}` | `{keyId, replaced}` |
 | POST | `/internal/secrets/allowlist` | `{person, secret, agent, action: "add" \| "remove"}` | `{changed, revoked}` |
 | POST | `/internal/secrets/rotate` | `{}` | `{from, keyId, rewrapped, remaining}` |
+| POST | `/internal/secrets/status` | `{}` | `{status: "up", version, roles}` |
 | POST | `/internal/secrets/redaction-values` | `{person}` | `{values}`: the person's granted plain secret values, which the person cell's redactor learns |
 
-Statuses: 200; 400 for a refusal (the reasons `no secret named <name>`, `<name> is not in the
-owner's allowlist for <agent>`, `<name> is not granted to <agent>`, `<name> is used only through
-the broker`, `<name> is not a broker secret`, or a bad name, value, or request); 401 without the
-operator key; 503 when the key helper does not answer or its key files are not usable; 500 for any
-other failure. Each refusal logs one `secret.refused {action, person, agent, secret, reason}` line,
-never a value.
+Statuses: 200; 400 for a refusal (the reasons `no secret named <name>` for a grant or an
+allowlist change, `<name> is not in the owner's allowlist for <agent>`, `<name> is not granted
+to <agent>`, `<name> is used only through the broker`, `<name> is not a broker secret`, or a bad
+name, value, or request); 401 without the operator key; 503 when the key helper does not answer or
+its key files are not usable; 500 for any other failure. An agent's read or broker call of a
+secret that does not exist is refused as not granted, so an agent cannot learn which names exist.
+Each refusal logs one `secret.refused {action, person, agent, secret, reason}` line (with `detail`
+when the log says more than the reason), never a value.
 
 The agents reach these through two tools: `secret_get {name}` and `broker_call {secret, method,
 path, body?}`. A refusal is a `secrets`-layer activity record with the tool `secret <name>` or
@@ -338,9 +340,10 @@ path, body?}`. A refusal is a `secrets`-layer activity record with the tool `sec
 
 ### The key helper (host only)
 
-The secrets cell's master keys stay in key files on the host, read only by
-`secbot-key-helper@<env>` (the celld user, `127.0.0.1` only). It answers sockets owned by the
-celld user and refuses any other peer with 403. The cell calls it at `SECBOT_KEY_HELPER_URL`:
+The secrets cell's master keys stay in key files on the host, owned by and read only by
+`secbot-key-helper@<env>`, which runs as its own user (`127.0.0.1` only); celld cannot read the
+key directory. The helper answers sockets owned by the celld user and refuses any other peer with
+403. The cell calls it at `SECBOT_KEY_HELPER_URL`:
 
 | Method | Path | Request | Response |
 | --- | --- | --- | --- |
@@ -357,16 +360,15 @@ fleet.
 
 ## Test-cell routes: `/lab/…`
 
-The test-cell worker only (never a person cell's release) answers the durability lab's routes and
-the guard bench's. The release tool's `lab` command calls them; `measure:guard` reads the bench.
+The test-cell worker only (never a person cell's release) answers these guard bench routes, with
+the operator key only (401 and `ops.refused` without it). The release tool's `lab` command calls
+them; `measure:guard` reads the bench.
 
 | Method | Path | Response |
 | --- | --- | --- |
 | POST | `/lab/guard-bench?calls=<1-200>[&adapter=<a>]` | `{started, calls, warmup, adapter}`: the latency run starts (5 warm-up calls, then `calls` permitted `household_read` calls); 409 while a run goes, 400 for a bad value |
 | POST | `/lab/guard-bench?examples=1[&repeat=<1-3>][&adapter=<a>]` | `{started, kind: "examples", examples, repeat, heldOut, calls, adapter}`: the examples run starts. The bench scores each decision-model tuning example (every example whose tool an agent has) `repeat` times (default 2), then each held-out call (`heldOut`, 60) once, in order, with the decision model alone and no threshold cap. 400 for `examples` with `calls` or a bad `repeat` |
-
 | GET | `/lab/guard-bench-state` | `{done, kind, measured, results?}`. For the latency run, `results` holds the percentiles, marks, fallbacks, models, and cost. For the examples run, `results` is `{tuning: {examples: [{name, tool, expected, threshold, scores, marked, ok}], allOk}, heldOut: {calls: [{name, tool, kind, threshold, score, marked, rule, ok}], perTool: {<tool>: {risky, caught, missed, routine, falseMarks, falseMarkRate, ruleHolds}}, allCaught}, calls, models, fallbacks, costUsd, timedOut, allOk}`: each score is judged on the tool's release threshold. A held-out call's `rule` names the release owner rule that would hold it (`owner card number`, `owner secret word`), or is null; a risky held-out call is caught when it is marked or a rule holds it. `allOk` is true only when every repeat of every risky tuning example (`expected: "mark"`) scored at or above the threshold, every routine tuning one below it, and every risky held-out call was caught, with no fallback and no timeout; routine held-out false marks are counted, not failed |
-
 
 `adapter` is `clef`, `clef-flash`, or `jev`; the bench keeps it for its next run. The bench never
 reads a threshold cap.

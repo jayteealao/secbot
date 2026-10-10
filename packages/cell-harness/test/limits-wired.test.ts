@@ -112,7 +112,7 @@ function billed(
   return tally;
 }
 
-describe("the month's spend from the ledger (AC-25)", () => {
+describe("the month's spend from the ledger", () => {
   it("equals what was billed per layer and per role: model responses (a failed one included), decision answers, and reviewer answers", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -199,7 +199,7 @@ describe("the month's spend from the ledger (AC-25)", () => {
   }, 30_000);
 });
 
-describe("above the limit only chat runs (AC-30, AC-31)", () => {
+describe("above the limit only chat runs", () => {
   it("holds a hand-off's brief, answers chat, keeps the wait across a reopen, and delivers once after a raise", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     test = await openTestCell({ gateway: createFauxGateway(handoffResponder) });
@@ -372,7 +372,7 @@ describe("above the limit only chat runs (AC-30, AC-31)", () => {
   }, 30_000);
 });
 
-describe("a 402 or 403 to a guard call (AC-32)", () => {
+describe("a 402 or 403 to a guard call", () => {
   it("enters the credit pause for the decision model and the reviewer, and the cell keeps answering", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});

@@ -22,7 +22,6 @@ import {
 } from "@secbot/household-cell";
 import {
   SECRETS_CELL_NAME,
-  type SecretsAnswer,
   SecretsCell as SecretsCellBase,
   type SecretsCellEnv,
   type SecretsCellState,
@@ -39,7 +38,13 @@ import {
   PersonCell,
   type PersonCellEnv,
 } from "./person-cell.ts";
-import { type SecretsClientEnv, secretsClientOf, secretsOf } from "./secrets-client.ts";
+import {
+  isSecretsMethod,
+  SECRETS_CALLS,
+  type SecretsClientEnv,
+  secretsClientOf,
+  secretsOf,
+} from "./secrets-client.ts";
 
 export { PersonCell };
 
@@ -287,20 +292,6 @@ async function internalHousehold(request: Request, env: WorkerEnv): Promise<Resp
   return Response.json({ error: "not found" }, { status: 404 });
 }
 
-/** The secrets cell's methods a person cell calls over the private network. */
-const SECRETS_METHODS = new Set([
-  "get",
-  "broker",
-  "list",
-  "grant",
-  "revoke",
-  "add",
-  "allowlist",
-  "rotate",
-  "redaction-values",
-  "status",
-]);
-
 /**
  * POST /internal/secrets/{get,broker,list,grant,revoke,add,allowlist,rotate,redaction-values,status}:
  * the secrets cell's RPC for a cell or an owner route in another fleet, over the private network
@@ -317,32 +308,23 @@ async function internalSecrets(request: Request, env: WorkerEnv): Promise<Respon
     return Response.json({ error: anotherFleet(SECRETS) }, { status: 404 });
   }
   const method = url.pathname.slice("/internal/secrets/".length);
-  if (request.method !== "POST" || !SECRETS_METHODS.has(method)) {
+  if (request.method !== "POST" || (method !== "status" && !isSecretsMethod(method))) {
     return Response.json({ error: "not found" }, { status: 404 });
   }
   const secrets = secretsOf(env);
   if (secrets === undefined) return Response.json({ error: "no secrets binding" }, { status: 503 });
   // The body goes to the cell as it came; each method checks its own fields.
   const body = (await request.json().catch(() => ({}))) as never;
-  const calls: Record<string, () => Promise<SecretsAnswer<unknown>>> = {
-    get: () => secrets.get(body),
-    broker: () => secrets.broker(body),
-    list: () => secrets.list(body),
-    grant: () => secrets.grant(body),
-    revoke: () => secrets.revoke(body),
-    add: () => secrets.add(body),
-    allowlist: () => secrets.allowlist(body),
-    rotate: () => secrets.rotate({}),
-    "redaction-values": () => secrets.redactionValues(body),
-  };
   try {
     if (method === "status") return Response.json(await secrets.status());
-    const answer = await (calls[method] as () => Promise<SecretsAnswer<unknown>>)();
+    if (!isSecretsMethod(method)) return Response.json({ error: "not found" }, { status: 404 });
+    const answer = await SECRETS_CALLS[method](secrets, body);
     if (answer.ok) return Response.json(answer.value);
+    // The secrets cell already logged the cause; the route notes the answer at warn.
     logEvent(
-      answer.status < 500 ? "secrets.refused" : "secrets.error",
-      { method, status: answer.status },
-      answer.status < 500 ? "warn" : "error",
+      answer.status < 500 ? "secrets.refused" : "secrets.answered_unavailable",
+      { method, status: answer.status, reason: answer.error },
+      "warn",
     );
     return Response.json({ error: answer.error }, { status: answer.status });
   } catch (error) {

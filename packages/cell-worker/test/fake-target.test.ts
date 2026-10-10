@@ -8,6 +8,7 @@ import conformanceWorker, {
   type ConformanceEnv,
   type DurableObjectNamespaceLike,
 } from "../src/conformance-entry.ts";
+import { OPERATOR_HEADER } from "../src/internal-rpc.ts";
 
 const TOKEN = "hb-test-token-5c1e9a7b3d2f4e60"; // gitleaks:allow (fake test token)
 const CELL = "http://cells.example.test";
@@ -16,7 +17,9 @@ const noCell: DurableObjectNamespaceLike = {
   idFromName: (name) => name,
   get: () => ({ fetch: async () => Response.json({ error: "unused" }, { status: 500 }) }),
 };
-const env: ConformanceEnv = { CONFORMANCE: noCell };
+const OPERATOR_KEY = "o".repeat(32); // gitleaks:allow (fake test key)
+const env: ConformanceEnv = { CONFORMANCE: noCell, SECBOT_OPERATOR_KEY: OPERATOR_KEY };
+const operator = { [OPERATOR_HEADER]: OPERATOR_KEY };
 
 const worker = (input: string, init?: RequestInit) =>
   conformanceWorker.fetch(new Request(input, init), env);
@@ -88,8 +91,21 @@ describe("the fake health target", () => {
 });
 
 describe("the guard-bench routing", () => {
+  it("refuses the bench routes without the operator key, since they start paid model calls", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect((await worker(`${CELL}/lab/guard-bench?calls=1`, { method: "POST" })).status).toBe(401);
+    expect((await worker(`${CELL}/lab/guard-bench-state`)).status).toBe(401);
+    const device = { [OPERATOR_HEADER]: "d".repeat(32) };
+    expect(
+      (await worker(`${CELL}/lab/guard-bench?calls=1`, { method: "POST", headers: device })).status,
+    ).toBe(401);
+  });
+
   it("answers 503 without the GUARD_BENCH binding, and sends the routes to it with one", async () => {
-    expect((await worker(`${CELL}/lab/guard-bench?calls=1`, { method: "POST" })).status).toBe(503);
+    expect(
+      (await worker(`${CELL}/lab/guard-bench?calls=1`, { method: "POST", headers: operator }))
+        .status,
+    ).toBe(503);
     const seen: string[] = [];
     const bench = {
       idFromName: (name: string) => name,
@@ -101,9 +117,12 @@ describe("the guard-bench routing", () => {
       }),
     };
     const withBench: ConformanceEnv = { ...env, GUARD_BENCH: bench };
-    await conformanceWorker.fetch(new Request(`${CELL}/lab/guard-bench-state`), withBench);
     await conformanceWorker.fetch(
-      new Request(`${CELL}/lab/guard-bench?calls=3`, { method: "POST" }),
+      new Request(`${CELL}/lab/guard-bench-state`, { headers: operator }),
+      withBench,
+    );
+    await conformanceWorker.fetch(
+      new Request(`${CELL}/lab/guard-bench?calls=3`, { method: "POST", headers: operator }),
       withBench,
     );
     expect(seen).toEqual(["bench GET /lab/guard-bench-state", "bench POST /lab/guard-bench"]);
