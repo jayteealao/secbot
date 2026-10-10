@@ -123,6 +123,9 @@ export function createHeartbeatRoutine(
     {
       name: HEARTBEAT_ROUTINE,
       every: HEARTBEAT_EVERY_MS,
+      // The liveness ping makes no model call; it runs above a limit, so the owner's monitor never
+      // reads a paused heartbeat as an outage.
+      spends: false,
       run: async (fire) => {
         const { outcome, status } = await pingHeartbeat(env, fire.cell, HEARTBEAT_ROUTINE, fetcher);
         const at = fire.runtime.now();

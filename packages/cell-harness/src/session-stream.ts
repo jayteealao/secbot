@@ -4,11 +4,16 @@
  * lead's root conversation (`watchEvents`, one batch per commit; a late joiner starts from the
  * current view and nothing is replayed: pi-durable README "Watching a Conversation"). This module
  * only reports what was committed; it never decides where a message goes.
+ *
+ * After each answer the stream sends a `usage` frame (month-to-date spend against the limit, and
+ * the guard mode), and a `notice` frame when a limit line is reached.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type Harness, ROOT_CONVERSATION_ID, watchEvents } from "@earendil-works/pi-durable";
+import { type HeldCallView, readHeld, viewOf } from "./approvals.ts";
 import { leadMessageOf } from "./delivery.ts";
-import { ModelHealthDoc } from "./docs.ts";
+import { ApprovalsDoc, type LimitNotice, LimitNoticesDoc, ModelHealthDoc } from "./docs.ts";
+import type { UsageLine, WaitingItem } from "./limits.ts";
 
 export type Frame =
   | { readonly type: "connected"; readonly lead: string }
@@ -35,7 +40,23 @@ export type Frame =
     }
   /** An input line the cell refused; the client stops resending it. */
   | { readonly type: "rejected"; readonly requestId: string; readonly message: string }
-  | { readonly type: "error"; readonly message: string; readonly requestId?: string };
+  | { readonly type: "error"; readonly message: string; readonly requestId?: string }
+  /**
+   * A call held for the person: sent once when it is held, and for every waiting call when a
+   * session opens (before missed messages). `count` is how many calls wait in all.
+   */
+  | { readonly type: "held"; readonly call: HeldCallView; readonly count: number }
+  /** Month-to-date spend against the limit and the mode: on connect and after each answer. */
+  | { readonly type: "usage"; readonly usage: UsageLine }
+  /**
+   * A limit line reached (80% or 100% of the person's limit or the developer budget): sent once
+   * when it is recorded, and for each notice the device has not seen when a session opens.
+   */
+  | {
+      readonly type: "notice";
+      readonly notice: LimitNotice;
+      readonly waiting: readonly WaitingItem[];
+    };
 
 /** Every frame type, for checks that the documented protocol matches this union. */
 export const FRAME_TYPES = [
@@ -48,10 +69,19 @@ export const FRAME_TYPES = [
   "missed",
   "rejected",
   "error",
+  "held",
+  "usage",
+  "notice",
 ] as const satisfies readonly Frame["type"][];
 
 export interface SessionStream {
   stop(): Promise<void>;
+}
+
+/** The cell's usage line and waiting list, for the `usage` and `notice` frames. */
+export interface UsageSource {
+  usage(): Promise<UsageLine>;
+  waiting(): Promise<readonly WaitingItem[]>;
 }
 
 /**
@@ -62,6 +92,8 @@ export async function openSessionStream(
   harness: Harness,
   send: (frame: Frame) => void,
   delivered: (entryId: number) => void | Promise<void> = () => {},
+  now: () => number = Date.now,
+  usage?: UsageSource,
 ): Promise<SessionStream> {
   const context = BACKGROUND_CONTEXT;
   const events = await watchEvents(harness, ROOT_CONVERSATION_ID, context);
@@ -123,6 +155,8 @@ export async function openSessionStream(
         if (message === undefined) continue;
         if (message.kind === "answer") {
           send({ type: "answer", entryId: message.entryId, text: message.text });
+          // The answer's own cost is in the same commit as its entry, so the line includes it.
+          if (usage !== undefined) send({ type: "usage", usage: await usage.usage() });
         } else {
           send({
             type: "followup",
@@ -145,10 +179,40 @@ export async function openSessionStream(
       send({ type: "waiting", on: next });
     }
   });
+  // Held calls: each newly held number is sent once per stream. Calls already waiting when the
+  // stream starts are sent by each session as it opens.
+  const approvals = await harness.watchDoc(ApprovalsDoc, context);
+  const announced = new Set<number>(approvals?.value?.pending ?? []);
+  const announce = async (pending: readonly number[]) => {
+    for (const number of pending) {
+      if (announced.has(number)) continue;
+      announced.add(number);
+      const call = await readHeld(harness, number, context);
+      if (call?.status === "pending") {
+        send({ type: "held", call: viewOf(call, now()), count: pending.length });
+      }
+    }
+  };
+  // The cell creates the document when it opens (open-harness.ts), so the watch exists.
+  approvals?.start(async (value) => {
+    await announce(value?.pending ?? []);
+  });
+  // Limit notices: each new one is sent once per stream; older ones go out when a session opens.
+  const notices = await harness.watchDoc(LimitNoticesDoc, context);
+  let noticed = (notices?.value?.next ?? 1) - 1;
+  notices?.start(async (value) => {
+    for (const notice of value?.notices ?? []) {
+      if (notice.seq <= noticed) continue;
+      noticed = notice.seq;
+      send({ type: "notice", notice: { ...notice }, waiting: (await usage?.waiting()) ?? [] });
+    }
+  });
   return {
     async stop() {
       await events.stop();
       await health?.stop();
+      await approvals?.stop();
+      await notices?.stop();
     },
   };
 }

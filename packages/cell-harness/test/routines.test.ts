@@ -1,9 +1,18 @@
 // Routines and the durable wake-time store. The next alarm is the
 // earliest wake time stored in the live tasks' checkpoints. A routine that is overdue when
-// the cell starts runs once, and its next wake counts from then.
+// the cell starts runs once, and its next wake counts from then. A routine whose database is gone
+// backs off instead of running again at once.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { HarnessInspection } from "@earendil-works/pi-durable";
+import { createModels } from "@earendil-works/pi-ai/models";
+import {
+  createRegistry,
+  defineExtension,
+  Harness,
+  type HarnessInspection,
+} from "@earendil-works/pi-durable";
+import { needsReopen, openCelldStorageWithDatabase } from "@secbot/cell-storage";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
 import { alarmVerdict } from "../src/alarm.ts";
 import { HEARTBEAT_EVERY_MS } from "../src/heartbeat.ts";
 import { scheduleReminder } from "../src/reminder.ts";
@@ -224,4 +233,60 @@ describe("routines", () => {
     );
     expect(again).toEqual([]);
   });
+});
+
+describe("a routine on a gone database", () => {
+  it("reports once and backs off instead of running again at once; a close ends the back-off", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const fake = new FakeCelldStorage();
+    const { storage } = await openCelldStorageWithDatabase(fake);
+    let runs = 0;
+    const reports: unknown[] = [];
+    const tick = defineRoutine(
+      {
+        name: "tick",
+        every: 60_000,
+        spends: false,
+        run: async () => {
+          runs++;
+          // celld gives the cell back while the routine runs: its next commit fails. A guard for
+          // the failing case: without the back-off the routine runs again at once and starves the
+          // timers, so the database comes back after 200 runs to end the loop.
+          fake.gaveBack = runs >= 200 ? undefined : "TestCell:routine";
+          return { outcome: "ok" };
+        },
+      },
+      { cell: "test", goneBackoffMs: 10_000 },
+    );
+    const registry = createRegistry();
+    registry.install(defineExtension({ name: "test-routines", tasks: [tick.task] }));
+    const harness = await Harness.open(
+      storage,
+      { models: createModels(), registry, onReport: (error) => reports.push(error) },
+      BACKGROUND_CONTEXT,
+    );
+    try {
+      await harness.root(BACKGROUND_CONTEXT);
+      await ensureRoutines(
+        harness,
+        [{ routine: tick, firstWakeMs: 0 }],
+        Date.now(),
+        BACKGROUND_CONTEXT,
+      );
+      harness.resume();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      // One run, one storage-gone report, then the back-off: no second run in 500 ms.
+      expect(runs).toBe(1);
+      expect(reports.filter((error) => needsReopen(error))).toHaveLength(1);
+    } finally {
+      // A close during the back-off ends it: the close does not wait out the 10 s.
+      fake.gaveBack = undefined;
+      const started = Date.now();
+      await harness.close(BACKGROUND_CONTEXT);
+      expect(Date.now() - started).toBeLessThan(1_000);
+    }
+    expect(runs).toBe(1);
+  }, 30_000);
 });

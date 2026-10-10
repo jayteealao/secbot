@@ -33,6 +33,8 @@ Do these in order. Every value stays in your shell or in a GitHub secret; none g
    bucket's (`SECBOT_PROD_*`). Each run must print `smoke:r2: PASS`.
 4. Set up the test cell: `mise run host:setup`, then, once the smoke test passed,
    `mise run host:setup -- -e celld_replication_confirmed=true`, which starts `celld@test`.
+   Host setup also starts the secrets cell's key helper and creates its first master key once; it
+   stops with a message when `/usr/bin/python3` 3.8 or later is missing on the VPS.
 5. Set up production (next section).
 6. Run `mise run probe:ports`: every celld port must refuse a connection from outside the
    private network.

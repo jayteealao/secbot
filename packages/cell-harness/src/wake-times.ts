@@ -8,6 +8,10 @@
  *   (dist/harness/generation.js:124-141, 320-330, 370-380, task "pi.generation");
  * - a compaction retry's `until` (dist/harness/compaction.js:137-159, task "pi.compaction").
  * The cell sets its one celld alarm from these records only; nothing here keeps a timer list.
+ *
+ * Work waiting above a spending limit (budget-gate.ts) is listed in `secbot.budget-waits`; such a
+ * task is timed at the month reset (kind `budget`) in place of its own past wake time, so the cell
+ * does not wake every minute for weeks. A raised limit wakes it through the owner's route.
  */
 import type { HarnessInspection } from "@earendil-works/pi-durable";
 
@@ -17,7 +21,13 @@ export const ROUTINE_KIND_PREFIX = "secbot.routine:";
 /** How far ahead the cell wakes itself while live work without a timer runs (a model call, a job). */
 export const LIVENESS_WAKE_MS = 60_000;
 
-export type WakeKind = "routine" | "model-retry" | "model-poll" | "compaction-retry";
+export type WakeKind = "routine" | "model-retry" | "model-poll" | "compaction-retry" | "budget";
+
+/** Tasks waiting above a limit, and when the month resets. */
+export interface BudgetWaits {
+  readonly taskIds: ReadonlySet<string>;
+  readonly resetsAt: number;
+}
 
 export interface Wake {
   readonly taskId: string;
@@ -45,7 +55,10 @@ const numberAt = (checkpoint: Record<string, unknown>, field: string): number | 
 };
 
 /** Reads every wake time from the live tasks' durable checkpoints. Pure. */
-export function wakesOf(inspection: Pick<HarnessInspection, "tasks">): WakeSummary {
+export function wakesOf(
+  inspection: Pick<HarnessInspection, "tasks">,
+  waits?: BudgetWaits,
+): WakeSummary {
   const wakes: Wake[] = [];
   let liveUntimed = 0;
   for (const { record, state } of inspection.tasks) {
@@ -57,7 +70,9 @@ export function wakesOf(inspection: Pick<HarnessInspection, "tasks">): WakeSumma
         : (record.state.checkpoint as Record<string, unknown> | null);
     const taskId = String(record.id);
     let wake: Wake | undefined;
-    if (checkpoint !== undefined && checkpoint !== null) {
+    if (waits?.taskIds.has(taskId) === true && checkpoint !== undefined) {
+      wake = { taskId, kind: "budget", source: "budget", at: waits.resetsAt };
+    } else if (checkpoint !== undefined && checkpoint !== null) {
       if (record.kind.startsWith(ROUTINE_KIND_PREFIX)) {
         const at = numberAt(checkpoint, "wakeAt");
         if (at !== undefined) {

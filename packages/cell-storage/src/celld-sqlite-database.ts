@@ -21,7 +21,12 @@
  * - `sql.exec` runs several statements in one call (crates/celld/storage.rs:1915-1971) and
  *   serializes bindings with `JSON.stringify` (harness.js:1401-1435), so a `bigint` binding is
  *   converted here.
+ * - A block started by work whose cell event already ended is refused before its callback runs,
+ *   with "the cell event ended before it could acquire an input gate" (harness.js:2614-2623 and
+ *   the gate acquire in js.rs). Nothing was written, so the driver reports it as pi-durable's
+ *   `StorageRejected`; any other error would make pi-durable poison its session for good.
  */
+import { StorageRejected } from "@earendil-works/pi-durable";
 import type {
   SqliteDatabase,
   SqliteExecutor,
@@ -37,6 +42,12 @@ export const ADAPTER_NAME = "CelldSqliteDatabase";
 export const CELLD_TRANSACTION_LIMIT_MS = 30_000;
 
 const RESET_MESSAGES = ["waited for too long", "Durable Object was reset"] as const;
+
+/** celld's refusal of a block whose cell event already ended (harness.js:2621, js.rs:1300). */
+export const RETIRED_INPUT_GATE = "the cell event ended before it could acquire an input gate";
+
+const isRetiredGate = (error: unknown): boolean =>
+  error instanceof Error && error.message.includes(RETIRED_INPUT_GATE);
 
 /** The transaction ran past celld's 30-second limit; celld reset the object and rolled it back. */
 export class CellStorageTransactionTimeout extends Error {
@@ -168,8 +179,10 @@ export class CelldSqliteDatabase implements SqliteDatabase {
       this.assertOpen();
       const startedAt = this.now();
       const scope: TransactionScope = { active: true };
+      let started = false;
       try {
         return await this.storage.transaction(async (view) => {
+          started = true;
           const result = await callback(new CelldSqliteTransaction(view.sql, scope));
           // The handle stops before celld commits, as the SqliteDatabase contract requires.
           scope.active = false;
@@ -177,6 +190,15 @@ export class CelldSqliteDatabase implements SqliteDatabase {
         });
       } catch (error) {
         scope.active = false;
+        if (!started && isRetiredGate(error)) {
+          // celld refused the gate before the callback ran: no statement ran, nothing committed.
+          throw new StorageRejected(
+            "celld refused the cell storage transaction before it started",
+            {
+              cause: error,
+            },
+          );
+        }
         if (isResetError(error)) throw this.timedOut(startedAt, error);
         const rollbackFailure = this.probe();
         if (rollbackFailure !== undefined) {

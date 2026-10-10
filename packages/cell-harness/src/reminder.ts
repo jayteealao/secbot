@@ -18,6 +18,7 @@ import {
   type TaskId,
   type Tx,
 } from "@earendil-works/pi-durable";
+import { shortText } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
 import { createRoutineTask, defineRoutine, type Routine, type RoutineHooks } from "./routines.ts";
 
@@ -54,6 +55,8 @@ export function createReminderRoutine(hooks: RoutineHooks): Routine<ReminderPayl
   return defineRoutine<ReminderPayload>(
     {
       name: REMINDER_ROUTINE,
+      // Above the person's limit a reminder waits, like every routine that reaches the lead.
+      describe: (payload) => `reminder ${shortText(payload.text)}`,
       run: async ({ runtime, taskId, payload, context }) => {
         const lead = await runtime.conversation(ROOT_CONVERSATION_ID, context);
         if (lead === undefined) throw new Error("the lead's conversation is missing");

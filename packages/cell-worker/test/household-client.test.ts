@@ -5,12 +5,9 @@
 import { FakeCelldStorage, loggedEvents } from "@secbot/cell-harness/testing";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  householdClientOf,
-  httpHouseholdClient,
-  OPERATOR_HEADER,
-} from "../src/household-client.ts";
+import { householdClientOf, httpHouseholdClient } from "../src/household-client.ts";
 import { route, type WorkerEnv } from "../src/index.ts";
+import { OPERATOR_HEADER } from "../src/internal-rpc.ts";
 
 const KEY = "k".repeat(32);
 const URL_BASE = "http://household.internal:8789";
@@ -91,6 +88,7 @@ describe("household client over HTTP", () => {
         method: "apply",
         outcome: "retried",
         attempts: 2,
+        duration_ms: expect.any(Number),
       },
       {
         event: "household.call",
@@ -99,6 +97,7 @@ describe("household client over HTTP", () => {
         method: "read",
         outcome: "ok",
         attempts: 1,
+        duration_ms: expect.any(Number),
       },
     ]);
     expect(JSON.stringify(calls)).not.toContain("tomatoes");

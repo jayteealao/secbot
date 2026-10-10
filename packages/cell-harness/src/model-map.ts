@@ -11,13 +11,19 @@ import { type CellParts, logEvent, RefusedChange } from "./cell-parts.ts";
 import { RoleModelsDoc, RosterDoc } from "./docs.ts";
 import {
   DEFAULT_LEAD_MODEL,
+  DEFAULT_REVIEWER_MODEL,
   DEFAULT_SPECIALIST_MODEL,
   GATEWAY_PROVIDER,
   LEAD_ROLE,
+  REVIEWER_ROLE,
 } from "./release-defaults.ts";
 
 export const defaultModelFor = (role: string): string =>
-  role === LEAD_ROLE ? DEFAULT_LEAD_MODEL : DEFAULT_SPECIALIST_MODEL;
+  role === LEAD_ROLE
+    ? DEFAULT_LEAD_MODEL
+    : role === REVIEWER_ROLE
+      ? DEFAULT_REVIEWER_MODEL
+      : DEFAULT_SPECIALIST_MODEL;
 
 export const modelRef = (modelId: string) => ({ provider: GATEWAY_PROVIDER, modelId }) as const;
 
@@ -36,11 +42,14 @@ export interface RoleModel {
   readonly source: "release default" | "changed";
 }
 
-/** Every role (the lead, then each specialist) with its model and where the model comes from. */
+/**
+ * Every role (the lead, then each specialist, then the guard's reviewer) with its model and where
+ * the model comes from. The reviewer has no conversation: the guard reads its model per review.
+ */
 export async function listRoleModels(parts: CellParts, context: Context): Promise<RoleModel[]> {
   const overrides = (await parts.harness.snapshot(RoleModelsDoc, context))?.overrides ?? {};
   const roster = (await parts.harness.snapshot(RosterDoc, context))?.specialists ?? {};
-  return [LEAD_ROLE, ...Object.keys(roster)].map((role) => {
+  return [LEAD_ROLE, ...Object.keys(roster), REVIEWER_ROLE].map((role) => {
     const changed = Object.hasOwn(overrides, role) ? overrides[role] : undefined;
     return changed === undefined
       ? { role, model: defaultModelFor(role), source: "release default" }
@@ -70,6 +79,11 @@ export async function setRoleModel(
     throw error;
   }
   await parts.harness.commit(async (tx) => {
+    if (role === REVIEWER_ROLE) {
+      // No conversation to configure: the next review reads the map.
+      (await tx.doc(RoleModelsDoc)).overrides[role] = modelId;
+      return;
+    }
     const roster = await tx.doc(RosterDoc);
     const conversationId =
       role === LEAD_ROLE ? ROOT_CONVERSATION_ID : roster.specialists[role]?.conversationId;

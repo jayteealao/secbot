@@ -83,10 +83,31 @@ importers:
       '@secbot/household-cell':
         specifier: workspace:*
         version: link:../household-cell
+      '@secbot/secrets-cell':
+        specifier: workspace:*
+        version: link:../secrets-cell
 
   packages/cli: {}
 
   packages/household-cell:
+    dependencies:
+      '@earendil-works/chord':
+        specifier: 1.0.3
+        version: 1.0.3
+      '@earendil-works/pi-ai':
+        specifier: 1.0.3
+        version: 1.0.3(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
+      '@earendil-works/pi-durable':
+        specifier: github:jayteealao/pi#v1.0.3-secbot.1&path:/packages/durable
+        version: git+https://github.com/jayteealao/pi.git#df54c4c1e9489d12e22832a9154e2c64a3ab7ced&path:/packages/durable(@aws-sdk/credential-provider-node@3.972.84)(@smithy/signature-v4@5.7.4)(ws@8.22.0)
+      '@secbot/cell-harness':
+        specifier: workspace:*
+        version: link:../cell-harness
+      '@secbot/cell-storage':
+        specifier: workspace:*
+        version: link:../cell-storage
+
+  packages/secrets-cell:
     dependencies:
       '@earendil-works/chord':
         specifier: 1.0.3

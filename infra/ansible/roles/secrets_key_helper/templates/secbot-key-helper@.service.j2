@@ -1,0 +1,44 @@
+# Managed by Ansible (infra/ansible/roles/secrets_key_helper). One instance per environment:
+# secbot-key-helper@test-cell, secbot-key-helper@production.
+[Unit]
+Description=secbot secrets key helper (%i)
+After=network-online.target
+Wants=network-online.target
+Before=celld@test.service celld@prod-shared.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The helper's own user alone can read the keys; it answers only the celld user's sockets, and
+# the celld units cannot see the key directory (InaccessiblePaths in celld@.service).
+User=secbot-keys
+Group=secbot-keys
+UMask=0077
+EnvironmentFile=/etc/secbot/secbot-key-helper-%i.env
+# Loopback only: the helper binds 127.0.0.1 and never another address.
+ExecStart=/usr/local/bin/secbot-key-helper --key-dir /etc/secbot/secrets-keys/%i --port ${SECBOT_KEY_HELPER_PORT} --peer-user celld
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+ProtectSystem=strict
+# A rotation writes the next key file and `current` in this environment's key directory only.
+ReadWritePaths=/etc/secbot/secrets-keys/%i
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectHostname=true
+ProtectClock=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+MemoryMax=128M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

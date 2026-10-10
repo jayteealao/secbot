@@ -2,8 +2,14 @@
 // (the local half), a response lost after apply() ran is retried with the same operation id and
 // applies once (fault injection), and the cell keeps its alarm at its heartbeat routine. A snapshot
 // restored over later changes brings the list back and keeps the operation ids, so a replayed
-// change applies once.
-import type { HouseholdApplyResult, HouseholdChange, HouseholdClient } from "@secbot/cell-harness";
+// change applies once. When celld closes the database under the running heartbeat, the cell logs
+// one report and one reopen, its routine stops, and the next request opens a new harness.
+import {
+  type HouseholdApplyResult,
+  type HouseholdChange,
+  type HouseholdClient,
+  onLogEvent,
+} from "@secbot/cell-harness";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
 import { HouseholdCell } from "../src/household-cell.ts";
@@ -205,4 +211,104 @@ describe("HouseholdCell", () => {
     expect(await storage.getAlarm()).toBeNull();
     expect((await household.digest()).rows).toBe(0);
   });
+});
+
+describe("HouseholdCell on a gone database", () => {
+  /**
+   * A household cell whose heartbeat is overdue when it opens, with its first ping held until the
+   * test gives the database away: the routine's commit then fails with celld's "no db" error.
+   */
+  async function goneUnderHeartbeat() {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const storage = new FakeCelldStorage();
+    let clock = Date.now();
+    let release: () => void = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let held = false;
+    const make = () =>
+      new HouseholdCell(
+        { storage },
+        { SECBOT_HEARTBEAT_URLS: "household:https://heartbeat.example.test/household" },
+        {
+          now: () => clock,
+          pollMs: 5,
+          fetch: async () => {
+            if (held) await released;
+            return new Response("ok");
+          },
+        },
+      );
+    const first = make();
+    const add = (opId: string, text: string): HouseholdChange => ({
+      opId,
+      document: "list",
+      fromCell: "owner",
+      kind: "add",
+      text,
+    });
+    await first.apply(add("owner:1:a", "milk"));
+    const dump = await first.snapshot(3);
+    await first.apply(add("owner:2:b", "bread"));
+    const due = await storage.getAlarm();
+    await first.close();
+    if (due === null) throw new Error("no alarm after open");
+    clock = due + 1_000;
+    held = true;
+    const household = make();
+    cells.push(household);
+    const events: string[] = [];
+    const count = (name: string) => events.filter((event) => event === name).length;
+    const stop = onLogEvent((event) => {
+      events.push(event);
+      // A guard for the failing case: without the fix the routine pings and reports without end
+      // and starves the timers, so the database comes back after 200 pings to end the loop.
+      if (count("heartbeat.ping") === 200) storage.gaveBack = undefined;
+    });
+    expect(await household.status()).toMatchObject({ status: "up" });
+    storage.gaveBack = "HouseholdCell:test";
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+    return { storage, household, dump, count, stop };
+  }
+
+  it("logs one report and one reopen, stops its heartbeat loop, and answers from a new harness", async () => {
+    const { storage, household, count, stop } = await goneUnderHeartbeat();
+    try {
+      expect(count("harness.report")).toBeLessThanOrEqual(1);
+      expect(count("cell.reopen")).toBe(1);
+      expect(count("heartbeat.ping")).toBeLessThanOrEqual(2);
+      expect(count("harness.reports_suppressed")).toBeLessThanOrEqual(1);
+      const pings = count("heartbeat.ping");
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(count("heartbeat.ping")).toBe(pings);
+
+      // celld takes the cell in again: the next request opens a new harness and answers.
+      storage.gaveBack = undefined;
+      expect(await household.budget()).toBeDefined();
+      expect(await household.heartbeat()).toBeDefined();
+      expect(count("cell.reopen")).toBe(1);
+    } finally {
+      stop();
+    }
+  }, 60_000);
+
+  it("restores a snapshot after a reopen and answers from the restored database", async () => {
+    const { storage, household, dump, count, stop } = await goneUnderHeartbeat();
+    try {
+      expect(count("cell.reopen")).toBe(1);
+      storage.gaveBack = undefined;
+      const restored = await household.restore(JSON.parse(JSON.stringify(dump)));
+      expect(restored.digest).toBe(dump.digest);
+      expect((await household.read("list")).items.map((item) => item.text)).toEqual(["milk"]);
+      expect(await storage.getAlarm()).not.toBeNull();
+      expect(count("cell.restored")).toBe(1);
+      expect(count("cell.reopen")).toBe(1);
+    } finally {
+      stop();
+    }
+  }, 60_000);
 });

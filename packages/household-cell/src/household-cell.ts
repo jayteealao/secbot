@@ -14,17 +14,15 @@
  * crates/celld/js/harness.js:2875-2879 and 5387-5398; docs/cloudflare-compat.md "Compatibility
  * flags").
  */
-import type { Context } from "@earendil-works/chord";
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { createModels } from "@earendil-works/pi-ai/models";
-import { createRegistry, defineExtension, Harness } from "@earendil-works/pi-durable";
+import type { Harness } from "@earendil-works/pi-durable";
 import {
   type AlarmReport,
   alarmVerdict,
+  type BudgetBoard,
+  type BudgetSettings,
   CellAlarm,
-  createHeartbeatRoutine,
-  ensureRoutines,
   errorFields,
+  HarnessSlot,
   type HeartbeatEnv,
   type HeartbeatState,
   type HouseholdApplyResult,
@@ -33,10 +31,9 @@ import {
   heartbeatState,
   logEvent,
   type NextWake,
-  nextWake,
-  reportFields,
+  openRoutineHarness,
+  type ReportSpendResult,
   type WakeSummary,
-  wakesOf,
 } from "@secbot/cell-harness";
 import {
   type CellDump,
@@ -46,6 +43,7 @@ import {
   CellSnapshots,
   openCelldStorageWithDatabase,
 } from "@secbot/cell-storage";
+import { BudgetBoardStore } from "./budget-board.ts";
 import { ChangeLog, type HistoryEntry } from "./change-log.ts";
 
 export const HOUSEHOLD_CELL_NAME = "household";
@@ -70,16 +68,22 @@ export interface HouseholdCellOptions {
 
 interface Opened {
   readonly log: ChangeLog;
+  readonly board: BudgetBoardStore;
   readonly harness: Harness;
   readonly database: CelldSqliteDatabase;
   readonly wakes: () => Promise<{
     readonly summary: WakeSummary;
     readonly next: NextWake | undefined;
   }>;
+  /** Logs the count of reports not logged yet, then closes the harness. */
+  close(): Promise<void>;
 }
 
 export class HouseholdCell {
-  private opening: Promise<Opened> | undefined;
+  /** The routine harness: closed and opened again when celld closes the database under it. */
+  private readonly slot: HarnessSlot<Opened>;
+  /** The open that `open()` watches for a failure to log. */
+  private watched: Promise<Opened> | undefined;
   private readonly alarms: CellAlarm;
   private readonly now: () => number;
   /** Snapshot, restore, wipe, and digest, shared with the person cells. */
@@ -99,70 +103,57 @@ export class HouseholdCell {
       state.storage,
       {
         openDatabase: async () => {
-          const opening = this.opening;
+          const opening = this.slot.current();
           return opening === undefined ? undefined : (await opening).database;
         },
         close: () => this.close(),
       },
       this.now,
     );
+    // A restore or wipe in progress finishes first, so the harness opens on the new database.
+    this.slot = new HarnessSlot(
+      HOUSEHOLD_CELL_NAME,
+      (onReport) => this.snapshots.idle().then(() => this.openNow(onReport)),
+      (work) => this.state.waitUntil?.(work),
+    );
   }
 
   private open(): Promise<Opened> {
-    if (this.opening === undefined) {
-      // A restore or wipe in progress finishes first, so the harness opens on the new database.
-      const opening = this.snapshots.idle().then(() => this.openNow());
-      this.opening = opening;
+    const opening = this.slot.get();
+    if (opening !== this.watched) {
+      this.watched = opening;
+      // A failed open leaves the slot empty, so the next request tries again.
       opening.catch((error: unknown) => {
-        if (this.opening === opening) this.opening = undefined;
         logEvent("cell.open_failed", { cell: HOUSEHOLD_CELL_NAME, ...errorFields(error) }, "error");
       });
     }
-    return this.opening;
+    return opening;
   }
 
-  private async openNow(context: Context = BACKGROUND_CONTEXT): Promise<Opened> {
+  private async openNow(onReport: (error: unknown) => void): Promise<Opened> {
     const { storage, database } = await openCelldStorageWithDatabase(this.state.storage);
     const log = new ChangeLog(database, this.now);
-    const hooks = { cell: HOUSEHOLD_CELL_NAME, onWakeChange: () => this.rearmSoon() };
-    const heartbeat = createHeartbeatRoutine(this.env, hooks, this.options.fetch);
-    const registry = createRegistry();
-    registry.install(defineExtension({ name: "secbot-routines", tasks: [heartbeat.task] }));
-    const harness = await Harness.open(
-      storage,
+    const routine = await openRoutineHarness(
       {
-        models: createModels(),
-        registry,
+        cell: HOUSEHOLD_CELL_NAME,
+        storage,
+        env: this.env,
         now: this.now,
-        onReport: (error) =>
-          logEvent("harness.report", reportFields(HOUSEHOLD_CELL_NAME, error), "error"),
+        onReport,
+        onWakeChange: () => this.rearmSoon(),
+        ...(this.options.fetch === undefined ? {} : { fetch: this.options.fetch }),
       },
-      context,
+      (opened) => this.alarms.rearm(opened),
     );
-    try {
-      await harness.root(context);
-      await ensureRoutines(harness, [{ routine: heartbeat }], this.now(), context);
-      harness.resume();
-      const opened: Opened = {
-        log,
-        harness,
-        database,
-        wakes: async () => {
-          const summary = wakesOf(await harness.inspect(context));
-          return { summary, next: nextWake(summary, this.now()) };
-        },
-      };
-      await this.alarms.rearm(opened);
-      return opened;
-    } catch (error) {
-      // An opened harness must not stay running while the next event opens another one.
-      await harness.close(context).catch(() => {});
-      throw error;
-    }
+    return {
+      ...routine,
+      log,
+      board: new BudgetBoardStore(database, this.now),
+      database,
+    };
   }
-
   private rearmSoon(): void {
-    const opening = this.opening;
+    const opening = this.slot.current();
     if (opening === undefined) return;
     const work = opening
       .then((opened) => this.alarms.rearm(opened))
@@ -199,6 +190,34 @@ export class HouseholdCell {
   /** RPC: the document's change log, in order (or one item's). */
   async history(document: string, itemId?: string): Promise<HistoryEntry[]> {
     return (await this.open()).log.history(document, itemId);
+  }
+
+  /** RPC: the household budget board (the settings and each cell's newest month report). */
+  async budget(): Promise<BudgetBoard> {
+    return (await this.open()).board.board();
+  }
+
+  /**
+   * RPC: a person cell's month report, once per operation id; the answer says which developer
+   * alerts that cell sends.
+   */
+  async reportSpend(report: unknown): Promise<ReportSpendResult> {
+    return (await this.open()).board.reportSpend(report);
+  }
+
+  /** RPC: the owner changes the household time zone or the developer budget. */
+  async setBudget(change: unknown): Promise<BudgetSettings> {
+    const settings = await (await this.open()).board.setBudget(change);
+    logEvent("budget.settings", {
+      time_zone: settings.timeZone,
+      developer_limit_usd: settings.developerLimitUsd,
+    });
+    return settings;
+  }
+
+  /** RPC: a claimed developer alert went out, or did not and can be claimed again. */
+  async alertSent(outcome: unknown): Promise<void> {
+    await (await this.open()).board.alertSent(outcome);
   }
 
   /** RPC: up with the release version (check:cells). */
@@ -272,10 +291,8 @@ export class HouseholdCell {
     return Response.json({ error: "not found" }, { status: 404 });
   }
 
-  /** Tests: closes the routine harness. */
-  async close(context: Context = BACKGROUND_CONTEXT): Promise<void> {
-    const opening = this.opening;
-    this.opening = undefined;
-    if (opening !== undefined) await (await opening.catch(() => undefined))?.harness.close(context);
+  /** Closes the routine harness (before a restore or wipe loads, and in tests). */
+  async close(): Promise<void> {
+    await this.slot.close();
   }
 }

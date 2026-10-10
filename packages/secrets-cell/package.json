@@ -1,0 +1,22 @@
+{
+  "name": "@secbot/secrets-cell",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The secrets cell: each person's secrets under envelope encryption with a host-held master key, per-agent grants inside an owner allowlist, and a broker that makes health and production calls itself.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.0.3",
+    "@earendil-works/pi-ai": "1.0.3",
+    "@earendil-works/pi-durable": "github:jayteealao/pi#v1.0.3-secbot.1&path:/packages/durable",
+    "@secbot/cell-harness": "workspace:*",
+    "@secbot/cell-storage": "workspace:*"
+  }
+}

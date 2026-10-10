@@ -1,5 +1,5 @@
-# Host setup for the existing VPS: celld, the deploy users, and the firewall rules for the
-# celld ports. It installs and changes nothing else; a second run reports changed=0.
+# Host setup for the existing VPS: celld, the secrets cell's key helper, the deploy users, and the
+# firewall rules for the celld and key helper ports. It installs and changes nothing else; a second run reports changed=0.
 #
 #   SECBOT_VPS_SSH=<your ssh alias> mise run host:setup
 #
@@ -18,4 +18,5 @@
   roles:
     - role: deploy_users
     - role: celld
+    - role: secrets_key_helper
     - role: firewall

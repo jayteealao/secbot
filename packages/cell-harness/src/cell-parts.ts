@@ -38,6 +38,27 @@ export function logEvent(
   if (level === "error") console.error(line);
   else if (level === "warn") console.warn(line);
   else console.log(line);
+  for (const listener of listeners) {
+    try {
+      listener(event, fields);
+    } catch {
+      // A listener never changes what the cell does.
+    }
+  }
+}
+
+export type LogListener = (event: string, fields: Readonly<Record<string, unknown>>) => void;
+const listeners = new Set<LogListener>();
+
+/**
+ * Observes every event this process logs, as fields (the test cell's guard bench reads its
+ * `guard.verdict` events this way instead of parsing log text). Returns the function that stops it.
+ */
+export function onLogEvent(listener: LogListener): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 /**
@@ -46,6 +67,19 @@ export function logEvent(
  * body. Request text that a provider echoes back (for example a moderation excerpt in `metadata`)
  * is dropped.
  */
+/** A name as it may be logged before it is checked: a name-shaped value, else only its length. */
+const LOGGABLE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/**
+ * `value` for a log line when it was not validated yet: kept when it looks like a name, otherwise
+ * `<invalid, N chars>`, so a secret pasted where a name belongs never reaches a log.
+ */
+export function logName(value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  const text = String(value);
+  return LOGGABLE_NAME.test(text) ? text : `<invalid, ${text.length} chars>`;
+}
+
 export function safeErrorText(text: string): string {
   const status = /^\s*(\d{3})\b/.exec(text)?.[1];
   const code = /"code"\s*:\s*"?([A-Za-z0-9_.-]{1,40})"?/.exec(text)?.[1];

@@ -42,6 +42,7 @@ import {
   DEFAULT_LEAD_MODEL,
   DEFAULT_SPECIALIST_MODEL,
   defineRoutine,
+  HarnessSlot,
   type HouseholdApplyResult,
   type HouseholdChange,
   type HouseholdDocument,
@@ -99,6 +100,8 @@ export interface LabOptions {
   readonly loadMs?: number;
   readonly longJobMs?: number;
   readonly pollMs?: number;
+  /** How often the harness logs the count of storage-gone reports it did not log. */
+  readonly reportSummaryMs?: number;
 }
 
 const lastText = (context: TranscriptContext): { role: string; text: string; system: string } => {
@@ -124,7 +127,7 @@ const lastText = (context: TranscriptContext): { role: string; text: string; sys
 };
 
 export class DurabilityLabCell {
-  private opening: Promise<CellHarness> | undefined;
+  private readonly slot: HarnessSlot<CellHarness>;
   private readonly alarms: CellAlarm;
   /** Model calls in this process's life, by role; a restart starts at zero. */
   readonly calls = { lead: 0, specialist: 0 };
@@ -143,6 +146,11 @@ export class DurabilityLabCell {
     this.alarms = new CellAlarm(state.storage, LAB, {
       ...(options.pollMs === undefined ? {} : { pollMs: options.pollMs }),
     });
+    this.slot = new HarnessSlot(
+      LAB,
+      (onReport) => this.open(onReport),
+      state.waitUntil?.bind(state),
+    );
   }
 
   private models() {
@@ -205,45 +213,47 @@ export class DurabilityLabCell {
   }
 
   private cell(): Promise<CellHarness> {
-    if (this.opening === undefined) {
-      const hooks = { cell: LAB, onWakeChange: () => this.rearmSoon() };
-      const tick = defineRoutine(
-        {
-          name: "lab-tick",
-          every: LAB_TICK_EVERY_MS,
-          run: async (fire) => ({
-            outcome: "ok",
-            record: async (tx) => {
-              const doc = await tx.doc(LabDoc);
-              doc.ticks.push({ wakeAt: fire.wakeAt, firedAt: fire.runtime.now() });
-              doc.ticks.splice(0, Math.max(0, doc.ticks.length - 50));
-            },
-          }),
-        },
-        hooks,
-      );
-      this.opening = openCellHarness(this.state.storage, {
-        person: LAB,
-        version: releaseVersion(),
-        env: {},
-        models: this.models(),
-        onWakeChange: hooks.onWakeChange,
-        routines: [{ routine: tick }],
-      }).then(async (cell) => {
-        await this.alarms.rearm(cell);
-        const settled = this.alarms.settle(cell).catch(() => {});
-        this.state.waitUntil?.(settled);
-        return cell;
-      });
-      this.opening.catch(() => {
-        this.opening = undefined;
-      });
-    }
-    return this.opening;
+    return this.slot.get();
+  }
+
+  private open(onReport: (error: unknown) => void): Promise<CellHarness> {
+    const hooks = { cell: LAB, onWakeChange: () => this.rearmSoon() };
+    const tick = defineRoutine(
+      {
+        name: "lab-tick",
+        every: LAB_TICK_EVERY_MS,
+        run: async (fire) => ({
+          outcome: "ok",
+          record: async (tx) => {
+            const doc = await tx.doc(LabDoc);
+            doc.ticks.push({ wakeAt: fire.wakeAt, firedAt: fire.runtime.now() });
+            doc.ticks.splice(0, Math.max(0, doc.ticks.length - 50));
+          },
+        }),
+      },
+      hooks,
+    );
+    return openCellHarness(this.state.storage, {
+      person: LAB,
+      version: releaseVersion(),
+      env: {},
+      models: this.models(),
+      onWakeChange: hooks.onWakeChange,
+      onReport,
+      routines: [{ routine: tick }],
+      ...(this.options.reportSummaryMs === undefined
+        ? {}
+        : { reportSummaryMs: this.options.reportSummaryMs }),
+    }).then(async (cell) => {
+      await this.alarms.rearm(cell);
+      const settled = this.alarms.settle(cell).catch(() => {});
+      this.state.waitUntil?.(settled);
+      return cell;
+    });
   }
 
   private rearmSoon(): void {
-    const opening = this.opening;
+    const opening = this.slot.current();
     if (opening === undefined) return;
     const work = opening.then((cell) => this.alarms.rearm(cell)).catch(() => {});
     this.state.waitUntil?.(work);
@@ -444,6 +454,16 @@ export class DurabilityLabCell {
   }
 
   async fetch(request: Request): Promise<Response> {
+    try {
+      return await this.route(request);
+    } catch (error) {
+      // A request that meets a database celld closed closes the harness for the next request.
+      this.slot.lost(error);
+      throw error;
+    }
+  }
+
+  private async route(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const route = `${request.method} ${url.pathname}`;
     if (route === "POST /lab/arm") return Response.json(await this.arm());
@@ -472,8 +492,6 @@ export class DurabilityLabCell {
   /** Tests: closes the harness. */
   async close(): Promise<void> {
     this.releaseHangs();
-    const opening = this.opening;
-    this.opening = undefined;
-    if (opening !== undefined) await (await opening).close();
+    await this.slot.close();
   }
 }

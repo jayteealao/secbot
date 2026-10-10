@@ -18,22 +18,38 @@
  */
 import { BACKGROUND_CONTEXT as cellContext } from "@earendil-works/chord/context";
 import {
+  AlwaysNotOffered,
   alarmVerdict,
   CELL_NAME,
   CellAlarm,
   type CellEnv,
   type CellHarness,
+  type CostView,
   errorFields,
   type Frame,
   type HeartbeatState,
+  HeldCallAnswered,
+  HeldCallLapsed,
   type HouseholdApplyResult,
   type HouseholdChange,
   type HouseholdClient,
   type HouseholdDocument,
   heartbeatState,
+  isDecisionAdapter,
+  isGuardMode,
   logEvent,
+  logName,
+  MONTH,
+  NoHeldCall,
   openCellHarness,
   RefusedChange,
+  type Rule,
+  type RuleLevel,
+  RuleNotFound,
+  SECRETS_UNAVAILABLE,
+  type SecretsClient,
+  SecretsRefused,
+  SecretsUnavailable,
   type SessionStream,
 } from "@secbot/cell-harness";
 import {
@@ -41,10 +57,12 @@ import {
   type CelldAlarmInfo,
   type CelldCellStorage,
   CellSnapshots,
+  needsReopen,
 } from "@secbot/cell-storage";
 import { HOUSEHOLD_CELL_NAME } from "@secbot/household-cell";
 import { releaseVersion } from "./health.ts";
 import { type HouseholdClientEnv, householdClientOf } from "./household-client.ts";
+import { type SecretsClientEnv, secretsClientOf } from "./secrets-client.ts";
 
 export interface SocketLike {
   send(data: string): void;
@@ -71,15 +89,21 @@ export interface HouseholdNamespaceLike {
   get(id: unknown): HouseholdStubLike;
 }
 
-export interface PersonCellEnv extends CellEnv, HouseholdClientEnv {
+export interface PersonCellEnv extends CellEnv, HouseholdClientEnv, SecretsClientEnv {
   readonly HOUSEHOLD_CELL?: HouseholdNamespaceLike;
 }
 
 /** What the cell gives the harness it opens. */
 export interface OpenExtras {
   readonly household?: HouseholdClient;
+  readonly secrets?: SecretsClient;
   readonly onWakeChange: () => void;
+  /** Background work of the harness failed; the cell reopens a harness whose session broke. */
+  readonly onReport?: (error: unknown) => void;
 }
+
+/** How long a reopen waits for the broken harness to close before it opens the new one. */
+export const REOPEN_CLOSE_WAIT_MS = 10_000;
 
 export interface PersonCellOptions {
   /** Tests: how often a settling cell looks at its tasks (2 s in a cell). */
@@ -147,6 +171,76 @@ function parseInput(data: string | ArrayBuffer): ParsedInput {
 
 const json = (body: unknown, status = 200) => Response.json(body, { status });
 
+/**
+ * A guard answer for RPC and routes alike: the value, or a status and a reason. RPC returns it
+ * instead of throwing, so a refusal keeps its status and text across the celld RPC boundary.
+ */
+export type GuardAnswer<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly status: number; readonly error: string };
+
+/** Activity query parameters, checked: month YYYY-MM, before >= 0, limit 1-200. */
+export function activityQuery(
+  params: URLSearchParams,
+): { month?: string; before?: number; limit?: number } | { error: string } {
+  const month = params.get("month");
+  const before = params.get("before");
+  const limit = params.get("limit");
+  if (month !== null && !MONTH.test(month)) return { error: "month must be YYYY-MM" };
+  if (before !== null && !/^\d{1,9}$/.test(before)) return { error: "before must be a number" };
+  if (limit !== null && !(/^\d{1,3}$/.test(limit) && Number(limit) >= 1 && Number(limit) <= 200)) {
+    return { error: "limit must be 1-200" };
+  }
+  return {
+    ...(month === null ? {} : { month }),
+    ...(before === null ? {} : { before: Number(before) }),
+    ...(limit === null ? {} : { limit: Number(limit) }),
+  };
+}
+
+/** Runs a rule or activity call; refusals become 400 ("refused: …"), a missing rule 404. */
+async function guardAnswer<T>(work: () => Promise<T>): Promise<GuardAnswer<T>> {
+  try {
+    return { ok: true, value: await work() };
+  } catch (error) {
+    if (error instanceof RuleNotFound) return { ok: false, status: 404, error: error.message };
+    if (error instanceof RefusedChange) {
+      return { ok: false, status: 400, error: `refused: ${error.message}` };
+    }
+    throw error;
+  }
+}
+
+/** The owner's view of a cell's guard mode (`GET|PUT /ops/mode`, `PUT /ops/decision-model`). */
+export interface GuardModeAnswer {
+  readonly person: string;
+  readonly mode: "shadow" | "enforce";
+  readonly since: number | null;
+  readonly switchedBy: string | null;
+  readonly decisionModel: string;
+  readonly timeZone: string;
+  readonly changed?: boolean;
+}
+
+const modeAnswer = (
+  person: string,
+  cell: CellHarness,
+  state: Awaited<ReturnType<CellHarness["guardMode"]>>,
+): GuardModeAnswer => ({
+  person,
+  mode: state.mode,
+  since: state.since,
+  switchedBy: state.switchedBy,
+  decisionModel: state.decisionModel,
+  timeZone: cell.timeZone,
+});
+
+const answerJson = <T>(
+  answer: GuardAnswer<T>,
+  status = 200,
+  wrap: (value: T) => unknown = (v) => v,
+) => (answer.ok ? json(wrap(answer.value), status) : json({ error: answer.error }, answer.status));
+
 /** Reads a JSON body of at most BODY_LIMIT characters; undefined when it is larger or not JSON. */
 async function readJson(request: Request): Promise<Record<string, unknown> | undefined> {
   const declared = Number(request.headers.get("content-length") ?? "0");
@@ -163,6 +257,10 @@ async function readJson(request: Request): Promise<Record<string, unknown> | und
 
 export class PersonCell {
   private opening: Promise<CellHarness> | undefined;
+  /** Counts harness opens, so a late report from a closed harness cannot close its successor. */
+  private generation = 0;
+  /** A broken harness that is closing; the next open waits for it (at most REOPEN_CLOSE_WAIT_MS). */
+  private closing: Promise<void> | undefined;
   private streaming: Promise<SessionStream> | undefined;
   private readonly framesSent = new Map<string, number>();
   /**
@@ -246,13 +344,19 @@ export class PersonCell {
     if (this.opening === undefined) {
       this.rememberName(person);
       const household = householdClientOf(this.env);
-      // A restore or wipe in progress finishes first, so the harness opens on the new database.
-      this.opening = this.snapshots()
-        .idle()
+      const secrets = secretsClientOf(this.env);
+      const generation = ++this.generation;
+      const closing = this.closing ?? Promise.resolve();
+      // A broken harness closes first, then a restore or wipe in progress finishes, so the harness
+      // opens alone on the current database.
+      this.opening = closing
+        .then(() => this.snapshots().idle())
         .then(() =>
           this.open(this.state.storage, person, {
             ...(household === undefined ? {} : { household }),
+            ...(secrets === undefined ? {} : { secrets }),
             onWakeChange: () => this.rearmSoon(person),
+            onReport: (error) => this.reopenAfter(error, person, generation),
           }),
         )
         .then(async (cell) => {
@@ -276,6 +380,29 @@ export class PersonCell {
     return this.opening;
   }
 
+  /**
+   * A poisoned session never heals, and every request on it fails. When `error` shows one, this
+   * closes the harness (waiting at most REOPEN_CLOSE_WAIT_MS) so the next event opens a new one on
+   * the same storage, which resumes the stored tasks. `generation` names the harness the error came
+   * from; an error from an older harness changes nothing.
+   */
+  private reopenAfter(error: unknown, person: string, generation = this.generation): void {
+    if (!needsReopen(error)) return;
+    if (generation !== this.generation || this.opening === undefined) return;
+    logEvent("cell.reopen", { cell: person, ...errorFields(error) }, "warn");
+    const closed = this.closeHarness().catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const waited = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, REOPEN_CLOSE_WAIT_MS);
+    });
+    const closing: Promise<void> = Promise.race([closed, waited]).then(() => {
+      clearTimeout(timer);
+      if (this.closing === closing) this.closing = undefined;
+    });
+    this.closing = closing;
+    this.state.waitUntil?.(closing);
+  }
+
   private rearmSoon(person: string): void {
     const opening = this.opening;
     if (opening === undefined) return;
@@ -284,6 +411,7 @@ export class PersonCell {
       .catch((error: unknown) => {
         // The wake path: a cell with no alarm sleeps through its timers, so the failure is logged.
         logEvent("alarm.rearm_failed", { cell: person, ...errorFields(error) }, "error");
+        this.reopenAfter(error, person);
       });
     this.state.waitUntil?.(work);
   }
@@ -326,7 +454,22 @@ export class PersonCell {
     if (this.streaming === undefined) {
       this.streaming = cell.session(
         (frame) => {
-          this.broadcast(frame);
+          const sent = this.broadcast(frame);
+          // A notice shows once per device: a device whose socket took it does not see it again
+          // in `missed` or at its next session open.
+          if (frame.type === "notice" && sent.size > 0) {
+            const seq = frame.notice.seq;
+            const work = Promise.all(
+              [...sent].map((device) => cell.markNoticeSeen(device, seq)),
+            ).catch((error: unknown) => {
+              logEvent(
+                "cli.notice_mark_failed",
+                { cell: cell.person, ...errorFields(error) },
+                "warn",
+              );
+            });
+            this.state.waitUntil?.(work);
+          }
         },
         async (entryId) => {
           // Only devices whose socket took the frame count it as delivered; a send that failed on
@@ -338,6 +481,7 @@ export class PersonCell {
       streaming.catch((error: unknown) => {
         if (this.streaming === streaming) this.streaming = undefined;
         logEvent("cli.stream_failed", { cell: cell.person, ...errorFields(error) }, "error");
+        this.reopenAfter(error, cell.person);
       });
     }
     return this.streaming;
@@ -350,10 +494,15 @@ export class PersonCell {
    */
   private keepBusy(cell: CellHarness): void {
     const alarms = this.alarmFor(cell.person);
-    if (alarms.isSettling) return;
+    if (alarms.isSettling) {
+      // The running settle may have taken its last look before this work started.
+      alarms.again();
+      return;
+    }
     const work = alarms.settle(cell).catch((error: unknown) => {
       // Due routines and hand-offs may be left unrun; the next event or alarm settles again.
       logEvent("cell.settle_failed", { cell: cell.person, ...errorFields(error) }, "error");
+      this.reopenAfter(error, cell.person);
     });
     if (this.state.waitUntil === undefined) return;
     this.state.waitUntil(work);
@@ -365,10 +514,15 @@ export class PersonCell {
     if (person === undefined) return;
     const alarms = this.alarmFor(person);
     alarms.fired(info, undefined);
-    const cell = await this.cell(person);
-    // Wait while the due work runs: a routine fires, a reminder reaches the lead and is relayed.
-    if (this.sockets().length > 0) await this.ensureStream(cell);
-    await alarms.settle(cell);
+    try {
+      const cell = await this.cell(person);
+      // Wait while the due work runs: a routine fires, a reminder reaches the lead and is relayed.
+      if (this.sockets().length > 0) await this.ensureStream(cell);
+      await alarms.settle(cell);
+    } catch (error) {
+      this.reopenAfter(error, person);
+      throw error;
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -414,6 +568,9 @@ export class PersonCell {
       if (request.method === "GET" && route === "/missed") {
         return json(await cell.missed(device));
       }
+      if (request.method === "GET" && route === "/cost") {
+        return json(await cell.cost());
+      }
       if (request.method === "GET" && route === "/models") {
         return json({ roles: await cell.listRoleModels() });
       }
@@ -438,11 +595,242 @@ export class PersonCell {
         this.rearmSoon(person);
         return json({ name: body.name, status: "added" }, 201);
       }
+      if (route === "/rules") return this.rulesRoute(request, cell, "person");
+      if (request.method === "GET" && route === "/approvals") {
+        return json({ held: await cell.heldCalls() });
+      }
+      const approvalRoute = /^\/approvals\/([1-9][0-9]{0,8})$/.exec(route);
+      if (request.method === "POST" && approvalRoute !== null) {
+        return this.answerRoute(request, cell, Number(approvalRoute[1]), device);
+      }
+      if (route === "/secrets" || route === "/secrets/grants") {
+        return this.secretsRoute(request, cell, person, route);
+      }
+      if (request.method === "GET" && route === "/activity") {
+        const query = activityQuery(url.searchParams);
+        if ("error" in query) return json({ error: query.error }, 400);
+        return json({ person, ...(await cell.activity(query)) });
+      }
       return json({ error: "not found" }, 404);
     } catch (error) {
       if (error instanceof RefusedChange) return json({ error: error.message }, 400);
+      // This request fails; the next one opens a new harness instead of failing the same way.
+      this.reopenAfter(error, person);
       throw error;
     }
+  }
+
+  /**
+   * GET lists both levels; POST adds one rule (body: agent, tool, verdict, match?); DELETE removes
+   * the rule with the body's agent, tool, and match. A device key edits only the person's level.
+   */
+  private async rulesRoute(request: Request, cell: CellHarness, level: RuleLevel) {
+    if (request.method === "GET") return json({ ...(await cell.rules()), timeZone: cell.timeZone });
+    if (request.method !== "POST" && request.method !== "DELETE") {
+      return json({ error: "not found" }, 404);
+    }
+    const body = await readJson(request);
+    if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+    if (request.method === "POST") {
+      return answerJson(await guardAnswer(() => cell.addRule(level, body)), 201, (rule) => ({
+        rule,
+      }));
+    }
+    return answerJson(await guardAnswer(() => cell.removeRule(level, body)), 200, (removed) => ({
+      removed,
+    }));
+  }
+
+  /**
+   * The person's own secrets: GET /secrets lists them (names, kinds, grants, the allowlist; never a
+   * value); POST and DELETE /secrets/grants grant or revoke one secret for one of this person's
+   * agents (body: secret, agent), inside the owner's allowlist. The agent must be on this person's
+   * roster; the secrets cell checks the rest.
+   */
+  private async secretsRoute(
+    request: Request,
+    cell: CellHarness,
+    person: string,
+    route: string,
+  ): Promise<Response> {
+    const secrets = secretsClientOf(this.env);
+    try {
+      if (secrets === undefined) throw new SecretsUnavailable();
+      if (route === "/secrets" && request.method === "GET") {
+        return json({ person, secrets: await secrets.list(person) });
+      }
+      if (route !== "/secrets/grants" || !["POST", "DELETE"].includes(request.method)) {
+        return json({ error: "not found" }, 404);
+      }
+      const body = await readJson(request);
+      if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+      const secret = typeof body.secret === "string" ? body.secret : "";
+      const agent = typeof body.agent === "string" ? body.agent : "";
+      if (!(await cell.status()).roles.includes(agent)) {
+        const reason = `no agent named ${agent}`;
+        const action = request.method === "POST" ? "grant" : "revoke";
+        logEvent(
+          "secret.refused",
+          {
+            cell: person,
+            action,
+            person,
+            agent: logName(agent),
+            secret: logName(secret),
+            reason: `no agent named ${logName(agent)}`,
+          },
+          "warn",
+        );
+        return json({ error: `refused: ${reason}` }, 400);
+      }
+      if (request.method === "POST") {
+        const result = await secrets.grant(person, secret, agent);
+        return json({ person, secret, agent, ...result }, result.granted ? 201 : 200);
+      }
+      return json({ person, secret, agent, ...(await secrets.revoke(person, secret, agent)) });
+    } catch (error) {
+      if (error instanceof SecretsRefused) return json({ error: `refused: ${error.message}` }, 400);
+      // Only "the secrets cell did not answer" is 503; any other failure is the route's own (500).
+      if (!(error instanceof SecretsUnavailable)) throw error;
+      logEvent("secrets.unreachable", { cell: person, route, ...errorFields(error) }, "warn");
+      return json({ error: `refused: ${SECRETS_UNAVAILABLE}` }, 503);
+    }
+  }
+
+  /**
+   * One answer to a held call, from a device of this person: `{"answer": "allow" | "always" |
+   * "deny"}`. The same route serves the command line now and the app later.
+   */
+  private async answerRoute(
+    request: Request,
+    cell: CellHarness,
+    number: number,
+    device: string,
+  ): Promise<Response> {
+    const body = await readJson(request);
+    if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+    const choice = body.answer;
+    if (choice !== "allow" && choice !== "always" && choice !== "deny") {
+      return json({ error: 'send {"answer": "allow" | "always" | "deny"}' }, 400);
+    }
+    try {
+      const answered = await cell.answer(number, choice, { device });
+      // The waiting call continues in this activation; keep the cell up while it runs.
+      this.keepBusy(cell);
+      this.rearmSoon(cell.person);
+      return json({
+        number,
+        status: answered.call.status,
+        answer: choice,
+        agent: answered.call.agent,
+        tool: answered.call.tool,
+        summary: answered.call.summary,
+        answeredBy: answered.answeredBy,
+        rule: answered.rule,
+      });
+    } catch (error) {
+      if (error instanceof NoHeldCall) return json({ error: error.message }, 404);
+      if (error instanceof HeldCallLapsed) return json({ error: "lapsed" }, 409);
+      if (error instanceof HeldCallAnswered) return json({ error: "answered" }, 409);
+      if (error instanceof AlwaysNotOffered) {
+        return json({ error: `refused: ${error.message}` }, 400);
+      }
+      if (error instanceof RefusedChange) return json({ error: `refused: ${error.message}` }, 400);
+      throw error;
+    }
+  }
+
+  /** RPC (operator routes): both levels of a person's rules. */
+  async ownerRules(
+    person: string,
+  ): Promise<GuardAnswer<{ owner: Rule[]; person: Rule[]; timeZone: string }>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => {
+      const rules = await cell.rules();
+      return { owner: [...rules.owner], person: [...rules.person], timeZone: cell.timeZone };
+    });
+  }
+
+  /** RPC (operator routes): adds an owner rule for this person's agents. */
+  async addOwnerRule(person: string, input: unknown): Promise<GuardAnswer<Rule>> {
+    const cell = await this.cell(person);
+    return guardAnswer(() => cell.addRule("owner", input));
+  }
+
+  /** RPC (operator routes): removes an owner rule; the release rule cannot be removed. */
+  async removeOwnerRule(person: string, input: unknown): Promise<GuardAnswer<Rule>> {
+    const cell = await this.cell(person);
+    return guardAnswer(() => cell.removeRule("owner", input));
+  }
+
+  /** RPC (operator routes): a person's activity for the owner. */
+  async activityOf(
+    person: string,
+    query: { month?: string; before?: number; limit?: number },
+  ): Promise<GuardAnswer<Record<string, unknown>>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => ({ person, ...(await cell.activity(query)) }));
+  }
+
+  /** RPC (operator routes): the guard mode, since when, and the decision model, for the owner. */
+  async guardModeOf(person: string): Promise<GuardAnswer<GuardModeAnswer>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => modeAnswer(person, cell, await cell.guardMode()));
+  }
+
+  /** RPC (operator routes): the owner switches the mode; the next marked call uses it. */
+  async setGuardModeOf(person: string, mode: unknown): Promise<GuardAnswer<GuardModeAnswer>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => {
+      if (!isGuardMode(mode)) throw new RefusedChange('send {"mode": "shadow" | "enforce"}');
+      const switched = await cell.setGuardMode(mode, "owner");
+      const state = await cell.guardMode();
+      return { ...modeAnswer(person, cell, state), changed: switched.changed };
+    });
+  }
+
+  /** RPC (operator routes): a person's month of spend, for the owner. */
+  async costOf(person: string): Promise<GuardAnswer<CostView>> {
+    const cell = await this.cell(person);
+    return guardAnswer(() => cell.cost());
+  }
+
+  /** RPC (operator routes): the owner sets a person's monthly limit; the next call uses it. */
+  async setLimitOf(
+    person: string,
+    usd: unknown,
+  ): Promise<GuardAnswer<{ person: string; limitUsd: number; previousUsd: number }>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => {
+      const result = await cell.setLimit(usd, "owner");
+      // Work waiting above the old limit may run now; keep the cell up while it does.
+      this.keepBusy(cell);
+      this.rearmSoon(person);
+      return { person, ...result };
+    });
+  }
+
+  /** RPC (operator routes): reads the household budget settings again after the owner changed one. */
+  async refreshBudget(person: string): Promise<void> {
+    const cell = await this.cell(person);
+    await cell.refreshHouseholdBudget(householdClientOf(this.env));
+    this.keepBusy(cell);
+    this.rearmSoon(person);
+  }
+
+  /** RPC (operator routes): the owner switches the decision model; the next call uses it. */
+  async setDecisionModelOf(
+    person: string,
+    adapter: unknown,
+  ): Promise<GuardAnswer<GuardModeAnswer>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => {
+      if (!isDecisionAdapter(adapter)) {
+        throw new RefusedChange('send {"adapter": "clef" | "clef-flash" | "jev"}');
+      }
+      await cell.setDecisionAdapter(adapter);
+      return modeAnswer(person, cell, await cell.guardMode());
+    });
   }
 
   private async openSession(cell: CellHarness, person: string, device: string): Promise<Response> {
@@ -453,7 +841,8 @@ export class PersonCell {
     }
     // The live watch is registered before the missed scan, and frames for this device are held until
     // the missed page is sent: an event that commits while the scan runs is then in the page, in the
-    // held frames, or both (sent once), never in neither.
+    // held frames, or both (sent once), never in neither. The order a person sees: connected, the
+    // usage line, calls waiting for them, limit notices they have not seen, then missed messages.
     const held: Frame[] = [];
     this.handoffs.set(device, held);
     const pair = new Pair();
@@ -467,10 +856,21 @@ export class PersonCell {
       this.state.acceptWebSocket(pair[1], [device, person]);
       deliver({ type: "connected", lead: person });
       await this.ensureStream(cell);
-      // What the lead said while this device had no open socket comes first, oldest first, so an
-      // answer that committed during a reconnect is shown before the next live answer moves the
-      // device's cursor past it.
-      const { messages, remaining } = await cell.missed(device);
+      deliver({ type: "usage", usage: await cell.usage() });
+      // Calls waiting for the person come first, then what the lead said while this device had no
+      // open socket, oldest first, so an answer that committed during a reconnect is shown before
+      // the next live answer moves the device's cursor past it.
+      const {
+        held: waiting,
+        notices,
+        waiting: queued,
+        messages,
+        remaining,
+      } = await cell.missed(device);
+      const shown = new Set(waiting.map((call) => call.number));
+      for (const call of waiting) deliver({ type: "held", call, count: waiting.length });
+      const noticed = new Set(notices.map((notice) => notice.seq));
+      for (const notice of notices) deliver({ type: "notice", notice, waiting: queued });
       for (const message of messages) {
         deliver({
           type: "missed",
@@ -497,6 +897,10 @@ export class PersonCell {
             newest = frame.entryId;
           }
           deltas = [];
+        } else if (frame.type === "held" && shown.has(frame.call.number)) {
+          // Already sent above with the waiting calls.
+        } else if (frame.type === "notice" && noticed.has(frame.notice.seq)) {
+          // Already sent above with the unseen notices.
         } else {
           deliver(frame);
         }
@@ -505,6 +909,13 @@ export class PersonCell {
       this.framesSent.set(device, framesSent);
       this.handoffs.delete(device);
       if (newest !== undefined) await cell.markDelivered(device, newest);
+      const newestNotice = held
+        .filter((frame) => frame.type === "notice")
+        .reduce(
+          (top, frame) => (frame.type === "notice" ? Math.max(top, frame.notice.seq) : top),
+          0,
+        );
+      if (newestNotice > 0) await cell.markNoticeSeen(device, newestNotice);
     } finally {
       if (this.handoffs.get(device) === held) this.handoffs.delete(device);
     }
@@ -555,6 +966,7 @@ export class PersonCell {
         { cell: person, device, request_id: input.requestId, ...errorFields(error) },
         "error",
       );
+      this.reopenAfter(error, person);
       // Not acknowledged: the client keeps the line and resends it after a reconnect.
       socket.send(
         JSON.stringify({
