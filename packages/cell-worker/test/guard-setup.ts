@@ -24,8 +24,8 @@ import {
 import { HouseholdCell } from "@secbot/household-cell";
 import { type KeyCustody, SecretsCell, testCustody } from "@secbot/secrets-cell";
 import { sha256Hex } from "../src/device-auth.ts";
-import { route, type WorkerEnv } from "../src/index.ts";
 import { type HouseholdStubLike, PersonCell, type SocketLike } from "../src/person-cell.ts";
+import { route, type WorkerEnv } from "../src/routes.ts";
 import type { SecretsStubLike } from "../src/secrets-client.ts";
 
 export const KEY = "owner-laptop-key-0123456789abcdef0123456789abcdef";

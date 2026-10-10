@@ -14,10 +14,10 @@ import {
 import type { CellDump } from "@secbot/cell-storage";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { route, type WorkerEnv } from "../src/index.ts";
 import { OPERATOR_HEADER } from "../src/internal-rpc.ts";
 import type { SnapshotBucket } from "../src/ops.ts";
 import { PERSON_HEADER, PersonCell } from "../src/person-cell.ts";
+import { route, type WorkerEnv } from "../src/routes.ts";
 
 const KEY = "k".repeat(32);
 

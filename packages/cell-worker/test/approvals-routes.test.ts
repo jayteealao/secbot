@@ -2,7 +2,7 @@
 // and the app later): list, allow, always, deny, and every refusal.
 import { until } from "@secbot/cell-harness/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { route } from "../src/index.ts";
+import { route } from "../src/routes.ts";
 import { closeAll, type GuardSetup, guardSetup, HOST, KEY } from "./guard-setup.ts";
 
 const setups: GuardSetup[] = [];

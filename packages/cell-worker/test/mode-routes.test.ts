@@ -2,7 +2,7 @@
 // key switches the mode and the decision model and reads them back, and neither a missing key nor
 // a device key can switch (no device-key route reaches the mode).
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { route } from "../src/index.ts";
+import { route } from "../src/routes.ts";
 import { closeAll, type GuardSetup, guardSetup, HOST, KEY, OPERATOR_KEY } from "./guard-setup.ts";
 
 const setups: GuardSetup[] = [];

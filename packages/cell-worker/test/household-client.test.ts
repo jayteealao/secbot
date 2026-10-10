@@ -6,8 +6,8 @@ import { FakeCelldStorage, loggedEvents } from "@secbot/cell-harness/testing";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { householdClientOf, httpHouseholdClient } from "../src/household-client.ts";
-import { route, type WorkerEnv } from "../src/index.ts";
 import { OPERATOR_HEADER } from "../src/internal-rpc.ts";
+import { route, type WorkerEnv } from "../src/routes.ts";
 
 const KEY = "k".repeat(32);
 const URL_BASE = "http://household.internal:8789";
