@@ -15,7 +15,12 @@ import { type CellParts, logEvent, RefusedChange } from "./cell-parts.ts";
 import { RoleModelsDoc, RosterDoc } from "./docs.ts";
 import { Anchor } from "./handoff.ts";
 import { assertResolvable, defaultModelFor, modelRef } from "./model-map.ts";
-import { LEAD_INSTRUCTIONS, LEAD_ROLE, STARTER_SPECIALISTS } from "./release-defaults.ts";
+import {
+  LEAD_INSTRUCTIONS,
+  LEAD_ROLE,
+  REVIEWER_ROLE,
+  STARTER_SPECIALISTS,
+} from "./release-defaults.ts";
 
 export const SPECIALIST_NAME = /^[a-z][a-z0-9-]{1,31}$/;
 
@@ -105,6 +110,9 @@ export async function addSpecialist(
     });
     throw new RefusedChange(reason);
   };
+  if (input.name === REVIEWER_ROLE) {
+    refuse(`bad name "${input.name}": the reviewer is the guard's role, not a specialist`);
+  }
   if (!SPECIALIST_NAME.test(input.name) || input.name === LEAD_ROLE) {
     refuse(`bad name "${input.name}": use 2-32 lowercase letters, digits, or dashes`);
   }

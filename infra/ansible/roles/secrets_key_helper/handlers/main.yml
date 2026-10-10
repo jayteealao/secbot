@@ -1,0 +1,9 @@
+- name: Reload systemd for the key helpers
+  ansible.builtin.systemd_service:
+    daemon_reload: true
+
+- name: Restart the key helpers
+  ansible.builtin.systemd_service:
+    name: "secbot-key-helper@{{ item }}"
+    state: restarted
+  loop: "{{ secrets_key_helper_envs }}"

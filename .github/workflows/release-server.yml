@@ -368,8 +368,10 @@ jobs:
           cmd: mise run check:heartbeats -- --since-deploy --cells person,household
           min-minutes: "0"
 
-  # Skipped until the secrets cell exists: set the repository variable SECBOT_SECRETS_CELL to
-  # "true" when it does.
+  # The owner's switch for the production secrets stage: set the repository variable
+  # SECBOT_SECRETS_CELL to "true" once host setup has run with celld_production, so the production
+  # key helper exists. The prod-shared bundle serves the secrets cell either way, and every deploy
+  # to a fleet that serves it stops early, with the step to run, when its key helper is not running.
   deploy-secrets-cell:
     needs: [build, verify-person-and-household-cells]
     if: ${{ vars.SECBOT_SECRETS_CELL == 'true' }}

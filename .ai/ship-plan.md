@@ -2,9 +2,9 @@
 schema: sdlc/v1
 type: ship-plan
 slug: secbot
-plan-version: 3
+plan-version: 4
 created-at: "2026-10-05T11:00:16Z"
-updated-at: "2026-10-07T08:03:52Z"
+updated-at: "2026-10-10T19:22:13Z"
 project-name: "Secbot"
 template-hint: none
 
@@ -54,6 +54,7 @@ version-source-of-truth:
   - { path: "packages/cell-worker/package.json", field: "version", role: "private workspace package, not bumped" }
   - { path: "packages/cli/package.json", field: "version", role: "private workspace package, not bumped" }
   - { path: "packages/household-cell/package.json", field: "version", role: "private workspace package, not bumped" }
+  - { path: "packages/secrets-cell/package.json", field: "version", role: "private workspace package, not bumped" }
   # The app track adds app/gradle.properties VERSION_NAME (tag app-v<semver>) and VERSION_CODE
   # (strictly increasing integer) when app/ exists, in the access-and-app packet.
 version-bump-rule: release-please

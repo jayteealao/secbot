@@ -9,6 +9,11 @@ Cell logs (one JSON line per event) or alerts that match any of these trigger th
 - `"event":"model.call"` lines with `"credit":true` or a non-`stop` stop reason
 - `"event":"cli.refused"` (a device or host the cell does not accept)
 
+The guard's own model layers (`guard.fallback`, `guard.reviewer_failed`, a call held as
+`reviewer unavailable`) and the limits (`limit.crossed`) have the
+[guard fallback runbook](guard-fallback.md); the secrets cell (`secrets.refused_start`,
+`secrets cell unavailable`) has the [secrets cell runbook](secrets-cell-refused.md).
+
 ## What the cell already does
 
 - A failing model call is retried with backoff (2 s doubling to 60 s) for as long as it takes.

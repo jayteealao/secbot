@@ -4,7 +4,86 @@
  * checked on this machine's Node 24.14 against a local server). The CLI reaches only the person in
  * its device file.
  */
-import { CliError, cellUrl, type Device, type Environment, readDevice } from "./config.ts";
+import {
+  CliError,
+  cellUrl,
+  type Device,
+  type Environment,
+  readDevice,
+  readOperatorKey,
+} from "./config.ts";
+
+/** Calls a route; a refusal or an error becomes a CliError with the cell's reason. */
+async function callJson<T>(
+  fetcher: typeof fetch,
+  url: string,
+  headers: Record<string, string>,
+  method: string,
+  body: unknown,
+  refusedWhat: string,
+): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetcher(url, {
+      method,
+      headers: {
+        ...headers,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+  } catch (error) {
+    throw new CliError(`cannot reach the cell: ${(error as Error).message}`);
+  }
+  const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  if (response.status === 401 || response.status === 403) {
+    throw new CliError(
+      `the cell refused ${refusedWhat} (${String(payload.error ?? response.status)})`,
+    );
+  }
+  if (!response.ok)
+    throw new CliError(String(payload.error ?? `the cell answered ${response.status}`));
+  return payload as T;
+}
+
+/**
+ * The owner's operator-key connection: the `/ops/*` routes for another person's rules and
+ * activity. The key goes only in the `x-secbot-operator` header, never in a URL or output.
+ */
+export class OperatorClient {
+  readonly base: string;
+  private readonly key: string;
+  private readonly fetcher: typeof fetch;
+
+  constructor(
+    base: string,
+    key: string,
+    fetcher: typeof fetch = (input, init) => fetch(input, init),
+  ) {
+    this.base = base;
+    this.key = key;
+    this.fetcher = fetcher;
+  }
+
+  static async from(environment: Environment, fetcher?: typeof fetch): Promise<OperatorClient> {
+    return new OperatorClient(
+      await cellUrl(environment),
+      await readOperatorKey(environment),
+      fetcher,
+    );
+  }
+
+  request<T>(method: string, route: string, body?: unknown): Promise<T> {
+    return callJson<T>(
+      this.fetcher,
+      `${this.base}${route}`,
+      { "x-secbot-operator": this.key },
+      method,
+      body,
+      "the operator key",
+    );
+  }
+}
 
 export class CellClient {
   // Plain fields, not constructor parameter properties: `mise run cli` runs this file with Node's
@@ -36,29 +115,15 @@ export class CellClient {
   }
 
   /** Calls a cell route; a refusal or an error becomes a CliError with the cell's reason. */
-  async request<T>(method: string, route: string, body?: unknown): Promise<T> {
-    let response: Response;
-    try {
-      response = await this.fetcher(`${this.base}${this.path(route)}`, {
-        method,
-        headers: {
-          ...this.headers,
-          ...(body === undefined ? {} : { "content-type": "application/json" }),
-        },
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      });
-    } catch (error) {
-      throw new CliError(`cannot reach the cell: ${(error as Error).message}`);
-    }
-    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-    if (response.status === 401 || response.status === 403) {
-      throw new CliError(
-        `the cell refused this device (${String(payload.error ?? response.status)})`,
-      );
-    }
-    if (!response.ok)
-      throw new CliError(String(payload.error ?? `the cell answered ${response.status}`));
-    return payload as T;
+  request<T>(method: string, route: string, body?: unknown): Promise<T> {
+    return callJson<T>(
+      this.fetcher,
+      `${this.base}${this.path(route)}`,
+      this.headers,
+      method,
+      body,
+      "this device",
+    );
   }
 
   sessionUrl(): string {

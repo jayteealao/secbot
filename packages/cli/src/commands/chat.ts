@@ -3,13 +3,19 @@
  * request id; the lead's answer streams in; a follow-up that arrives while the session is open is
  * printed with no new command. After a dropped connection the CLI reconnects and resends every
  * line the cell has not acknowledged, under the same request id, so nothing is submitted twice.
- * Messages the lead sent while no session was open arrive first, as `missed` frames.
+ * Calls held for the person arrive first, as `held` frames, then messages the lead sent while no
+ * session was open, as `missed` frames. Only an exact `/allow N`, `/always N`, or `/deny N`
+ * answers a held call; every other line goes to the lead unchanged. The usage line (the month's
+ * spend against the person's limit) prints on connect and after each answer; a limit notice prints
+ * when a limit line is reached, or at connect when this device has not seen it.
  */
 import { randomUUID } from "node:crypto";
 import type { CellClient } from "../client.ts";
 import type { Io } from "../io.ts";
+import { answerHeld, answerOf, type HeldCall, heldBlock, NOT_SENT } from "./held.ts";
+import { type Notice, noticeBlock, type Usage, usageLine, type Waiting } from "./usage.ts";
 
-type Frame =
+export type Frame =
   | { type: "connected"; lead: string }
   | { type: "accepted"; requestId: string }
   | { type: "delta"; text: string }
@@ -18,7 +24,10 @@ type Frame =
   | { type: "waiting"; on: boolean }
   | { type: "missed"; entryId: number; from: string | null; text: string; remaining: number }
   | { type: "rejected"; requestId: string; message: string }
-  | { type: "error"; message: string; requestId?: string };
+  | { type: "error"; message: string; requestId?: string }
+  | { type: "held"; call: HeldCall; count: number }
+  | { type: "usage"; usage: Usage }
+  | { type: "notice"; notice: Notice; waiting: Waiting[] };
 
 /** The longest line the cell accepts, in characters. */
 export const INPUT_LIMIT = 20_000;
@@ -28,20 +37,20 @@ export interface ChatOptions {
   readonly reconnectMs?: number;
 }
 
-export async function chat(client: CellClient, io: Io, options: ChatOptions = {}): Promise<number> {
-  // Fails fast, with the cell's reason, when the device is refused.
-  await client.request("GET", "/status");
-  const pending = new Map<string, string>();
-  let socket: WebSocket | undefined;
-  let open = false;
-  let closing = false;
+/**
+ * Prints the cell's session frames as `secbot chat` shows them: the held-call block once per call,
+ * the usage line, each limit notice once, the lead's answer as it streams, and follow-ups. Shared
+ * with the stand-in rehearsal of the live guard check, so both print the same lines. `settled` is
+ * told each request id the cell accepted or refused.
+ */
+export function frameRenderer(
+  io: Io,
+  settled: (requestId: string) => void = () => {},
+): { handle: (frame: Frame) => void; print: (text: string) => void } {
   let midAnswer = false;
   let noted = false;
-  let delay = options.reconnectMs ?? 1_000;
-  let ready!: () => void;
-  let connected = new Promise<void>((resolve) => {
-    ready = resolve;
-  });
+  const shown = new Set<number>();
+  const noticed = new Set<number>();
 
   const print = (text: string) => {
     if (midAnswer) io.stdout("\n");
@@ -55,7 +64,7 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
         print(`connected to ${frame.lead} lead\n`);
         break;
       case "accepted":
-        pending.delete(frame.requestId);
+        settled(frame.requestId);
         break;
       case "delta":
         io.stdout(frame.text);
@@ -82,14 +91,47 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
         break;
       case "rejected":
         // The cell refused this line; resending it would be refused the same way.
-        pending.delete(frame.requestId);
+        settled(frame.requestId);
         io.stderr(`cell refused a message: ${frame.message}\n`);
         break;
       case "error":
         io.stderr(`cell: ${frame.message}\n`);
         break;
+      case "held":
+        // Once per call in this session: a reconnect sends every waiting call again.
+        if (shown.has(frame.call.number)) break;
+        shown.add(frame.call.number);
+        print(`\n${heldBlock(frame.call, frame.count).join("\n")}\n`);
+        break;
+      case "usage":
+        print(`${usageLine(frame.usage)}\n`);
+        break;
+      case "notice":
+        // Once per notice in this session, one blank line before it.
+        if (noticed.has(frame.notice.seq)) break;
+        noticed.add(frame.notice.seq);
+        print(`\n${noticeBlock(frame.notice, frame.waiting ?? []).join("\n")}\n`);
+        break;
     }
   };
+
+  return { handle, print };
+}
+
+export async function chat(client: CellClient, io: Io, options: ChatOptions = {}): Promise<number> {
+  // Fails fast, with the cell's reason, when the device is refused.
+  await client.request("GET", "/status");
+  const pending = new Map<string, string>();
+  let socket: WebSocket | undefined;
+  let open = false;
+  let closing = false;
+  let delay = options.reconnectMs ?? 1_000;
+  let ready!: () => void;
+  let connected = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+
+  const { handle, print } = frameRenderer(io, (requestId) => pending.delete(requestId));
 
   const send = (requestId: string, text: string) => {
     if (open) socket?.send(JSON.stringify({ type: "input", text, requestId }));
@@ -137,6 +179,18 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
     if (text === "") continue;
     if (text.length > INPUT_LIMIT) {
       io.stderr(`not sent: a message is at most ${INPUT_LIMIT} characters\n`);
+      continue;
+    }
+    // An answer to a held call goes to the cell's approval route, never to the lead; a line that
+    // only looks like one is not sent at all.
+    const kind = answerOf(text);
+    if (kind.kind === "answer") {
+      print("");
+      await answerHeld(client, io, kind.choice, kind.number);
+      continue;
+    }
+    if (kind.kind === "malformed") {
+      io.stderr(`${NOT_SENT}\n`);
       continue;
     }
     const requestId = `cli-${randomUUID()}`;

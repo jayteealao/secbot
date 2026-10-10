@@ -75,6 +75,40 @@ export interface FakeCell {
   /** Called with each new input; answer through the socket. */
   onInput: (input: { text: string; requestId: string }, socket: ServerSocket) => void;
   missed: unknown[];
+  /** Held calls listed first by `/missed` and by `GET /approvals`. */
+  held: unknown[];
+  /** The answer route: number -> [status, body]; an unknown number answers 404. */
+  answers: Record<number, [number, unknown]>;
+  /** The guard routes: both rule levels, the activity answer, and a refusal for the next add. */
+  rules: { owner: Record<string, unknown>[]; person: Record<string, unknown>[]; timeZone: string };
+  activity: Record<string, unknown>;
+  /** When set, answers the activity route from its query (month, before) in place of `activity`. */
+  activityOf: ((query: URLSearchParams) => Record<string, unknown>) | undefined;
+  refuseNextAdd: string | undefined;
+  /** The operator key the /ops routes accept. */
+  operatorKey: string;
+  /** The guard mode of the person "sam" behind the /ops/mode routes. */
+  guardMode: {
+    mode: string;
+    since: number | null;
+    switchedBy: string | null;
+    decisionModel: string;
+  };
+  /** Frames a session sends after `connected` (the usage line, notices). */
+  connectFrames: unknown[];
+  /** Limit notices and what waits, listed by `/missed` after the held calls. */
+  notices: unknown[];
+  waiting: unknown[];
+  /** `GET /v1/cells/<p>/cost` and `GET /ops/cost?cell=sam`. */
+  cost: Record<string, unknown>;
+  /** `GET /ops/cost`: the household view. */
+  household: Record<string, unknown>;
+  /** The limit changes the /ops routes took, in order. */
+  limitChanges: { path: string; body: unknown }[];
+  /** The secrets list both secrets routes answer (the person's own, and sam's for the owner). */
+  secrets: { name: string; kind: string; grants: string[] }[];
+  /** When set, the next secrets route answers [status, error] (a refusal, or 503 unavailable). */
+  secretsFailure: [number, string] | undefined;
   close(): Promise<void>;
 }
 
@@ -86,6 +120,27 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     calls: [],
     onInput: () => {},
     missed: [],
+    held: [],
+    answers: {},
+    rules: { owner: [], person: [], timeZone: "UTC" },
+    activity: { person, month: "2026-10", timeZone: "UTC", total: 0, records: [], next: null },
+    activityOf: undefined,
+    refuseNextAdd: undefined,
+    operatorKey: "operator-key-0123456789abcdef", // gitleaks:allow (fake test key)
+    guardMode: {
+      mode: "shadow",
+      since: Date.UTC(2026, 9, 8, 18, 20),
+      switchedBy: null,
+      decisionModel: "jev",
+    },
+    connectFrames: [],
+    notices: [],
+    waiting: [],
+    cost: {},
+    household: {},
+    limitChanges: [],
+    secrets: [],
+    secretsFailure: undefined,
     close: async () => {},
   };
   const seen = new Set<string>();
@@ -110,6 +165,113 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
         response.writeHead(status, { "content-type": "application/json" });
         response.end(JSON.stringify(value));
       };
+      /** The secrets routes: the next failure first, then the stand-in's answer. */
+      const secretsReply = (answer: () => unknown) => {
+        if (cell.secretsFailure !== undefined) {
+          const [status, error] = cell.secretsFailure;
+          cell.secretsFailure = undefined;
+          return reply(status, { error });
+        }
+        return reply(200, answer());
+      };
+      const guard = (level: "owner" | "person", route: string) => {
+        if (route === "rules" && request.method === "GET") return reply(200, cell.rules);
+        if (route === "activity" && request.method === "GET") {
+          const query = new URL(path, "http://cell").searchParams;
+          return reply(200, cell.activityOf?.(query) ?? cell.activity);
+        }
+        const given = (body ?? {}) as Record<string, unknown>;
+        if (route === "rules" && request.method === "POST") {
+          if (cell.refuseNextAdd !== undefined) {
+            const error = cell.refuseNextAdd;
+            cell.refuseNextAdd = undefined;
+            return reply(400, { error });
+          }
+          const rule = { ...given, id: 100 + cell.rules[level].length, source: level, addedAt: 0 };
+          cell.rules[level].push(rule);
+          return reply(201, { rule });
+        }
+        if (route === "rules" && request.method === "DELETE") {
+          const list = cell.rules[level];
+          const index = list.findIndex(
+            (rule) =>
+              rule.agent === given.agent &&
+              rule.tool === given.tool &&
+              JSON.stringify(rule.match) === JSON.stringify(given.match),
+          );
+          if (index === -1) return reply(404, { error: "no rule" });
+          const [removed] = list.splice(index, 1);
+          return reply(200, { removed });
+        }
+        return reply(404, { error: "not found" });
+      };
+      if (path.startsWith("/ops/")) {
+        if (request.headers["x-secbot-operator"] !== cell.operatorKey) {
+          return reply(401, { error: "refused: operator_key" });
+        }
+        const url = new URL(path, "http://cell");
+        const given = (body ?? {}) as Record<string, unknown>;
+        if (url.pathname === "/ops/secrets/rotate" && request.method === "POST") {
+          return secretsReply(() => ({ from: "k1", keyId: "k2", rewrapped: 3, remaining: 0 }));
+        }
+        if (url.pathname === "/ops/cost" && url.searchParams.get("cell") === null) {
+          return reply(200, cell.household);
+        }
+        if (url.pathname === "/ops/time-zone" && request.method === "PUT") {
+          if (given.timeZone !== "Europe/London") {
+            return reply(400, { error: "refused: the time zone is not an IANA zone" });
+          }
+          cell.limitChanges.push({ path, body });
+          return reply(200, { timeZone: given.timeZone, developerLimitUsd: 50 });
+        }
+        if (
+          url.pathname === "/ops/limits" &&
+          url.searchParams.get("budget") === "developer" &&
+          request.method === "PUT"
+        ) {
+          cell.limitChanges.push({ path, body });
+          return reply(200, { timeZone: "UTC", developerLimitUsd: given.limitUsd });
+        }
+        if (url.searchParams.get("cell") !== "sam") return reply(404, { error: "no such cell" });
+        if (url.pathname === "/ops/cost" && request.method === "GET") {
+          return reply(200, { ...cell.cost, person: "sam" });
+        }
+        if (url.pathname === "/ops/secrets" && request.method === "GET") {
+          return secretsReply(() => ({ person: "sam", secrets: cell.secrets }));
+        }
+        if (url.pathname === "/ops/secrets" && request.method === "PUT") {
+          return secretsReply(() => ({
+            person: "sam",
+            name: given.name,
+            keyId: "k1",
+            replaced: false,
+          }));
+        }
+        if (url.pathname === "/ops/secrets/allowlist") {
+          const removed = request.method === "DELETE";
+          return secretsReply(() => ({ person: "sam", changed: true, revoked: removed }));
+        }
+        if (url.pathname === "/ops/limits" && request.method === "PUT") {
+          cell.limitChanges.push({ path, body });
+          return reply(200, { person: "sam", limitUsd: given.limitUsd, previousUsd: 25 });
+        }
+        const view = () => ({ person: "sam", ...cell.guardMode, timeZone: "UTC" });
+        if (url.pathname === "/ops/mode" && request.method === "GET") return reply(200, view());
+        if (url.pathname === "/ops/mode" && request.method === "PUT") {
+          if (given.mode !== "shadow" && given.mode !== "enforce") {
+            return reply(400, { error: 'refused: send {"mode": "shadow" | "enforce"}' });
+          }
+          const changed = cell.guardMode.mode !== given.mode;
+          if (changed)
+            cell.guardMode = { ...cell.guardMode, mode: given.mode, switchedBy: "owner" };
+          return reply(200, { ...view(), changed });
+        }
+        if (url.pathname === "/ops/decision-model" && request.method === "PUT") {
+          cell.guardMode = { ...cell.guardMode, decisionModel: String(given.adapter) };
+          return reply(200, view());
+        }
+        return guard("owner", url.pathname.slice(5));
+      }
       if (!authorized(request)) return reply(401, { error: "refused: unknown_key" });
       if (!path.startsWith(`${prefix}/`)) return reply(403, { error: "refused: other_person" });
       const route = path.slice(prefix.length);
@@ -118,13 +280,47 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       if (route === "/missed") {
         const messages = cell.missed;
         cell.missed = [];
-        return reply(200, { messages });
+        const notices = cell.notices;
+        cell.notices = [];
+        return reply(200, {
+          held: cell.held,
+          notices,
+          waiting: cell.waiting,
+          messages,
+          remaining: 0,
+        });
+      }
+      if (route === "/secrets" && request.method === "GET") {
+        return secretsReply(() => ({ person, secrets: cell.secrets }));
+      }
+      if (
+        route === "/secrets/grants" &&
+        (request.method === "POST" || request.method === "DELETE")
+      ) {
+        const granted = request.method === "POST";
+        return secretsReply(() => ({
+          person,
+          ...body,
+          ...(granted ? { granted } : { revoked: true }),
+        }));
+      }
+      if (route === "/cost" && request.method === "GET") {
+        return reply(200, { ...cell.cost, person });
+      }
+      if (route === "/approvals" && request.method === "GET")
+        return reply(200, { held: cell.held });
+      const answer = /^\/approvals\/(\d+)$/.exec(route);
+      if (answer !== null && request.method === "POST") {
+        const number = Number(answer[1]);
+        const [status, value] = cell.answers[number] ?? [404, { error: `no held call #${number}` }];
+        return reply(status, value);
       }
       if (route === "/models" && request.method === "GET") {
         return reply(200, {
           roles: [
             { role: "lead", model: "anthropic/claude-opus-5.5", source: "release default" },
             { role: "research", model: "anthropic/claude-haiku-4.5", source: "release default" },
+            { role: "reviewer", model: "anthropic/claude-sonnet-5.5", source: "release default" },
           ],
         });
       }
@@ -134,6 +330,8 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
           return reply(400, { error: `unknown model "${model}"` });
         return reply(200, { role: route.slice(8), model, source: "changed" });
       }
+      const guardRoute = /^\/(rules|activity)(\?.*)?$/.exec(route);
+      if (guardRoute !== null) return guard("person", guardRoute[1] ?? "");
       if (route === "/specialists" && request.method === "POST")
         return reply(201, { name: body?.name, status: "added" });
       return reply(404, { error: "not found" });
@@ -160,6 +358,7 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     });
     cell.sockets.push(ws);
     ws.send({ type: "connected", lead: person });
+    for (const frame of cell.connectFrames) ws.send(frame);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;

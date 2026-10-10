@@ -19,6 +19,7 @@
     "@earendil-works/pi-durable": "github:jayteealao/pi#v1.0.3-secbot.1&path:/packages/durable",
     "@secbot/cell-harness": "workspace:*",
     "@secbot/cell-storage": "workspace:*",
-    "@secbot/household-cell": "workspace:*"
+    "@secbot/household-cell": "workspace:*",
+    "@secbot/secrets-cell": "workspace:*"
   }
 }

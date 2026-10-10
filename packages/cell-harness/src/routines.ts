@@ -23,11 +23,23 @@ import {
   type TaskRuntime,
   type Tx,
 } from "@earendil-works/pi-durable";
+import { needsReopen } from "@secbot/cell-storage";
+import { appendRecord } from "./activity.ts";
+import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
+import { doneRecord, jobLabel } from "./jobs.ts";
 import { ROUTINE_KIND_PREFIX } from "./wake-times.ts";
 
 /** A failed one-off routine (a reminder whose delivery threw) tries again after this long. */
 export const ONE_OFF_RETRY_MS = 60_000;
+
+/**
+ * A routine whose commit failed because its database is gone (`needsReopen`) waits this long
+ * before its invocation ends. pi-durable restarts a running task at once when an invocation ends
+ * without a durable change, so without the wait a harness that nobody closes runs the routine
+ * again without end, one ping and one report per turn. A close ends the wait at once.
+ */
+export const ROUTINE_GONE_BACKOFF_MS = 60_000;
 
 export const ROUTINE_NAME = /^[a-z][a-z0-9-]{1,31}$/;
 
@@ -61,6 +73,13 @@ export interface RoutineSpec<P extends JsonObject> {
   readonly name: string;
   /** Milliseconds between runs; absent for a one-off routine. */
   readonly every?: number;
+  /**
+   * False for a routine that spends nothing (the heartbeat): it runs above a limit. Every other
+   * routine waits above the person's limit before its effect (budget-gate.ts).
+   */
+  readonly spends?: boolean;
+  /** What the waiting list shows for one run; `routine <name>` by default. */
+  describe?(payload: P): string;
   run(fire: RoutineFire<P>): Promise<RoutineResult>;
 }
 
@@ -68,11 +87,22 @@ export interface RoutineHooks {
   readonly cell: string;
   /** Called after every commit that changes a wake time, so the cell re-arms its alarm. */
   readonly onWakeChange?: () => void;
+  /** The cell's budget gate; spending routines wait on it above the person's limit. */
+  readonly gate?: () => BudgetWaiter | undefined;
+  /**
+   * The cell's time zone. When set, each run of a routine that spends leaves one done job record
+   * in activity (jobs.ts), in the run's own commit.
+   */
+  readonly timeZone?: string;
+  /** Tests: the back-off after a storage-gone commit; ROUTINE_GONE_BACKOFF_MS by default. */
+  readonly goneBackoffMs?: number;
 }
 
 export interface Routine<P extends JsonObject = JsonObject> {
   readonly name: string;
   readonly every: number | undefined;
+  /** False for a routine that spends nothing (the heartbeat); activity does not list it. */
+  readonly spends: boolean;
   readonly task: Task<RoutineInput<P>, RoutineState, null, object>;
 }
 
@@ -85,6 +115,8 @@ export function defineRoutine<P extends JsonObject>(
   if (spec.every !== undefined && !(spec.every >= 1_000)) {
     throw new Error(`routine ${spec.name}: every must be at least 1000 ms`);
   }
+  const what = (payload: P) =>
+    spec.describe?.(payload) ?? `routine ${spec.name.replace(/-/g, " ")}`;
   const task = defineTask<RoutineInput<P>, RoutineState, null>({
     name: `${ROUTINE_KIND_PREFIX}${spec.name}`,
     version: 1,
@@ -93,6 +125,16 @@ export function defineRoutine<P extends JsonObject>(
       wait: async (routine, runtime, context) => {
         const { wakeAt } = routine.state.checkpoint;
         await runtime.sleep(wakeAt, context);
+        if (spec.spends !== false) {
+          await hooks.gate?.()?.waitUntilUnder(
+            {
+              budget: "person",
+              taskId: String(routine.id),
+              what: what(routine.input.payload),
+            },
+            context,
+          );
+        }
         const firedAt = runtime.now();
         let result: RoutineResult;
         try {
@@ -119,12 +161,45 @@ export function defineRoutine<P extends JsonObject>(
             : retry
               ? runtime.now() + ONE_OFF_RETRY_MS
               : undefined;
-        await runtime.commit(async (tx) => {
+        const commit = runtime.commit(async (tx) => {
           if (!retry) await result.record?.(tx);
+          if (!retry && spec.spends !== false && hooks.timeZone !== undefined) {
+            await appendRecord(
+              tx,
+              doneRecord({
+                key: `job:${routine.id}:${wakeAt}`,
+                at: firedAt,
+                agent: "lead",
+                label: jobLabel(what(routine.input.payload)),
+                reason:
+                  result.outcome === "delivered"
+                    ? "delivered to the lead"
+                    : result.outcome === "failed"
+                      ? "failed"
+                      : result.outcome,
+                cost: 0,
+              }),
+              hooks.timeZone,
+            );
+          }
           return next === undefined
             ? { status: "terminal", outcome: { status: "completed", result: null } }
             : { status: "running", checkpoint: { phase: "wait", wakeAt: next } };
         }, context);
+        try {
+          await commit;
+        } catch (error) {
+          if (!needsReopen(error) || runtime.signal.aborted) throw error;
+          // The database is gone: report now, so a cell under a harness slot closes this harness
+          // (which ends the wait below), then wait before the invocation ends and pi-durable
+          // starts the routine again.
+          runtime.report(error);
+          await runtime.sleep(
+            runtime.now() + (hooks.goneBackoffMs ?? ROUTINE_GONE_BACKOFF_MS),
+            context,
+          );
+          throw error;
+        }
         logEvent("routine.fired", {
           cell: hooks.cell,
           routine: spec.name,
@@ -140,7 +215,7 @@ export function defineRoutine<P extends JsonObject>(
     abort: (_routine, runtime, context) =>
       runtime.commit(() => ({ status: "terminal", outcome: { status: "aborted" } }), context),
   });
-  return { name: spec.name, every: spec.every, task };
+  return { name: spec.name, every: spec.every, spends: spec.spends !== false, task };
 }
 
 /** Creates one routine task, owned by the root conversation in the background. */

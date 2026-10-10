@@ -71,6 +71,8 @@ export class CellAlarm {
   private readonly settleLimitMs: number;
   private chain: Promise<void> = Promise.resolve();
   private settling: Promise<void> | undefined;
+  /** A settle was asked for while one ran: that one looks once more before it ends. */
+  private lookAgain = false;
 
   constructor(
     private readonly storage: CelldAlarmStorage,
@@ -138,9 +140,11 @@ export class CellAlarm {
 
   /**
    * Resolves once no live task lacks a timer and no timer is due, re-arming on every look; at
-   * most `settleLimitMs`. One settle runs at a time; a second call joins it.
+   * most `settleLimitMs`. One settle runs at a time; a second call joins it, and the running one
+   * then looks once more before it ends, so work started after its last look is not missed.
    */
   settle(source: WakeSource): Promise<void> {
+    if (this.settling !== undefined) this.lookAgain = true;
     if (this.settling === undefined) {
       this.settling = this.settleNow(source).finally(() => {
         this.settling = undefined;
@@ -153,13 +157,24 @@ export class CellAlarm {
     return this.settling !== undefined;
   }
 
+  /** Asks a running settle to look once more before it ends (see `settle`). */
+  again(): void {
+    if (this.settling !== undefined) this.lookAgain = true;
+  }
+
   private async settleNow(source: WakeSource): Promise<void> {
     const deadline = Date.now() + this.settleLimitMs;
     for (;;) {
       const { summary } = await source.wakes();
       await this.rearm(source);
       const due = summary.wakes.some((wake) => wake.at <= this.now());
-      if ((summary.liveUntimed === 0 && !due) || Date.now() >= deadline) return;
+      if (Date.now() >= deadline) return;
+      if (summary.liveUntimed === 0 && !due) {
+        if (!this.lookAgain) return;
+        this.lookAgain = false;
+        continue;
+      }
+      this.lookAgain = false;
       await new Promise((resolve) => setTimeout(resolve, this.pollMs));
     }
   }

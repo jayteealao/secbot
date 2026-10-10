@@ -1,13 +1,16 @@
-// Person-cell deployment (owner, second person, household). Never binds the conformance cell or
-// the durability lab. The vars are names only: secbot-release fills them on the VPS from the
-// runtime settings file at deploy time, so no key, token, device hash, ping URL, or host name is
-// ever in the repo. SECBOT_HEARTBEAT_URLS and SECBOT_TIME_ZONE are optional and may stay empty.
+// Person-cell deployment (owner, second person, household, secrets). Never binds the conformance
+// cell or the durability lab. The vars are names only: secbot-release fills them on the VPS from
+// the runtime settings file at deploy time, so no key, token, device hash, ping URL, or host name
+// is ever in the repo. SECBOT_HEARTBEAT_URLS and SECBOT_TIME_ZONE are optional and may stay empty.
 // js_rpc: the person cells call the household cell's methods on its stub (celld v0.6.1
 // docs/cloudflare-compat.md "Compatibility flags").
 // SNAPSHOTS: cell snapshots, served from the fleet bucket under r2/secbot-snapshots/ (celld v0.6.1
 // docs/README.md:477-481). SECBOT_OPERATOR_KEY gates the operator routes; SECBOT_FLEET_CELLS names
-// the cells this fleet serves; SECBOT_HOUSEHOLD_URL is the household fleet's private address. The
-// release tool fills them on the VPS at deploy time.
+// the cells this fleet serves; SECBOT_HOUSEHOLD_URL is the household fleet's private address;
+// SECBOT_SECRETS_URL is the secrets fleet's private address; SECBOT_KEY_HELPER_URL is the host key
+// helper's loopback address, set only in the fleet that serves the secrets cell (the master keys
+// stay in the helper's key files on the host, never in this config). The release tool fills them
+// on the VPS at deploy time.
 {
   "name": "secbot",
   "main": "index.js",
@@ -16,12 +19,14 @@
   "durable_objects": {
     "bindings": [
       { "name": "PERSON_CELL", "class_name": "PersonCell" },
-      { "name": "HOUSEHOLD_CELL", "class_name": "HouseholdCell" }
+      { "name": "HOUSEHOLD_CELL", "class_name": "HouseholdCell" },
+      { "name": "SECRETS_CELL", "class_name": "SecretsCell" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["PersonCell"] },
-    { "tag": "v2", "new_sqlite_classes": ["HouseholdCell"] }
+    { "tag": "v2", "new_sqlite_classes": ["HouseholdCell"] },
+    { "tag": "v3", "new_sqlite_classes": ["SecretsCell"] }
   ],
   "r2_buckets": [{ "binding": "SNAPSHOTS", "bucket_name": "secbot-snapshots" }],
   "vars": {
@@ -34,6 +39,8 @@
     "SECBOT_TIME_ZONE": "",
     "SECBOT_OPERATOR_KEY": "",
     "SECBOT_FLEET_CELLS": "",
-    "SECBOT_HOUSEHOLD_URL": ""
+    "SECBOT_HOUSEHOLD_URL": "",
+    "SECBOT_SECRETS_URL": "",
+    "SECBOT_KEY_HELPER_URL": ""
   }
 }

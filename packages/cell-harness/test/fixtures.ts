@@ -4,6 +4,9 @@
  * credit-pause decorator the gateway uses. No network, no key. Also an in-process household cell
  * (the real change log on the stand-in) for the household tools.
  */
+
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Usage } from "@earendil-works/pi-ai";
 import {
   type AssistantMessage,
   createModels,
@@ -15,11 +18,15 @@ import {
   type Message,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
+import { UsageDoc } from "@earendil-works/pi-durable";
 import { CelldSqliteDatabase } from "../../cell-storage/src/index.ts";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
+import { BudgetBoardStore } from "../../household-cell/src/budget-board.ts";
 import { ChangeLog } from "../../household-cell/src/change-log.ts";
 import { withCreditPause } from "../src/credit-pause.ts";
+import type { DecisionModels } from "../src/decision-model.ts";
 import type { HouseholdChange, HouseholdClient } from "../src/household-tools.ts";
+import { addGuardUsage, costOnlyUsage, ledgerConversations } from "../src/month-ledger.ts";
 import {
   type CellEnv,
   type CellHarness,
@@ -27,6 +34,7 @@ import {
   openCellHarness,
 } from "../src/open-harness.ts";
 import { DEFAULT_LEAD_MODEL, DEFAULT_SPECIALIST_MODEL } from "../src/release-defaults.ts";
+import { REVIEWER_FIRST_LINE } from "../src/reviewer.ts";
 
 export { FakeCelldStorage, fauxAssistantMessage, fauxText, fauxToolCall };
 
@@ -114,6 +122,48 @@ export function createFauxGateway(
   return gateway;
 }
 
+/**
+ * A decision model that passes every call with score 0 (model id "stand-in", no cost), so suites
+ * that are not about the model layers keep their faux request counts. openTestCell uses it unless
+ * a test gives its own (for example the Decisions API against the stub server).
+ */
+export const passingDecision: DecisionModels = (adapter) => ({
+  adapter,
+  ask: async () => ({
+    outcome: "pass",
+    choice: "routine",
+    score: 0,
+    model: "stand-in",
+    costUsd: 0,
+    durationMs: 0,
+  }),
+});
+
+/** True for a request from the guard's reviewer (its system prompt starts with the first line). */
+export const isReviewerRequest = (request: FauxRequest): boolean =>
+  request.system.includes(REVIEWER_FIRST_LINE);
+
+/**
+ * Answers reviewer requests with scripted text (each call to `verdicts` gives the next answer, for
+ * example `{"verdict": "block", "reason": "…"}`), and every other request with `others`.
+ */
+export function reviewerResponder(
+  verdicts: (
+    request: FauxRequest,
+  ) => string | AssistantMessage | Promise<string | AssistantMessage>,
+  others: Responder = defaultResponder,
+): Responder {
+  return async (request) => {
+    if (!isReviewerRequest(request)) return others(request);
+    const answer = await verdicts(request);
+    return typeof answer === "string" ? fauxAssistantMessage([fauxText(answer)]) : answer;
+  };
+}
+
+/** A reviewer verdict as the reviewer writes it. */
+export const verdictJson = (verdict: "allow" | "block" | "ask", reason: string) =>
+  JSON.stringify({ verdict, reason });
+
 export interface TestCell {
   readonly storage: FakeCelldStorage;
   readonly gateway: FauxGateway;
@@ -133,6 +183,8 @@ export async function openTestCell(
     readonly onWakeChange?: () => void;
     readonly routines?: OpenCellOptions["routines"];
     readonly storage?: FakeCelldStorage;
+    readonly extensions?: OpenCellOptions["extensions"];
+    readonly guard?: OpenCellOptions["guard"];
   } = {},
 ): Promise<TestCell> {
   const storage = options.storage ?? new FakeCelldStorage();
@@ -148,6 +200,8 @@ export async function openTestCell(
       ...(options.household === undefined ? {} : { household: options.household }),
       ...(options.onWakeChange === undefined ? {} : { onWakeChange: options.onWakeChange }),
       ...(options.routines === undefined ? {} : { routines: options.routines }),
+      ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
+      guard: { decision: passingDecision, ...options.guard },
     });
   const test: TestCell = {
     storage,
@@ -175,20 +229,56 @@ export async function until(check: () => boolean | Promise<boolean>, ms = 10_000
 export interface HouseholdStub extends HouseholdClient {
   readonly log: ChangeLog;
   readonly changes: HouseholdChange[];
+  /** The household budget board on the same stand-in database. */
+  readonly board: BudgetBoardStore;
 }
 
-export function createHouseholdStub(): HouseholdStub {
-  const log = new ChangeLog(new CelldSqliteDatabase(new FakeCelldStorage()));
+export function createHouseholdStub(now: () => number = Date.now): HouseholdStub {
+  const database = new CelldSqliteDatabase(new FakeCelldStorage());
+  const log = new ChangeLog(database);
+  const board = new BudgetBoardStore(database, now);
   const changes: HouseholdChange[] = [];
   return {
     log,
     changes,
+    board,
     read: (document) => log.read(document),
     apply: (change) => {
       changes.push(change);
       return log.apply(change);
     },
+    budget: () => board.board(),
+    reportSpend: (report) => board.reportSpend(report),
+    setBudget: (change) => board.setBudget(change),
+    alertSent: (outcome) => board.alertSent(outcome),
   };
+}
+
+/**
+ * Adds `usd` of spend to a role's conversation ledger in one commit, as a model response (layer
+ * `agent`) or a guard call (`decision`, `reviewer`) would; the limit watch sees it like any other.
+ */
+export async function addSpend(
+  cell: CellHarness,
+  usd: number,
+  options: { readonly role?: string; readonly layer?: "agent" | "decision" | "reviewer" } = {},
+): Promise<void> {
+  const role = options.role ?? "lead";
+  const conversation = (await ledgerConversations(cell.harness, BACKGROUND_CONTEXT)).find(
+    (each) => each.role === role,
+  );
+  if (conversation === undefined) throw new Error(`no conversation for ${role}`);
+  const layer = options.layer ?? "agent";
+  await cell.harness.commit(async (tx) => {
+    if (layer !== "agent") {
+      await addGuardUsage(tx, conversation.id, layer, costOnlyUsage(usd));
+      return;
+    }
+    const models = (await tx.doc(UsageDoc, conversation.id)).models as Record<string, Usage>;
+    const known = models["test/spend"];
+    if (known === undefined) models["test/spend"] = costOnlyUsage(usd);
+    else known.cost.total += usd;
+  }, BACKGROUND_CONTEXT);
 }
 
 /** Every JSON log line written through console.log while `spy` was active. */

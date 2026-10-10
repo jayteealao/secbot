@@ -1,0 +1,6 @@
+# Fake keys and tokens in test fixtures, from the commit that added them before they were
+# marked with gitleaks:allow. Each line is a gitleaks fingerprint (commit:file:rule:line).
+2c64f55cb1f6e94c22582f6498ad48761ee1c199:packages/cell-harness/test/guard.test.ts:generic-api-key:322
+2c64f55cb1f6e94c22582f6498ad48761ee1c199:packages/cli/test/fake-cell.ts:generic-api-key:98
+2c64f55cb1f6e94c22582f6498ad48761ee1c199:packages/cell-worker/test/guard-setup.ts:generic-api-key:22
+2c64f55cb1f6e94c22582f6498ad48761ee1c199:packages/cell-worker/test/guard-cli.test.ts:generic-api-key:203

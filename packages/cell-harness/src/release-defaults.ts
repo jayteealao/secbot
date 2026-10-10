@@ -46,3 +46,154 @@ export const STARTER_SPECIALISTS: readonly StarterSpecialist[] = [
 /** The lead's standing instructions. Routing is the lead's own decision, through the handoff tool. */
 export const LEAD_INSTRUCTIONS =
   "You are the lead agent of one person's personal assistant. Answer the person directly when you can. When a request fits one of your specialists, brief that specialist with the handoff tool: write a self-contained brief in your own words. The specialist's answer comes back to you later as a message that starts with [handoff <name> answered]; relay what matters to the person. You can search your own earlier conversation with search_history.";
+
+/**
+ * A card number: 13 to 19 digits, with at most one space or dash (ASCII or Unicode) between two
+ * digits, on word edges. A phone number (10 or 11 digits), a time, or a date does not match.
+ */
+export const CARD_NUMBER_PATTERN = String.raw`\b\d(?:[ \-\u2010-\u2015]?\d){12,18}\b`;
+
+/**
+ * A secret word as a whole word: password, passcode, pin, token, or api key (with a space, a
+ * hyphen, an underscore, or nothing between "api" and "key"). "spinach" and "tokens" do not match.
+ */
+export const SECRET_WORD_PATTERN = String.raw`\b(?:password|passcode|pin|token|api[ _\-]?key)\b`;
+
+/**
+ * The release owner rules: agents never pay; a card number in a reminder and a secret word in a
+ * history search ask first. They cannot be removed; the owner can only add stricter rules. Every
+ * cell gains a release rule it does not hold yet on its next open (`topUpOwnerRules`). The pay
+ * group is every tool named `pay_…`; a rule's value is matched after `normalizeText`, so case and
+ * full-width digits do not matter.
+ */
+export const RELEASE_OWNER_RULES = [
+  { agent: "all", tool: "pay", verdict: "prohibit" },
+  {
+    agent: "all",
+    tool: "set_reminder",
+    match: { kind: "regex", field: "text", value: CARD_NUMBER_PATTERN },
+    verdict: "ask-first",
+  },
+  {
+    agent: "all",
+    tool: "search_history",
+    match: { kind: "regex", field: "query", value: SECRET_WORD_PATTERN },
+    verdict: "ask-first",
+  },
+] as const;
+
+/**
+ * The reviewer's role name in the role-to-model map. The reviewer is a model call inside the guard,
+ * not a conversation; it reviews only the calls the decision model marks or cannot judge.
+ */
+export const REVIEWER_ROLE = "reviewer";
+
+/** The reviewer's default model. */
+export const DEFAULT_REVIEWER_MODEL = "anthropic/claude-sonnet-5.5";
+
+/** The decision models the owner can switch between, by adapter name (OpenRouter catalogue ids). */
+export const DECISION_MODELS = {
+  clef: "cloudflare/clef",
+  "clef-flash": "cloudflare/clef-flash",
+  jev: "typesafe/jev-1.13",
+} as const;
+
+export type DecisionAdapter = keyof typeof DECISION_MODELS;
+
+/** Every cell starts on Jev; the owner can switch a cell to Clef or Clef Flash. */
+export const DEFAULT_DECISION_ADAPTER: DecisionAdapter = "jev";
+
+/**
+ * OpenRouter's Decisions API path (alpha), on the gateway origin. Kept in one place: the shape
+ * probe found it working; the built-in System One route is `/api/v1/systemone`.
+ */
+export const DECISIONS_PATH = "/api/alpha/decisions";
+
+/**
+ * The mark score (the probability of "risky" plus "unclear") at or above which a call goes to the
+ * reviewer, per tool. Reads are less risky, so they need a higher score. Starting values: the
+ * shadow week calibrates them before any cell enforces.
+ */
+export const MARK_THRESHOLDS: Readonly<Record<string, number>> = {
+  handoff: 0.5,
+  household_change: 0.5,
+  household_read: 0.7,
+  // Lowered from 0.5 and 0.7 after Jev scored a card-number reminder 0.15-0.23 and a password
+  // search 0.49-0.56 live; the owner rules above hold those patterns whatever the score.
+  set_reminder: 0.1,
+  search_history: 0.3,
+};
+
+/** The threshold of a tool not listed above. */
+export const DEFAULT_MARK_THRESHOLD = 0.5;
+
+/**
+ * A decision model slower than this goes to the reviewer. The latency budget (rules plus the
+ * decision model, 800 ms at p95) is judged by the guard bench, not by this timeout.
+ */
+export const DECISION_TIMEOUT_MS = 1_500;
+
+/** A reviewer slower than this holds the call for the person ("reviewer unavailable"). */
+export const REVIEWER_TIMEOUT_MS = 30_000;
+
+/** The largest decision-model state, in UTF-8 bytes. */
+export const DECISION_STATE_LIMIT = 4_096;
+
+/**
+ * The reviewer's outbound account-data check: the check point exists, and it starts with the first
+ * outside tool (a later release). Until then the reviewer is told the check is not active.
+ */
+export const OUTBOUND_CHECK_ACTIVE = false;
+
+/** How long a held call waits for an answer before it lapses as a refusal: 24 hours. */
+export const HOLD_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The argument an "allow always" rule matches when the holding rule matched none: the field that
+ * names what the call acts on. A tool not listed gets a rule with no argument match.
+ */
+export const ALWAYS_KEY_FIELD: Readonly<Record<string, string>> = {
+  handoff: "specialist",
+  household_change: "document",
+  household_read: "document",
+  set_reminder: "text",
+  search_history: "query",
+};
+
+/**
+ * A new person's own rules: permit the four tools agents have today (hand-off, household list
+ * edits, reminders, history search). Reading the household list matches no rule and passes.
+ */
+export const DEFAULT_PERSON_RULES = [
+  { agent: "all", tool: "handoff", verdict: "permit" },
+  { agent: "all", tool: "household_change", verdict: "permit" },
+  { agent: "all", tool: "set_reminder", verdict: "permit" },
+  { agent: "all", tool: "search_history", verdict: "permit" },
+] as const;
+
+/** A new person's monthly spending limit, in USD. The owner changes it per person. */
+export const DEFAULT_PERSON_LIMIT_USD = 25;
+
+/** The household's developer budget, in USD a month: developer jobs draw on it, not on a person. */
+export const DEFAULT_DEVELOPER_BUDGET_USD = 50;
+
+/** The specialist whose model and guard costs count against the developer budget. */
+export const DEVELOPER_ROLE = "developer";
+
+/** The largest monthly limit or budget the owner can set, in USD. */
+export const LIMIT_MAX_USD = 10_000;
+
+/** The two lines of a limit, in percent: a notice and an owner alert at each. */
+export const LIMIT_LINES = [80, 100] as const;
+
+/**
+ * The tool keys under which the guard adds its own model usage to the calling conversation's
+ * `pi.usage`. A colon cannot appear in a model tool name, so these never mix with a real tool.
+ */
+export const GUARD_USAGE_KEYS = {
+  decision: "secbot-guard:decision",
+  reviewer: "secbot-guard:reviewer",
+} as const;
+
+/** A person cell reports its month to the household budget board at most this often. */
+export const SPEND_REPORT_MIN_MS = 5_000;

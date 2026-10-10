@@ -3,7 +3,32 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { RefusedChange } from "../src/cell-parts.ts";
-import { ALTERNATE_MODEL, openTestCell, type TestCell } from "./fixtures.ts";
+import type { DecisionModels } from "../src/decision-model.ts";
+import {
+  ALTERNATE_MODEL,
+  createFauxGateway,
+  fauxAssistantMessage,
+  fauxText,
+  fauxToolCall,
+  isReviewerRequest,
+  openTestCell,
+  reviewerResponder,
+  type TestCell,
+  verdictJson,
+} from "./fixtures.ts";
+
+/** A decision model that marks every call for the reviewer. */
+const markingDecision: DecisionModels = (adapter) => ({
+  adapter,
+  ask: async () => ({
+    outcome: "mark",
+    choice: "risky",
+    score: 0.9,
+    model: "stand-in",
+    costUsd: 0,
+    durationMs: 0,
+  }),
+});
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -25,9 +50,55 @@ describe("role-to-model map", () => {
       model: "anthropic/claude-opus-5.5",
       source: "release default",
     });
-    expect(map.slice(1).map((entry) => entry.model)).toEqual(
+    expect(map.slice(1, 5).map((entry) => entry.model)).toEqual(
       Array(4).fill("anthropic/claude-haiku-4.5"),
     );
+    // The guard's reviewer comes last, with its own default.
+    expect(map.at(-1)).toEqual({
+      role: "reviewer",
+      model: "anthropic/claude-sonnet-5.5",
+      source: "release default",
+    });
+  });
+
+  it("changes the reviewer's model; the next review uses it, and an unknown id is refused", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const gateway = createFauxGateway(
+      reviewerResponder(
+        () => verdictJson("allow", "an ordinary search"),
+        (request) =>
+          request.role === "lead" && request.last?.role !== "toolResult"
+            ? fauxAssistantMessage([fauxToolCall("search_history", { query: "kale" })], {
+                stopReason: "toolUse",
+              })
+            : fauxAssistantMessage([fauxText("done")]),
+      ),
+    );
+    test = await openTestCell({ gateway, guard: { decision: markingDecision } });
+    const t = test;
+    await t.cell.setRoleModel("reviewer", "anthropic/claude-haiku-4.5");
+    expect((await t.cell.listRoleModels()).at(-1)).toEqual({
+      role: "reviewer",
+      model: "anthropic/claude-haiku-4.5",
+      source: "changed",
+    });
+    await (await t.cell.submit("search", "r1")).wait(BACKGROUND_CONTEXT);
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    const reviews = t.gateway.requests.filter(isReviewerRequest);
+    expect(reviews.map((request) => request.modelId)).toEqual(["anthropic/claude-haiku-4.5"]);
+    await expect(t.cell.setRoleModel("reviewer", "openai/not-a-model")).rejects.toThrow(
+      RefusedChange,
+    );
+    expect((await t.cell.listRoleModels()).at(-1)?.model).toBe("anthropic/claude-haiku-4.5");
+  });
+
+  it("refuses a specialist named reviewer", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    await expect(
+      test.cell.addSpecialist({ name: "reviewer", instruction: "Review things." }),
+    ).rejects.toThrow(/the reviewer is the guard's role/);
   });
 
   it("uses a changed model on the lead's next turn, and keeps it across a restart", async () => {

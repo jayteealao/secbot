@@ -14,8 +14,8 @@ import {
 import type { CellDump } from "@secbot/cell-storage";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { OPERATOR_HEADER } from "../src/household-client.ts";
 import { route, type WorkerEnv } from "../src/index.ts";
+import { OPERATOR_HEADER } from "../src/internal-rpc.ts";
 import type { SnapshotBucket } from "../src/ops.ts";
 import { PERSON_HEADER, PersonCell } from "../src/person-cell.ts";
 
@@ -222,6 +222,9 @@ describe("operator routes", () => {
     expect(missing.status).toBe(404);
     expect((await body(missing)).error).toBe("snapshot s9 not found for cell owner");
     expect((await call(s, "POST", "/ops/restore?id=s1&cell=secrets")).status).toBe(403);
+    // Naming the secrets cell in a snapshot is a bad request; a cell another fleet serves is 404.
+    expect((await call(s, "POST", "/ops/snapshot?id=s3&cells=secrets")).status).toBe(400);
+    expect((await call(s, "GET", "/ops/digest?cells=secrets")).status).toBe(400);
     expect((await call(s, "POST", "/ops/snapshot?id=bad%20id")).status).toBe(400);
   });
 

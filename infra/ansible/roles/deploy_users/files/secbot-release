@@ -11,16 +11,21 @@
 #   health        --env E [--cells C]              print the cell health (version, and each named cell)
 #   alarms        --env E [--cells C]              print each cell's stored alarm against its earliest timer
 #   heartbeats    [--env E] [--cells C]            each cell's last heartbeat and its fleet's deploy time
+#                                                  (the secrets cell keeps no heartbeat here)
 #   snapshot      --env E --snapshot-id ID         every cell of the environment to its fleet bucket
+#                                                  (never the secrets cell: printed as skipped)
 #   restore       --env E --cells CELL --snapshot ID  load one cell from its snapshot (never secrets)
-#   digest        --env E [--cells C]              each cell's database digest
+#   digest        --env E [--cells C]              each cell's database digest (never secrets)
 #   drill         [--snapshot ID] [--cells C]      copy a production snapshot into the test cell, restore it
 #   ledger-record --kind K [--version V] [--cells C] [--snapshot-id ID] [--run-id R --run-attempt A]
 #   ledger-read                                    print the deploy ledger (JSON lines)
 #   lease         acquire|release --holder H [--seconds N]  hold the VPS lock across several commands
 #   state         --env E|all                      celld's /state of each fleet (memory, isolates)
 #   write-delay   --env test-cell --writes N       time N single-row committed writes (ms each)
-#   lab           --env test-cell --route R [--at T]  call the test cell's durability lab
+#   lab           --env test-cell --route R [--at T] [--calls N | --examples [--repeat R]]
+#                 [--adapter A]                    call the test cell's durability lab, or its guard
+#                                                  bench (routes guard-bench and guard-bench-state);
+#                                                  --examples runs the decision-model examples
 #   crash         --env test-cell                  SIGKILL celld@test, wait until it answers again
 #   down          --env test-cell --seconds N      stop celld@test for N seconds, start it, wait for it
 #   tool-sha                                       this tool's SHA-256, so a client sees a stale copy
@@ -28,9 +33,11 @@
 # Fleets: celld runs one application per fleet (celld v0.6.1 README, "A fleet runs one
 # application"), so each rollout stage is its own fleet. The test cell is one fleet (celld@test)
 # that serves every cell. Production is celld@prod-owner (the owner cell) and celld@prod-shared
-# (the second person's cell and the household cell); both share the production bucket by key
-# prefix. Cell names follow the release workflows: `person` is the second person's cell; the
-# secrets cell is skipped with a printed line until it exists.
+# (the second person's cell, the household cell, and the secrets cell); both share the production
+# bucket by key prefix. Cell names follow the release workflows: `person` is the second person's
+# cell. The secrets cell's master keys stay with the host key helper (secbot-key-helper@<env>):
+# this tool never reads a key file; it fills only the helper's loopback address into the fleet
+# that serves the secrets cell.
 #
 # crash and down use exactly three sudo commands for celld@test (sudoers drop-in from host setup);
 # nothing here can stop, kill, or start a production unit.
@@ -78,7 +85,8 @@ action=""
 i=1
 if [ "$command" = "lease" ]; then action="${argv[1]:-}"; i=2; fi
 version="" sha256="" env="" long_transaction=0 cells="" lab_route="" at="" seconds=""
-snapshot_id="" kind="" run_id="" run_attempt="" holder="" writes=""
+snapshot_id="" kind="" run_id="" run_attempt="" holder="" writes="" calls="" adapter=""
+examples=0 repeat=""
 while [ "$i" -lt "${#argv[@]}" ]; do
   flag="${argv[$i]}"
   value="${argv[$((i + 1))]:-}"
@@ -97,6 +105,10 @@ while [ "$i" -lt "${#argv[@]}" ]; do
     --run-attempt) run_attempt="$value"; i=$((i + 2)) ;;
     --holder) holder="$value"; i=$((i + 2)) ;;
     --writes) writes="$value"; i=$((i + 2)) ;;
+    --calls) calls="$value"; i=$((i + 2)) ;;
+    --adapter) adapter="$value"; i=$((i + 2)) ;;
+    --examples) examples=1; i=$((i + 1)) ;;
+    --repeat) repeat="$value"; i=$((i + 2)) ;;
     *) die "unknown argument '$flag'" ;;
   esac
 done
@@ -105,7 +117,7 @@ done
 [ -z "$sha256" ] || [[ "$sha256" =~ ^[0-9a-f]{64}$ ]] || die "bad sha256"
 [ -z "$env" ] || [ "$env" = "all" ] || [[ " $allowed_envs " == *" $env "* ]] || die "$caller may not use environment '$env'"
 [ -z "$cells" ] || [[ "$cells" =~ ^[a-z][a-z0-9,-]*$ ]] || die "bad cells '$cells'"
-[ -z "$lab_route" ] || [[ "$lab_route" =~ ^(arm|state|alarm-report|household-roundtrip|rearm|alarm|load|load-state)$ ]] || die "bad lab route '$lab_route'"
+[ -z "$lab_route" ] || [[ "$lab_route" =~ ^(arm|state|alarm-report|household-roundtrip|rearm|alarm|load|load-state|guard-bench|guard-bench-state)$ ]] || die "bad lab route '$lab_route'"
 [ -z "$at" ] || [[ "$at" =~ ^([0-9]{13}|none)$ ]] || die "bad --at '$at'"
 [ -z "$seconds" ] || [[ "$seconds" =~ ^[0-9]{1,5}$ ]] || die "bad --seconds '$seconds'"
 [ -z "$snapshot_id" ] || [[ "$snapshot_id" =~ ^[A-Za-z0-9._-]{1,100}$ ]] || die "bad snapshot id '$snapshot_id'"
@@ -114,6 +126,12 @@ done
 [ -z "$run_attempt" ] || [[ "$run_attempt" =~ ^[0-9]{1,4}$ ]] || die "bad run attempt"
 [ -z "$holder" ] || [[ "$holder" =~ ^[A-Za-z0-9._:-]{1,80}$ ]] || die "bad holder '$holder'"
 [ -z "$writes" ] || [[ "$writes" =~ ^[0-9]{1,4}$ ]] || die "bad --writes '$writes'"
+[ -z "$calls" ] || [[ "$calls" =~ ^[0-9]{1,3}$ ]] || die "bad --calls '$calls'"
+[ -z "$adapter" ] || [[ "$adapter" =~ ^(clef|clef-flash|jev)$ ]] || die "bad --adapter '$adapter'"
+[ -z "$repeat" ] || [[ "$repeat" =~ ^[1-3]$ ]] || die "bad --repeat '$repeat'"
+[ -z "$repeat" ] || [ "$examples" = 1 ] || die "--repeat needs --examples"
+[ "$examples" = 0 ] || [ -z "$calls" ] || die "send --calls or --examples, not both"
+[ "$examples" = 0 ] || [ "$lab_route" = guard-bench ] || die "--examples needs --route guard-bench"
 
 # ---- fleets and cells --------------------------------------------------------------------------
 
@@ -127,9 +145,9 @@ fleets_of_env() {
 env_of_fleet() { [ "$1" = test ] && echo test-cell || echo production; }
 fleet_cells() {
   case "$1" in
-    test) echo "owner second household" ;;
+    test) echo "owner second household secrets" ;;
     prod-owner) echo "owner" ;;
-    prod-shared) echo "second household" ;;
+    prod-shared) echo "second household secrets" ;;
   esac
 }
 # The deploy directory keeps the test cell's earlier name, so its deploy history stays readable.
@@ -142,12 +160,11 @@ fleet_of_cell() {
   return 1
 }
 
-# The workflow names to the cells' own: person is the second person; secrets is skipped.
+# The workflow names to the cells' own: person is the second person.
 normalized_cells() {
   local name out=""
   for name in ${1//,/ }; do
     case "$name" in
-      secrets) echo "cell secrets skipped: it arrives with the secrets cell" >&2; continue ;;
       person) name=second ;;
     esac
     [[ " $out " == *" $name "* ]] || out="$out $name"
@@ -181,6 +198,16 @@ cells_in_fleet() {
   fi
   out="${out# }"
   echo "${out// /,}"
+}
+
+# cells_in_fleet without the secrets cell, for the routes that never take it (heartbeats, digest).
+data_cells_in_fleet() {
+  local list
+  list="$(cells_in_fleet "$1" "$2")"
+  list=",$list,"
+  list="${list//,secrets,/,}"
+  list="${list#,}"
+  echo "${list%,}"
 }
 
 # ---- the VPS lock and the lease ----------------------------------------------------------------
@@ -299,10 +326,18 @@ render_app() {
   local key_file
   key_file="$(operator_key_file "$target_env")"
   [ -r "$key_file" ] || die "the operator key for $target_env is missing ($key_file); run host setup"
-  local fleet_cells_value="" household_url=""
+  local fleet_cells_value="" household_url="" secrets_url="" serves_secrets=""
   # The test cell's single fleet serves every cell: SECBOT_FLEET_CELLS stays empty there.
   [ "$fleet" = test ] || fleet_cells_value="$(cells_in_fleet "$fleet" "")"
   household_url="http://$(listen_of "$(fleet_of_cell "$target_env" household)")"
+  secrets_url="http://$(listen_of "$(fleet_of_cell "$target_env" secrets)")"
+  # The key helper's loopback address goes only to the fleet that serves the secrets cell.
+  [[ " $(fleet_cells "$fleet") " == *" secrets "* ]] && serves_secrets=1
+  # Without its key helper the secrets cell refuses to start and every cell check after the
+  # deploy fails; stop here instead, with the step that fixes it.
+  if [ -n "$serves_secrets" ] && ! /usr/bin/systemctl is-active --quiet "secbot-key-helper@$target_env"; then
+    die "the secrets cell's key helper (secbot-key-helper@$target_env) is not running; run host setup (mise run host:setup) before this release"
+  fi
   local copy
   copy="$(mktemp -d)"
   cp -a "$app/." "$copy/"
@@ -337,6 +372,8 @@ render_app() {
     fill SECBOT_OPERATOR_KEY optional "$(cat "$key_file")" || exit 1
     fill SECBOT_FLEET_CELLS optional "$fleet_cells_value" || exit 1
     fill SECBOT_HOUSEHOLD_URL optional "$household_url" || exit 1
+    fill SECBOT_SECRETS_URL optional "$secrets_url" || exit 1
+    fill SECBOT_KEY_HELPER_URL optional "${serves_secrets:+${SECBOT_KEY_HELPER_URL:-}}" || exit 1
   ); then
     rm -rf "$copy"
     exit 1
@@ -601,7 +638,7 @@ do_heartbeats() {
   local fleet list deployed
   {
     for fleet in $(fleets_for "$env" "$cells"); do
-      list="$(cells_in_fleet "$fleet" "$cells")"
+      list="$(data_cells_in_fleet "$fleet" "$cells")"
       [ -n "$list" ] || continue
       deployed="$(stat -c %Y "$(fleet_dir "$fleet")/current" 2>/dev/null || echo 0)"
       ops_call "$fleet" GET "/ops/heartbeats?cells=$list" |
@@ -614,6 +651,8 @@ do_snapshot() {
   if ! { [ -n "$env" ] && [ -n "$snapshot_id" ]; }; then die "snapshot needs --env and --snapshot-id"; fi
   with_lock
   local fleet first=1 answer contract=""
+  # The secrets cell is never snapshotted: its records are rebuilt and their credentials rotated.
+  echo "cell secrets skipped: the secrets cell is never snapshotted" >&2
   printf '{"id":"%s","snapshots":[' "$snapshot_id"
   for fleet in $(fleets_of_env "$env"); do
     answer="$(ops_call "$fleet" POST "/ops/snapshot?id=$snapshot_id")" || die "snapshot of $fleet failed"
@@ -642,7 +681,7 @@ do_digest() {
   [ -n "$env" ] || die "digest needs --env"
   local fleet list
   for fleet in $(fleets_for "$env" "$cells"); do
-    list="$(cells_in_fleet "$fleet" "$cells")"
+    list="$(data_cells_in_fleet "$fleet" "$cells")"
     [ -n "$list" ] || continue
     ops_call "$fleet" GET "/ops/digest?cells=$list"
   done | merge_cells
@@ -765,13 +804,30 @@ do_lab() {
   case "$lab_route" in
     state | alarm-report) method=GET ;;
     load-state) method=GET path=/lab/load ;;
+    # The guard bench: the cell measures in the background; the client polls guard-bench-state.
+    guard-bench)
+      if [ "$examples" = 1 ]; then
+        path="/lab/guard-bench?examples=1&repeat=${repeat:-2}${adapter:+&adapter=$adapter}"
+      else
+        path="/lab/guard-bench?calls=${calls:-100}${adapter:+&adapter=$adapter}"
+      fi
+      ;;
+    guard-bench-state) method=GET ;;
     alarm)
       [ -n "$at" ] || die "lab --route alarm needs --at <epoch ms>|none"
       path="/lab/alarm?set=$at"
       ;;
   esac
-  curl -sS --fail --max-time 120 -X "$method" "http://$(listen_of test)$path"
+  # The guard bench starts paid model calls, so the worker asks for the operator key there.
+  local header=""
+  case "$lab_route" in
+    guard-bench | guard-bench-state) header="$(operator_header "$(env_of_fleet test)")" ;;
+  esac
+  local status=0
+  curl -sS --fail --max-time 120 -X "$method" ${header:+-H "@$header"} "http://$(listen_of test)$path" || status=$?
+  [ -z "$header" ] || rm -f "$header"
   echo
+  return "$status"
 }
 
 do_crash() {
