@@ -158,6 +158,58 @@ describe("grants and the allowlist", () => {
     ]);
   });
 
+  it("replaces a secret of another kind and revokes its grants in one transaction", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const storage = new FakeCelldStorage();
+    const cell = new SecretsCell({ storage }, {}, { custody: testCustody(), version: "v0.0.0-test" });
+    cells.push(cell);
+    const broker = {
+      kind: "health" as const,
+      url: "https://health.example.test/api",
+      header: "authorization",
+    };
+    await cell.add({ person: "owner", name: "health-test", value: TOKEN, broker });
+    await cell.allowlist({
+      person: "owner",
+      secret: "health-test",
+      agent: "health",
+      action: "add",
+    });
+    await cell.grant({ person: "owner", secret: "health-test", agent: "health" });
+    const kindAndGrants = async () => {
+      const listed = await cell.list({ person: "owner" });
+      const entry = listed.ok ? listed.value.find((each) => each.name === "health-test") : undefined;
+      return [entry?.kind, entry?.grants];
+    };
+    // The process fails after the row is written and before the grants are deleted.
+    const exec = storage.sql.exec;
+    let failed = false;
+    storage.sql.exec = (query, ...bindings) => {
+      if (!failed && query === "DELETE FROM grants WHERE person = ? AND secret = ?") {
+        failed = true;
+        throw new Error("induced failure between the two writes");
+      }
+      return exec(query, ...bindings);
+    };
+    const first = await cell.add({ person: "owner", name: "health-test", value: TOKEN });
+    expect(failed).toBe(true);
+    expect(first.ok).toBe(false);
+    // Neither write is visible: still a broker secret, still granted.
+    expect(await kindAndGrants()).toEqual(["health", ["health"]]);
+    // A retry sees the kind change and performs both.
+    expect(await cell.add({ person: "owner", name: "health-test", value: TOKEN })).toMatchObject({
+      ok: true,
+    });
+    expect(await kindAndGrants()).toEqual(["secret", []]);
+    expect(await cell.get({ person: "owner", agent: "health", name: "health-test" })).toEqual({
+      ok: false,
+      status: 400,
+      error: "health-test is not granted to health",
+    });
+  });
+
   it("logs a name that fails its check only by its length", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});

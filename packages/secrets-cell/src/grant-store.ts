@@ -208,32 +208,43 @@ export class SecretStore {
     }
     await this.init();
     const sealed = await seal(input.person, input.name, input.value, this.custody);
-    const before = await this.row(input.person, input.name);
-    const replaced = before !== undefined;
-    // A secret that changes between plain and broker loses its grants: an agent granted a broker
-    // secret must never read its token because it was added again without its broker target.
-    const kindChanged = replaced && (before.broker === null) !== (broker === undefined);
-    await this.database.run(
-      `INSERT OR REPLACE INTO secrets
-        (person, name, key_id, salt, iv, wrap_iv, wrapped_key, ciphertext, broker, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      sealed.person,
-      sealed.name,
-      sealed.keyId,
-      sealed.salt,
-      sealed.iv,
-      sealed.wrapIv,
-      sealed.wrappedKey,
-      sealed.ciphertext,
-      broker === undefined ? null : JSON.stringify(broker),
-      this.now(),
-    );
-    if (kindChanged) {
-      await this.database.run(
-        "DELETE FROM grants WHERE person = ? AND secret = ?",
+    // The new row and the grant revocation commit together: a failure between them must never
+    // leave old grants on a row of the new kind, which a retry would no longer see as a change.
+    const { replaced, kindChanged } = await this.database.transaction(async (tx) => {
+      const before = await tx.get<Row>(
+        "SELECT * FROM secrets WHERE person = ? AND name = ?",
         input.person,
         input.name,
       );
+      const replaced = before !== undefined;
+      // A secret that changes between plain and broker loses its grants: an agent granted a broker
+      // secret must never read its token because it was added again without its broker target.
+      const kindChanged = replaced && (before.broker === null) !== (broker === undefined);
+      await tx.run(
+        `INSERT OR REPLACE INTO secrets
+          (person, name, key_id, salt, iv, wrap_iv, wrapped_key, ciphertext, broker, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        sealed.person,
+        sealed.name,
+        sealed.keyId,
+        sealed.salt,
+        sealed.iv,
+        sealed.wrapIv,
+        sealed.wrappedKey,
+        sealed.ciphertext,
+        broker === undefined ? null : JSON.stringify(broker),
+        this.now(),
+      );
+      if (kindChanged) {
+        await tx.run(
+          "DELETE FROM grants WHERE person = ? AND secret = ?",
+          input.person,
+          input.name,
+        );
+      }
+      return { replaced, kindChanged };
+    });
+    if (kindChanged) {
       logEvent("secrets.kind_changed", {
         cell: "secrets",
         person: input.person,
