@@ -163,7 +163,11 @@ describe("grants and the allowlist", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});
     const storage = new FakeCelldStorage();
-    const cell = new SecretsCell({ storage }, {}, { custody: testCustody(), version: "v0.0.0-test" });
+    const cell = new SecretsCell(
+      { storage },
+      {},
+      { custody: testCustody(), version: "v0.0.0-test" },
+    );
     cells.push(cell);
     const broker = {
       kind: "health" as const,
@@ -180,7 +184,9 @@ describe("grants and the allowlist", () => {
     await cell.grant({ person: "owner", secret: "health-test", agent: "health" });
     const kindAndGrants = async () => {
       const listed = await cell.list({ person: "owner" });
-      const entry = listed.ok ? listed.value.find((each) => each.name === "health-test") : undefined;
+      const entry = listed.ok
+        ? listed.value.find((each) => each.name === "health-test")
+        : undefined;
       return [entry?.kind, entry?.grants];
     };
     // The process fails after the row is written and before the grants are deleted.
