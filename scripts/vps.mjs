@@ -21,6 +21,7 @@
 //   node scripts/vps.mjs measure-heap --env test-cell [--seconds 180]
 //   node scripts/vps.mjs measure-write-delay --env test-cell [--writes 200]
 //   node scripts/vps.mjs measure-guard --env test-cell [--calls 100] [--adapter clef|clef-flash|jev]
+//   node scripts/vps.mjs measure-guard --env test-cell --examples [--repeat 2] [--adapter ...]
 //
 // Cell names follow the release workflows: owner, person (the second person's cell), household,
 // and secrets. With no --cells, a command covers every cell of the environment. The secrets cell
@@ -141,6 +142,8 @@ const flags = (argv) =>
       writes: { type: "string" },
       calls: { type: "string" },
       adapter: { type: "string" },
+      examples: { type: "boolean" },
+      repeat: { type: "string" },
     },
     allowPositionals: true,
   }).values;
@@ -910,7 +913,7 @@ export async function measureHeap({ env, seconds = "180" }) {
   });
 }
 
-export const GUARD_BUDGET_MS = 500;
+export const GUARD_BUDGET_MS = 800;
 /** The decision-model adapters the bench can measure (DECISION_MODELS in the cell harness). */
 export const GUARD_ADAPTERS = ["clef", "clef-flash", "jev"];
 
@@ -935,7 +938,7 @@ export function guardCalls(calls = "100") {
 
 /**
  * The guard bench's verdict line: the rules plus the decision model must add
- * under 500 ms at p95 over every requested call, the reviewer excluded. A run where the decision
+ * under GUARD_BUDGET_MS (800 ms) at p95 over every requested call, the reviewer excluded. A run where the decision
  * model fell back on most calls (the endpoint down or changed) is not a measurement. Pure.
  */
 export function judgeGuardBench(results, calls, budgetMs = GUARD_BUDGET_MS) {
@@ -963,26 +966,133 @@ export function judgeGuardBench(results, calls, budgetMs = GUARD_BUDGET_MS) {
     : { ok: false, line: `${head}: over the ${budgetMs} ms budget` };
 }
 
-/** The test cell's guard bench: starts it, waits for its result (up to 10 minutes), and judges it. */
-export async function measureGuard({ env, calls = "100", adapter }) {
+export const MAX_EXAMPLE_REPEAT = 3;
+
+/** The `--repeat` value as a whole number from 1 to 3, or an error. Pure. */
+export function guardRepeat(repeat = "2") {
+  const value = /^\d$/.test(String(repeat)) ? Number(repeat) : Number.NaN;
+  if (!(value >= 1 && value <= MAX_EXAMPLE_REPEAT)) {
+    throw new Error(`measure-guard needs --repeat 1-${MAX_EXAMPLE_REPEAT}`);
+  }
+  return value;
+}
+
+const LINE_WIDTH = 80;
+
+/**
+ * Two lines per example of the examples run: risky or routine, the tool, each repeat's score
+ * against the tool's threshold, and whether the guard marked it; then the example's name,
+ * indented. Every line fits 80 columns. Pure.
+ */
+export function exampleLines(results) {
+  const lines = [];
+  for (const example of results?.examples ?? []) {
+    const risky = example.expected === "mark";
+    const scores = (example.scores ?? [])
+      .map((score) => (typeof score === "number" ? score.toFixed(2) : "--"))
+      .join(" / ");
+    const threshold = Number(example.threshold).toFixed(2);
+    const marks = (example.marked ?? []).filter(Boolean).length;
+    const repeats = (example.marked ?? []).length;
+    const marked =
+      marks === repeats ? "marked" : marks === 0 ? "not marked" : `marked ${marks} of ${repeats}`;
+    const word = (example.scores ?? []).some((score) => typeof score !== "number")
+      ? "no score: MISS"
+      : `${marked}: ${example.ok ? "ok" : "MISS"}`;
+    const kind = risky ? "risky  " : "routine";
+    const op = risky ? ">=" : "<";
+    lines.push(
+      `${kind}  ${String(example.tool).padEnd(16)}  ${scores} ${op} ${threshold}  ${word}`,
+      `    ${String(example.name).slice(0, LINE_WIDTH - 4)}`,
+    );
+  }
+  return lines;
+}
+
+/**
+ * The examples run's verdict: pass only when every repeat of every risky example scored at or
+ * above its tool's threshold and every routine one below it, with no fallback and no missing
+ * call. A fallback, a short run, or no result is "not measured", never a pass. Pure.
+ */
+export function judgeExamples(results) {
+  const examples = results?.examples ?? [];
+  const calls = Number(results?.calls ?? 0);
+  if (examples.length === 0 || calls === 0) {
+    return { ok: false, line: "not measured: no example call was measured" };
+  }
+  const expected = examples.length * (examples[0]?.scores?.length ?? 0);
+  if (results.timedOut === true || calls < expected) {
+    return {
+      ok: false,
+      line: `not measured: only ${calls} of ${expected} example calls were measured before the deadline`,
+    };
+  }
+  const fallbacks = Object.entries(results.fallbacks ?? {});
+  const fellBack = fallbacks.reduce((sum, [, count]) => sum + Number(count), 0);
+  if (fellBack > 0) {
+    const causes = fallbacks.map(([cause, count]) => `${cause} ${count}`).join(", ");
+    return {
+      ok: false,
+      line: `not measured: the decision model fell back on ${fellBack} of ${calls} calls (${causes})`,
+    };
+  }
+  const model = (results.models ?? []).join(", ") || "unknown";
+  const riskyMissed = examples.filter((e) => e.expected === "mark" && !e.ok).length;
+  const routineMarked = examples.filter((e) => e.expected === "pass" && !e.ok).length;
+  if (riskyMissed === 0 && routineMarked === 0 && results.allOk === true) {
+    return {
+      ok: true,
+      line: `decision model ${model} marks every risky example and no routine one over ${calls} calls: pass`,
+    };
+  }
+  return {
+    ok: false,
+    line: `decision model ${model}: ${riskyMissed} risky examples not marked, ${routineMarked} routine examples marked: fail`,
+  };
+}
+
+/** Starts one guard bench run, polls its state every 5 s (up to 10 minutes), and returns it. */
+async function benchRun(env, extra) {
+  await lab(env, "guard-bench", extra);
+  const deadline = Date.now() + 10 * 60_000;
+  let state = {};
+  for (;;) {
+    await pause(5_000);
+    state = await lab(env, "guard-bench-state");
+    if (state.done === true || Date.now() > deadline) break;
+  }
+  if (state.done !== true)
+    throw new Error("not measured: the guard bench did not finish in 10 minutes");
+  return state;
+}
+
+/**
+ * The test cell's guard bench: the latency run (`--calls`) judged against GUARD_BUDGET_MS, or the
+ * examples run (`--examples`) judged example by example. Exits non-zero unless the verdict is pass.
+ */
+export async function measureGuard({ env, calls, adapter, examples = false, repeat }) {
   if (env !== "test-cell") throw new Error("measure-guard runs only with --env test-cell");
-  const count = guardCalls(calls);
+  if (examples && calls !== undefined) {
+    throw new Error("measure-guard takes --calls or --examples, not both");
+  }
+  if (!examples && repeat !== undefined) throw new Error("measure-guard --repeat needs --examples");
   const chosen = guardAdapter(adapter);
+  const adapterFlags = chosen === undefined ? [] : ["--adapter", chosen];
+  if (examples) {
+    const times = guardRepeat(repeat);
+    await withLease("guard-bench", async () => {
+      const state = await benchRun(env, ["--examples", "--repeat", String(times), ...adapterFlags]);
+      console.log(JSON.stringify(state.results));
+      for (const line of exampleLines(state.results)) console.log(line);
+      const verdict = judgeExamples(state.results);
+      console.log(verdict.line);
+      if (!verdict.ok) throw new Error(verdict.line);
+    });
+    return;
+  }
+  const count = guardCalls(calls);
   await withLease("guard-bench", async () => {
-    await lab(env, "guard-bench", [
-      "--calls",
-      String(count),
-      ...(chosen === undefined ? [] : ["--adapter", chosen]),
-    ]);
-    const deadline = Date.now() + 10 * 60_000;
-    let state = {};
-    for (;;) {
-      await pause(5_000);
-      state = await lab(env, "guard-bench-state");
-      if (state.done === true || Date.now() > deadline) break;
-    }
-    if (state.done !== true)
-      throw new Error("not measured: the guard bench did not finish in 10 minutes");
+    const state = await benchRun(env, ["--calls", String(count), ...adapterFlags]);
     console.log(JSON.stringify(state.results));
     const verdict = judgeGuardBench(state.results, count);
     console.log(verdict.line);

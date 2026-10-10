@@ -188,7 +188,7 @@ unavailable; the call ran`). In enforce mode it reads `reviewer: <reason>`.
 ### The guard's layers and the mode
 
 Every tool call passes the rules first. A prohibit refuses it and an ask-first rule holds it before
-any model sees it. A call the rules pass goes to the decision model (Clef by default, or Jev, on
+any model sees it. A call the rules pass goes to the decision model (Jev for a new cell, or Clef or Clef Flash, on
 OpenRouter's Decisions API), which can only pass it or mark it; a mark, or any decision-model
 failure (an HTTP error, a malformed body, a timeout over 1.5 s, an unknown answer, no key), sends
 it to the reviewer. The reviewer allows it, blocks it (`reviewer: <reason>`), or asks the person
@@ -346,3 +346,19 @@ refuses to start, logs `secrets.refused_start {reason}`, and every secrets route
 A failed call is logged on both sides: `household.call` with `outcome: "refused" | "failed"`,
 `status`, and the error on the caller; `household.refused` or `household.error` on the household
 fleet.
+
+## Test-cell routes: `/lab/…`
+
+The test-cell worker only (never a person cell's release) answers the durability lab's routes and
+the guard bench's. The release tool's `lab` command calls them; `measure:guard` reads the bench.
+
+| Method | Path | Response |
+| --- | --- | --- |
+| POST | `/lab/guard-bench?calls=<1-200>[&adapter=<a>]` | `{started, calls, warmup, adapter}`: the latency run starts (5 warm-up calls, then `calls` permitted `household_read` calls); 409 while a run goes, 400 for a bad value |
+| POST | `/lab/guard-bench?examples=1[&repeat=<1-3>][&adapter=<a>]` | `{started, kind: "examples", examples, repeat, calls, adapter}`: the examples run starts. The bench makes each decision-model example call (every example whose tool an agent has) `repeat` times (default 2), in order. 400 for `examples` with `calls` or a bad `repeat` |
+| GET | `/lab/guard-bench-state` | `{done, kind, measured, results?}`. For the latency run, `results` holds the percentiles, marks, fallbacks, models, and cost. For the examples run, `results` is `{examples: [{name, tool, expected, threshold, scores, marked, ok}], calls, models, fallbacks, costUsd, timedOut, allOk}`: each score is judged on the tool's release threshold, and `allOk` is true only when every repeat of every risky example (`expected: "mark"`) scored at or above it and every routine one below it, with no fallback |
+
+`adapter` is `clef`, `clef-flash`, or `jev`; the bench keeps it for its next run. The bench never
+reads a threshold cap. When celld closes the database of a lab or bench cell under running work
+(`no db for <cell>`), the cell logs one `cell.reopen` line, closes its harness, and opens a new
+one on the next request.

@@ -60,6 +60,11 @@ export {
 } from "./cell-parts.ts";
 export { CREDIT_MARKER, isCreditError, withCreditPause } from "./credit-pause.ts";
 export {
+  DECISION_EXAMPLES,
+  type DecisionExample,
+  liveExamples,
+} from "./decision-examples.ts";
+export {
   buildDecisionState,
   createDecisionModel,
   createDecisionModels,

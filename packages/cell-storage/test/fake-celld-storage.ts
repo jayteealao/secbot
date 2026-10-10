@@ -70,6 +70,13 @@ export class FakeCelldStorage implements CelldStorage, CelldAlarmStorage {
   refuseNextGate = false;
   /** How many times `setAlarm()` ran (each one is a bucket write on celld). */
   alarmWrites = 0;
+  /**
+   * When set, every call fails as celld fails a call for a cell it gave back: the cell left this
+   * isolate (an idle eviction or a stop), celld closed its database, and JavaScript that the cell
+   * started still runs (celld v0.6.1 `storage.rs` `close()` and `with()`, `js/bootstrap.rs`
+   * `finish_cell_adoption`, `js/storage_ops.rs` `throw_sql_error`).
+   */
+  gaveBack: string | undefined;
   private aborted = false;
   private savepoints = 0;
   private resetOpenTransaction: (() => void) | undefined;
@@ -198,6 +205,7 @@ export class FakeCelldStorage implements CelldStorage, CelldAlarmStorage {
   }
 
   private assertLive(): void {
+    if (this.gaveBack !== undefined) throw new Error(`SQL error: no db for ${this.gaveBack}`);
     if (this.aborted)
       throw new Error("the Durable Object was reset; this event's storage is closed");
   }

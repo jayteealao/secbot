@@ -231,11 +231,16 @@ describe("CelldSqliteDatabase", () => {
     expect(await count(database)).toBe(0);
   });
 
-  it("tells a poisoned session or a closed driver from any other error", () => {
+  it("tells a poisoned session, a closed driver, or a closed cell database from any other error", () => {
     const poisoned = new Error(`${POISONED_SESSION}; reopen it`);
     expect(needsReopen(poisoned)).toBe(true);
     expect(needsReopen(new Error("wrapped", { cause: poisoned }))).toBe(true);
     expect(needsReopen(new CellStorageClosedError("close() was called"))).toBe(true);
+    // celld after it gave the cell back: SQL calls and storage calls both name the scope.
+    expect(needsReopen(new Error("SQL error: no db for PersonCell:abc123"))).toBe(true);
+    expect(needsReopen(new Error("storage.get: no db for PersonCell:abc123"))).toBe(true);
+    expect(needsReopen(new Error("wrapped", { cause: new Error("no db for X:1") }))).toBe(true);
+    expect(needsReopen(new Error("no db found"))).toBe(false);
     expect(needsReopen(new Error("the model is down"))).toBe(false);
     expect(needsReopen("Session is poisoned")).toBe(false);
     expect(needsReopen(undefined)).toBe(false);

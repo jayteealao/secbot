@@ -58,7 +58,7 @@ describe("secbot mode", () => {
     const { environment, fake } = await setup();
     expect(await secbot(environment, "mode", "show", "sam")).toEqual({
       code: 0,
-      out: "sam  mode shadow  since 8 Oct 18:20  decision model clef\n",
+      out: "sam  mode shadow  since 8 Oct 18:20  decision model jev\n",
       err: "",
     });
     expect(await secbot(environment, "mode", "set", "sam", "enforce")).toEqual({
@@ -69,9 +69,9 @@ describe("secbot mode", () => {
     expect((await secbot(environment, "mode", "set", "sam", "enforce")).out).toBe(
       "sam already runs in enforce mode\n",
     );
-    expect(await secbot(environment, "mode", "decision", "sam", "jev")).toEqual({
+    expect(await secbot(environment, "mode", "decision", "sam", "clef")).toEqual({
       code: 0,
-      out: "sam now uses the jev decision model from the next call\n",
+      out: "sam now uses the clef decision model from the next call\n",
       err: "",
     });
     const sent = fake.calls.filter((call) => call.path.startsWith("/ops/"));
@@ -85,7 +85,7 @@ describe("secbot mode", () => {
       undefined,
       { mode: "enforce" },
       { mode: "enforce" },
-      { adapter: "jev" },
+      { adapter: "clef" },
     ]);
     // The operator key goes in its header only, never in a URL, a device header, or output.
     expect(sent.every((call) => call.auth === undefined)).toBe(true);

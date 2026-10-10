@@ -115,7 +115,7 @@ describe("decision model then reviewer (enforce mode)", () => {
       verdict: "allowed",
       layer: "decision",
       mode: "enforce",
-      decision: { outcome: "pass", model: "cloudflare/clef-20261001" },
+      decision: { outcome: "pass", model: "typesafe/jev-1.13-20261001" },
     });
     expect(reviews(t)).toHaveLength(0);
     stub.decision = riskyAt(0.7);
@@ -255,22 +255,26 @@ describe("decision model then reviewer (enforce mode)", () => {
     expect(reviews(t)).toHaveLength(1);
   });
 
-  it("uses the other adapter from the next call and logs each returned model id (AC-14)", async () => {
+  it("starts on Jev, uses the other adapter from the next call, and logs each returned model id (AC-14)", async () => {
     const { log } = spies();
     const t = await open({ enforce: true });
     await call(t, "household_read", { document: "shopping" }, 2);
-    await t.cell.setDecisionAdapter("jev");
+    await t.cell.setDecisionAdapter("clef");
     await call(t, "household_read", { document: "shopping" }, 3);
+    await t.cell.setDecisionAdapter("clef-flash");
+    await call(t, "household_read", { document: "shopping" }, 4);
     expect(decisionRequests().map((seen) => seen.body.model)).toEqual([
-      "cloudflare/clef",
       "typesafe/jev-1.13",
+      "cloudflare/clef",
+      "cloudflare/clef-flash",
     ]);
     const verdicts = loggedEvents(log.mock.calls).filter((e) => e.event === "guard.verdict");
     expect(verdicts.map((event) => event.decision_model)).toEqual([
-      "cloudflare/clef-20261001",
       "typesafe/jev-1.13-20261001",
+      "cloudflare/clef-20261001",
+      "cloudflare/clef-flash-20261001",
     ]);
-    expect((await t.cell.guardMode()).decisionModel).toBe("jev");
+    expect((await t.cell.guardMode()).decisionModel).toBe("clef-flash");
     await expect(t.cell.setDecisionAdapter("gpt")).rejects.toThrow(/unknown decision model/);
   });
 
@@ -295,7 +299,7 @@ describe("shadow mode", () => {
     spies();
     const t = await open();
     const mode = await t.cell.guardMode();
-    expect(mode).toMatchObject({ mode: "shadow", switchedBy: null, decisionModel: "clef" });
+    expect(mode).toMatchObject({ mode: "shadow", switchedBy: null, decisionModel: "jev" });
     expect(typeof mode.since).toBe("number");
     stub.decision = riskyAt(0.9);
     reviewerAnswer = () => verdictJson("block", "reminder text holds a card number");
@@ -382,7 +386,7 @@ describe("guard events (AC-45, model part)", () => {
     stub.mode = 503;
     await call(t, "household_read", { document: "shopping" }, 3);
     expect(loggedEvents(warn.mock.calls).filter((e) => e.event === "guard.fallback")).toEqual([
-      expect.objectContaining({ cause: "http-503", adapter: "clef" }),
+      expect.objectContaining({ cause: "http-503", adapter: "jev" }),
     ]);
     expect(await newest(t)).toMatchObject({ fallback: "http-503" });
     // One guard error, from a stage that breaks.

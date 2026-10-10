@@ -134,6 +134,8 @@ export interface StubOpenRouter {
   mode: StubMode;
   /** The decisions route's answer in `answer` mode (routine, score 0.05 by default). */
   decision: StubDecision;
+  /** When set, the decisions route's answer for each request body, in place of `decision`. */
+  decide: ((body: Record<string, unknown>) => StubDecision) | undefined;
   /** A delay before every answer, in milliseconds (0 by default). */
   delayMs: number;
   close(): Promise<void>;
@@ -158,7 +160,12 @@ export function riskyAt(score: number): StubDecision {
 export async function startStubOpenRouter(): Promise<StubOpenRouter> {
   const seen: SeenRequest[] = [];
   const hanging = new Set<() => void>();
-  const stub = { mode: "answer" as StubMode, decision: routineAt(0.05), delayMs: 0 };
+  const stub = {
+    mode: "answer" as StubMode,
+    decision: routineAt(0.05),
+    decide: undefined as ((body: Record<string, unknown>) => StubDecision) | undefined,
+    delayMs: 0,
+  };
   const answer = (path: string, body: Record<string, unknown>, response: ServerResponse) => {
     if (stub.mode === "hang") {
       hanging.add(() => response.destroy());
@@ -176,7 +183,7 @@ export async function startStubOpenRouter(): Promise<StubOpenRouter> {
         return;
       }
       const choice = stub.mode === "unknown-choice" ? "maybe" : undefined;
-      response.end(decisionAnswer(body.model, stub.decision, choice));
+      response.end(decisionAnswer(body.model, stub.decide?.(body) ?? stub.decision, choice));
       return;
     }
     response.writeHead(200, { "content-type": "text/event-stream" });
@@ -219,6 +226,12 @@ export async function startStubOpenRouter(): Promise<StubOpenRouter> {
     },
     set decision(decision: StubDecision) {
       stub.decision = decision;
+    },
+    get decide() {
+      return stub.decide;
+    },
+    set decide(decide: ((body: Record<string, unknown>) => StubDecision) | undefined) {
+      stub.decide = decide;
     },
     get delayMs() {
       return stub.delayMs;

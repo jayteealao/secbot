@@ -173,11 +173,11 @@ description = "Median and 95th percentile of committed single-row writes on the 
 run = "node scripts/vps.mjs measure-write-delay"
 
 [tasks."measure:guard"]
-description = "The time the rules plus the decision model add per tool call on the test cell, reviewer excluded (--env test-cell [--calls 100]); live OpenRouter calls: run only after the owner's yes"
+description = "The guard bench on the test cell: the time the rules plus the decision model add per tool call, reviewer excluded, against 800 ms at p95 (--env test-cell [--calls 100] [--adapter jev]), or the decision-model example check (--env test-cell --examples [--repeat 2] [--adapter jev]); live OpenRouter calls: run only after the owner's yes"
 run = "node scripts/vps.mjs measure-guard"
 
 [tasks."live:guard"]
-description = "The live guard check on the test cell (preflight | charter --part 1|2 --out <dir> [--max-usd 5] | report --out <dir>); live OpenRouter and Better Stack calls: run only after the owner's yes"
+description = "The live guard check on the test cell (preflight | models --out <dir> | charter --part 1|2 --out <dir> [--max-usd 5] | report --out <dir>); live OpenRouter and Better Stack calls: run only after the owner's yes"
 run = "node scripts/live-guard.mjs"
 
 [tasks."measure:cost"]

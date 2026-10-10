@@ -3,8 +3,15 @@
 // the deployed test cell with the real `secbot` command line, and writes the evidence.
 //
 //   node scripts/live-guard.mjs preflight
+//   node scripts/live-guard.mjs models --out <dir>
 //   node scripts/live-guard.mjs charter --part 1|2 --out <dir> [--max-usd 5]
 //   node scripts/live-guard.mjs report --out <dir>
+//
+// `models` sets every agent role that uses an Opus model to TEST_CELL_MODEL (Claude Sonnet 5.5)
+// on the owner's test-cell person cell, makes sure its decision model is Jev, and writes the
+// models to models-live.txt. The charter refuses to start while a role uses an Opus model or the
+// decision model is not Jev. The test cell stays on these models after the run; no release
+// default changes.
 //
 // It runs only after the owner's yes for the live calls (OpenRouter and Better Stack), from the
 // owner's machine, through the test-cell runner that loads the owner's private settings. The cell
@@ -31,17 +38,23 @@ import {
   CONTRACT,
   check,
   DEFAULT_MAX_USD,
+  decisionModelOf,
   fillArgv,
   fixedLimit,
+  isOpus,
   literalHits,
   MODEL_TURN_MS,
+  modelsProblem,
   newestHeld,
   overSpend,
+  parseModelList,
   placeLimit,
   STEPS,
   scrub,
   spendOf,
   stepsOf,
+  TEST_CELL_DECISION_MODEL,
+  TEST_CELL_MODEL,
 } from "./live-guard-steps.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -76,13 +89,24 @@ async function readJson(path) {
  * fake-target address, and whether the device key's hash is in SECBOT_DEVICE_KEYS for its person.
  * Never a value. `ok` is false when anything required is missing.
  */
+/** The preflight labels, so every value starts in one column two spaces after the longest. */
+const PREFLIGHT_LABELS = [
+  ...PREFLIGHT_VARS,
+  "device file",
+  "operator key",
+  "SECBOT_FAKE_TARGET_URL",
+  "device key listed for its person",
+];
+export const PREFLIGHT_PAD = Math.max(...PREFLIGHT_LABELS.map((label) => label.length)) + 2;
+const label = (text) => text.padEnd(PREFLIGHT_PAD);
+
 export async function preflight(env = process.env, home = homedir()) {
   const lines = [];
   let ok = true;
   for (const name of PREFLIGHT_VARS) {
     const set = typeof env[name] === "string" && env[name] !== "";
     if (!set) ok = false;
-    lines.push(`${name.padEnd(30)}${set ? "SET" : "missing"}`);
+    lines.push(`${label(name)}${set ? "SET" : "missing"}`);
   }
   const dir = configDir(env, home);
   const device = await readJson(join(dir, "device.json"));
@@ -91,15 +115,15 @@ export async function preflight(env = process.env, home = homedir()) {
     typeof device?.person === "string" &&
     typeof device?.key === "string";
   if (!deviceOk) ok = false;
-  lines.push(`${"device file".padEnd(30)}${deviceOk ? "SET" : "missing"}`);
+  lines.push(`${label("device file")}${deviceOk ? "SET" : "missing"}`);
   const operator =
     (typeof env.SECBOT_OPERATOR_KEY === "string" && env.SECBOT_OPERATOR_KEY !== "") ||
     typeof (await readJson(join(dir, "operator.json")))?.key === "string";
   if (!operator) ok = false;
-  lines.push(`${"operator key".padEnd(30)}${operator ? "SET" : "missing"}`);
+  lines.push(`${label("operator key")}${operator ? "SET" : "missing"}`);
   const fake = typeof env.SECBOT_FAKE_TARGET_URL === "string" && env.SECBOT_FAKE_TARGET_URL !== "";
   lines.push(
-    `${"SECBOT_FAKE_TARGET_URL".padEnd(30)}${fake ? "SET" : "not set (the cell address + /fake-target)"}`,
+    `${label("SECBOT_FAKE_TARGET_URL")}${fake ? "SET" : "not set (the cell address + /fake-target)"}`,
   );
   if (deviceOk && typeof env.SECBOT_DEVICE_KEYS === "string") {
     const hash = createHash("sha256").update(device.key).digest("hex");
@@ -107,7 +131,7 @@ export async function preflight(env = process.env, home = homedir()) {
       .map((entry) => entry.trim().split(":"))
       .some(([, person, sha]) => person === device.person && sha === hash);
     if (!listed) ok = false;
-    lines.push(`${"device key listed for its person".padEnd(30)}${listed ? "yes" : "no"}`);
+    lines.push(`${label("device key listed for its person")}${listed ? "yes" : "no"}`);
   }
   lines.push(ok ? "preflight: ready" : "preflight: not ready; place what is missing first");
   return { ok, lines };
@@ -209,6 +233,48 @@ export async function executeSteps(steps, deps, context, state, maxUsd = DEFAULT
 }
 
 const spendNow = async (deps) => spendOf((await deps.cli(["cost"], {})).out)?.spend;
+
+/** The role-to-model map and the decision model of `person`'s cell, read with `deps.cli`. */
+async function readModels(deps, person, run = deps.cli) {
+  const list = await run(["model", "list"], {});
+  const shown = await run(["mode", "show", person], {});
+  return {
+    roles: list.code === 0 ? parseModelList(list.out) : [],
+    decisionModel: shown.code === 0 ? decisionModelOf(shown.out) : undefined,
+  };
+}
+
+/** Why the charter may not start on `person`'s current models, or undefined when it may. */
+export async function checkModels(deps, person) {
+  const { roles, decisionModel } = await readModels(deps, person);
+  return modelsProblem(roles, decisionModel);
+}
+
+/**
+ * The test cell's models for a live check: every role on an Opus model moves to TEST_CELL_MODEL,
+ * and the decision model to Jev when it is another. Roles on other models are not touched, so a
+ * second run changes nothing. Returns the transcript and the problem that remains, if any.
+ */
+export async function setTestModels(deps, person) {
+  const chunk = ["## models"];
+  const run = async (argv) => {
+    const result = await deps.cli(argv, {});
+    const err = result.err ? `[stderr]\n${result.err}` : "";
+    chunk.push(`$ secbot ${argv.join(" ")}`, `${result.out}${err}[exit ${result.code}]`);
+    return result;
+  };
+  const before = await readModels(deps, person, run);
+  for (const { role, model } of before.roles) {
+    if (isOpus(model)) await run(["model", "set", role, TEST_CELL_MODEL]);
+  }
+  if (before.decisionModel !== TEST_CELL_DECISION_MODEL) {
+    await run(["mode", "decision", person, TEST_CELL_DECISION_MODEL]);
+  }
+  const after = await readModels(deps, person, run);
+  const problem = modelsProblem(after.roles, after.decisionModel);
+  chunk.push(`[models: ${problem === undefined ? "pass" : `fail: ${problem}`}]`);
+  return { problem, text: `${chunk.join("\n")}\n` };
+}
 
 /** One step: its actions in order, until one fails. Returns its result and its transcript. */
 async function runStep(step, deps, context, state) {
@@ -441,6 +507,21 @@ const liveDeps = () => ({
   now: () => Date.now(),
 });
 
+/** The models step against the live test cell: writes models-live.txt. Returns the exit code. */
+export async function models({ out }) {
+  if (!out) throw new Error("models needs --out <dir>");
+  const ready = await preflight();
+  if (!ready.ok) {
+    console.log(ready.lines.join("\n"));
+    return 1;
+  }
+  const { values, person } = await privateValues();
+  const { problem, text } = await setTestModels(liveDeps(), person);
+  await writeEvidence(out, "models-live.txt", text, values);
+  console.log(scrub(text, values));
+  return problem === undefined ? 0 : 1;
+}
+
 async function readState(out) {
   return (await readJson(join(out, "state.json"))) ?? {};
 }
@@ -465,6 +546,12 @@ export async function charter({ part, out, "max-usd": maxUsd = String(DEFAULT_MA
     values: { ...values, testSecret: made["test-secret"], brokerToken: made["broker-token"] },
   };
   const deps = liveDeps();
+  // The owner's choice for live checks: no Opus role and Jev as the decision model.
+  const refused = await checkModels(deps, person);
+  if (refused !== undefined) {
+    console.log(refused);
+    return 1;
+  }
   const state = part === "1" ? {} : await readState(out);
   if (part === "1") {
     const found = spendOf((await deps.cli(["cost"], {})).out);
@@ -536,10 +623,11 @@ const main = async () => {
     console.log(ready.lines.join("\n"));
     return ready.ok ? 0 : 1;
   }
+  if (command === "models") return models(values);
   if (command === "charter") return charter(values);
   if (command === "report") return report(values);
   console.error(
-    "usage: live-guard.mjs preflight | charter --part 1|2 --out <dir> [--max-usd 5] | report --out <dir>",
+    "usage: live-guard.mjs preflight | models --out <dir> | charter --part 1|2 --out <dir> [--max-usd 5] | report --out <dir>",
   );
   return 2;
 };

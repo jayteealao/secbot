@@ -511,6 +511,45 @@ export const CLEARING_FILES = [
   "secrets-live.txt",
 ];
 
+/** The model every Opus role uses on the test cell during a live check (the owner's choice). */
+export const TEST_CELL_MODEL = "anthropic/claude-sonnet-5.5";
+/** The decision model the live check runs with: every new cell's default. */
+export const TEST_CELL_DECISION_MODEL = "jev";
+
+/** True for a Claude Opus model id. Pure. */
+export const isOpus = (model) => /claude-opus/.test(String(model));
+
+/** `secbot model list` lines as `{ role, model, source }`. Pure. */
+export function parseModelList(text) {
+  return String(text)
+    .split(/\r?\n/)
+    .flatMap((line) => {
+      const found = /^(\S+)\s+(\S+)\s+\(([^)]+)\)\s*$/.exec(line);
+      return found === null ? [] : [{ role: found[1], model: found[2], source: found[3] }];
+    });
+}
+
+/** The decision model in `secbot mode show <person>` output, or undefined. Pure. */
+export function decisionModelOf(text) {
+  return /\bdecision model (\S+)/.exec(String(text))?.[1];
+}
+
+/**
+ * Why the live check may not start on these models, or undefined when it may: no role may use an
+ * Opus model, and the decision model must be Jev. Pure.
+ */
+export function modelsProblem(roles, decisionModel) {
+  if (roles.length === 0) return "no model list from secbot model list";
+  const opus = roles.find((entry) => isOpus(entry.model));
+  if (opus !== undefined) {
+    return `an Opus model is set for ${opus.role}; run live:guard -- models first`;
+  }
+  if (decisionModel !== TEST_CELL_DECISION_MODEL) {
+    return `the decision model is ${decisionModel ?? "unknown"}, not ${TEST_CELL_DECISION_MODEL}; run live:guard -- models first`;
+  }
+  return undefined;
+}
+
 /** `argv` with `{person}` and `{fakeTarget}` filled from `context`. Pure. */
 export function fillArgv(argv, context) {
   return argv.map((word) =>

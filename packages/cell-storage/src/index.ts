@@ -22,7 +22,7 @@ export type {
   CelldSqlStorage,
   CelldStorage,
 } from "./celld-types.ts";
-export { needsReopen, POISONED_SESSION } from "./reopen.ts";
+export { CELL_DATABASE_GONE, needsReopen, POISONED_SESSION } from "./reopen.ts";
 export {
   type CellDump,
   type DumpSchemaEntry,

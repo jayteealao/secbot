@@ -372,6 +372,21 @@ describe("PersonCell", () => {
     expect(s.opened).toHaveLength(2);
   });
 
+  it("reopens its harness after celld closed the cell's database under it", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const s = await setup();
+    expect((await call(s, "GET", "/v1/cells/owner/status")).status).toBe(200);
+    const first = s.opened[0];
+    if (first === undefined) throw new Error("no harness opened");
+    vi.spyOn(first, "status").mockRejectedValue(new Error("SQL error: no db for PersonCell:owner"));
+    await expect(call(s, "GET", "/v1/cells/owner/status")).rejects.toThrow(/no db for/);
+    const again = await call(s, "GET", "/v1/cells/owner/status");
+    expect(again.status).toBe(200);
+    expect(s.opened).toHaveLength(2);
+  });
+
   it("keeps its session after celld refuses a storage gate to work whose event ended", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "error").mockImplementation(() => {});

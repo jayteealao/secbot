@@ -191,7 +191,7 @@ describe("secbot mode with the operator key (AC-44)", () => {
     await evidence("mode-show.txt", "mode show owner", shown);
     expect(shown.code).toBe(0);
     expect(shown.out).toMatch(
-      /^owner {2}mode shadow {2}since \d{1,2} \w{3} \d\d:\d\d {2}decision model clef\n$/,
+      /^owner {2}mode shadow {2}since \d{1,2} \w{3} \d\d:\d\d {2}decision model jev\n$/,
     );
 
     // Only the device key: the operator routes refuse it, and the mode stays shadow.

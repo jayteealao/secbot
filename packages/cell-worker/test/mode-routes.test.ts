@@ -47,7 +47,7 @@ describe("the guard-mode routes (operator key)", () => {
       person: "owner",
       mode: "shadow",
       switchedBy: null,
-      decisionModel: "clef",
+      decisionModel: "jev",
       timeZone: "UTC",
     });
     expect(typeof first.since).toBe("number");
@@ -62,11 +62,11 @@ describe("the guard-mode routes (operator key)", () => {
     });
 
     const adapter = await call(s, "PUT", "/ops/decision-model?cell=owner", operator, {
-      adapter: "jev",
+      adapter: "clef",
     });
     expect(adapter.status).toBe(200);
-    expect(await adapter.json()).toMatchObject({ decisionModel: "jev", mode: "enforce" });
-    expect((await s.harness("owner").guardMode()).decisionModel).toBe("jev");
+    expect(await adapter.json()).toMatchObject({ decisionModel: "clef", mode: "enforce" });
+    expect((await s.harness("owner").guardMode()).decisionModel).toBe("clef");
 
     const events = log.mock.calls.map(([line]) => JSON.parse(String(line)) as { event: string });
     expect(events.filter((event) => event.event === "guard.mode")).toHaveLength(1);
@@ -83,7 +83,7 @@ describe("the guard-mode routes (operator key)", () => {
     });
     expect(adapter.status).toBe(400);
     expect((await s.harness("owner").guardMode()).mode).toBe("shadow");
-    expect((await s.harness("owner").guardMode()).decisionModel).toBe("clef");
+    expect((await s.harness("owner").guardMode()).decisionModel).toBe("jev");
   });
 
   it("refuses a switch with no key or with only a device key, and the mode stays shadow", async () => {

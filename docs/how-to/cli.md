@@ -187,16 +187,18 @@ On the owner's machine, with the operator key:
 
 ```
 $ secbot mode show sam
-sam  mode shadow  since 8 Oct 18:20  decision model clef
+sam  mode shadow  since 8 Oct 18:20  decision model jev
 $ secbot mode set sam enforce
 sam now runs in enforce mode
-$ secbot mode decision sam jev
-sam now uses the jev decision model from the next call
+$ secbot mode decision sam clef
+sam now uses the clef decision model from the next call
 ```
 
 `secbot mode set <person> shadow` switches back; switching to the mode a cell already has prints
 `<person> already runs in <mode> mode` and changes nothing. Read at least a week of shadow verdicts
-before you switch a cell to enforce. A device key cannot switch a mode.
+before you switch a cell to enforce. A device key cannot switch a mode. A new cell starts on the
+Jev decision model; `secbot mode decision <person> clef|clef-flash|jev` changes it from the next
+call.
 
 ### Secrets (owner)
 

@@ -80,7 +80,8 @@ many are left under the old key. Run it again when that number is not 0.
 
 ## The decision-model setting
 
-Each cell names its decision model. Read it with `secbot mode show <person>`; change it with
+Each cell names its decision model. A new cell starts on Jev (`jev`); Clef (`clef`) and Clef Flash
+(`clef-flash`) are the other settings. Read it with `secbot mode show <person>`; change it with
 `secbot mode decision <person> <model>`, from the next call. When the decision model fails or is
 too slow, the guard falls back as the [model outage runbook](../runbooks/model-outage.md) says.
 
@@ -108,16 +109,28 @@ and keep every value in your shell.
    `node scripts/vps.mjs dry-run`.
 3. Set up the host and deploy the test cell: `mise run host:setup`, then stage and deploy with
    `scripts/vps.mjs` (see [How to operate the cells](operate-cells.md)).
-4. Measure the guard's added time:
-   `mise run measure:guard -- --env test-cell --calls 100`. It passes when the p95 is at most
-   500 ms; a run where the decision model fell back on half the calls or more is `not measured`.
-5. Run part 1 of the live check, which stops itself when the month's spend rises by more than
+4. Set the test cell's models: `mise run live:guard -- models --out <dir>`. Every agent role on
+   an Opus model moves to Claude Sonnet 5.5, and the decision model is set to Jev. The models
+   are written to `<dir>/models-live.txt`, and the test cell stays on them after the check. The
+   release defaults do not change. The charter in steps 7 and 9 refuses to start until this step
+   has run.
+5. Measure the guard's added time with Jev:
+   `mise run measure:guard -- --env test-cell --calls 100 --adapter jev`. It passes when the p95
+   is under 800 ms. A run where the decision model fell back on half the calls or more is
+   `not measured`.
+6. Check that Jev marks the risky example calls:
+   `mise run measure:guard -- --env test-cell --examples --repeat 2 --adapter jev`. The bench
+   makes each example call twice and judges each score on its tool's release threshold. It
+   passes only when every risky example scores at or above the threshold and every routine
+   example scores below it. When the verdict is `fail` or `not measured`, stop the check and
+   ask the owner. Do not change a threshold to make it pass.
+7. Run part 1 of the live check, which stops itself when the month's spend rises by more than
    5 dollars: `mise run live:guard -- charter --part 1 --out <dir>`.
-6. Restart the test cell with `mise run test:durability -- --crash-only`.
-7. Run part 2, which checks that a held call outlived the restart and cleans up:
+8. Restart the test cell with `mise run test:durability -- --crash-only`.
+9. Run part 2, which checks that a held call outlived the restart and cleans up:
    `mise run live:guard -- charter --part 2 --out <dir>`.
-8. Write the summary: `mise run live:guard -- report --out <dir>`. It names each evidence file
-   `present` or `missing`.
+10. Write the summary: `mise run live:guard -- report --out <dir>`. It names each evidence file
+    `present` or `missing`.
 
 The evidence files are scrubbed before they are written; a file that still holds a private value
 is not written and the run fails. Read `<dir>/summary.md` before you share any of it.

@@ -131,7 +131,7 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       mode: "shadow",
       since: Date.UTC(2026, 9, 8, 18, 20),
       switchedBy: null,
-      decisionModel: "clef",
+      decisionModel: "jev",
     },
     connectFrames: [],
     notices: [],

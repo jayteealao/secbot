@@ -94,6 +94,8 @@ interface DriverModule {
     text: string,
     values: Record<string, string>,
   ): Promise<void>;
+  checkModels(deps: unknown, person: string): Promise<string | undefined>;
+  setTestModels(deps: unknown, person: string): Promise<{ problem?: string; text: string }>;
 }
 const scripts = new URL("../../../scripts/", import.meta.url);
 const steps = (await import(new URL("live-guard-steps.mjs", scripts).href)) as StepsModule;
@@ -332,6 +334,18 @@ describe("the live guard check, rehearsed on the stand-in", () => {
       fakeTarget,
       values: { ...values, testSecret: TEST_SECRET, brokerToken: BROKER_TOKEN },
     };
+    // The models step first: the cell starts with the lead on Opus, and the check moves it to
+    // Sonnet and the decision model to Jev; the charter refuses to start before that.
+    expect((await cli(["mode", "decision", "owner", "clef"])).code).toBe(0);
+    expect(await driver.checkModels(deps, "owner")).toBe(
+      "an Opus model is set for lead; run live:guard -- models first",
+    );
+    const models = await driver.setTestModels(deps, "owner");
+    expect(models.problem).toBeUndefined();
+    expect(models.text).toContain("$ secbot model set lead anthropic/claude-sonnet-5.5");
+    expect(models.text).toContain("$ secbot mode decision owner jev");
+    expect(models.text).not.toMatch(/model set (household|developer|research|health|reviewer)/);
+    expect(await driver.checkModels(deps, "owner")).toBeUndefined();
     const start = steps.spendOf((await cli(["cost"])).out);
     const state: Record<string, unknown> = {
       startSpend: start?.spend,
@@ -343,7 +357,7 @@ describe("the live guard check, rehearsed on the stand-in", () => {
     const part2 = await driver.executeSteps(steps.stepsOf(2), deps, context, state, 5);
     const results = { ...part1.results, ...part2.results };
     const report = steps.buildReport(results);
-    const evidence: Record<string, string> = { ...part1.evidence };
+    const evidence: Record<string, string> = { "models-live.txt": models.text, ...part1.evidence };
     for (const [file, more] of Object.entries(part2.evidence)) {
       evidence[file] = `${evidence[file] ?? ""}${more}`;
     }
@@ -360,6 +374,8 @@ describe("the live guard check, rehearsed on the stand-in", () => {
       report,
     ).toEqual([]);
     expect(state.pendingHeld).toEqual(expect.any(Number));
+    // The run leaves the test cell on Sonnet and Jev.
+    expect(await driver.checkModels(deps, "owner")).toBeUndefined();
     // One owner alert at each line, on the stand-in alert channel.
     expect(incidents.map((incident) => incident.body.summary)).toEqual([
       "Secbot owner cell: 80% of the monthly limit",

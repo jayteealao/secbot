@@ -9,24 +9,35 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { executeSteps, preflight, writeEvidence } from "./live-guard.mjs";
+import {
+  checkModels,
+  executeSteps,
+  PREFLIGHT_PAD,
+  preflight,
+  setTestModels,
+  writeEvidence,
+} from "./live-guard.mjs";
 import {
   ALL_CHECKS,
   buildReport,
   CLEARING_FILES,
   CONTRACT,
   check,
+  decisionModelOf,
   fillArgv,
   fixedLimit,
   literalHits,
+  modelsProblem,
   newestHeld,
   overSpend,
+  parseModelList,
   percentile,
   placeLimit,
   STEPS,
   scrub,
   spendOf,
   stepsOf,
+  TEST_CELL_MODEL,
 } from "./live-guard-steps.mjs";
 
 // Built at run time, so this file itself never holds an address or a private hostname.
@@ -236,8 +247,13 @@ test("preflight prints SET or missing and never a value", async () => {
       dir,
     );
     assert.equal(missing.ok, false);
-    assert.ok(missing.lines.includes(`${"OPENROUTER_API_KEY".padEnd(30)}missing`));
-    assert.ok(missing.lines.includes(`${"device key listed for its person".padEnd(30)}no`));
+    assert.ok(missing.lines.includes(`${"OPENROUTER_API_KEY".padEnd(PREFLIGHT_PAD)}missing`));
+    // The longest label keeps two spaces before its value.
+    assert.equal(PREFLIGHT_PAD, "device key listed for its person".length + 2);
+    assert.ok(missing.lines.includes("device key listed for its person  no"));
+    assert.ok(ready.lines.includes("device key listed for its person  yes"));
+    for (const line of ready.lines.slice(0, -1))
+      assert.match(line.slice(PREFLIGHT_PAD - 2), /^ {2}\S/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -417,4 +433,115 @@ test("in shadow mode the secret read and the brokered call pass whatever the rev
   ].join("\n");
   assert.equal(check(text, { expect: activity.expect, reject: [] }).missing.length, 0);
   assert.ok(activity.waitMs > 0);
+});
+
+/** A fake cell for the models step: `secbot model list`, `model set`, `mode show`, `mode decision`. */
+function modelCell({ roles, decisionModel }) {
+  const state = { roles: roles.map((entry) => ({ ...entry })), decisionModel, calls: [] };
+  const cli = async (argv) => {
+    state.calls.push(argv.join(" "));
+    const [command, sub, a, b] = argv;
+    if (command === "model" && sub === "list") {
+      const width = Math.max(...state.roles.map((entry) => entry.role.length));
+      const out = state.roles
+        .map((entry) => `${entry.role.padEnd(width)}  ${entry.model}  (${entry.source})\n`)
+        .join("");
+      return { code: 0, out, err: "" };
+    }
+    if (command === "model" && sub === "set") {
+      const entry = state.roles.find((each) => each.role === a);
+      if (entry === undefined) return { code: 1, out: "", err: "secbot: unknown role\n" };
+      entry.model = b;
+      entry.source = "changed";
+      return { code: 0, out: `${a} now uses ${b} from its next turn\n`, err: "" };
+    }
+    if (command === "mode" && sub === "show") {
+      return {
+        code: 0,
+        out: `${a}  mode shadow  since 9 Oct 07:40  decision model ${state.decisionModel}\n`,
+        err: "",
+      };
+    }
+    if (command === "mode" && sub === "decision") {
+      state.decisionModel = b;
+      return {
+        code: 0,
+        out: `${a} now uses the ${b} decision model from the next call\n`,
+        err: "",
+      };
+    }
+    return { code: 2, out: "", err: "usage\n" };
+  };
+  return { state, deps: { cli } };
+}
+
+const RELEASE_ROLES = [
+  { role: "lead", model: "anthropic/claude-opus-5.5", source: "release default" },
+  { role: "household", model: "anthropic/claude-haiku-4.5", source: "release default" },
+  { role: "developer", model: "anthropic/claude-haiku-4.5", source: "release default" },
+  { role: "research", model: "anthropic/claude-haiku-4.5", source: "release default" },
+  { role: "health", model: "anthropic/claude-haiku-4.5", source: "release default" },
+  { role: "reviewer", model: "anthropic/claude-sonnet-5.5", source: "release default" },
+];
+
+test("the models step moves every Opus role to Sonnet and the decision model to Jev, once", async () => {
+  const { state, deps } = modelCell({ roles: RELEASE_ROLES, decisionModel: "clef" });
+  const first = await setTestModels(deps, "owner");
+  assert.equal(first.problem, undefined);
+  assert.equal(TEST_CELL_MODEL, "anthropic/claude-sonnet-5.5");
+  assert.deepEqual(
+    state.calls.filter((call) => / set | decision /.test(call)),
+    ["model set lead anthropic/claude-sonnet-5.5", "mode decision owner jev"],
+  );
+  // Haiku and Sonnet roles are not touched.
+  assert.deepEqual(
+    state.roles.map((entry) => `${entry.role} ${entry.model}`),
+    [
+      "lead anthropic/claude-sonnet-5.5",
+      "household anthropic/claude-haiku-4.5",
+      "developer anthropic/claude-haiku-4.5",
+      "research anthropic/claude-haiku-4.5",
+      "health anthropic/claude-haiku-4.5",
+      "reviewer anthropic/claude-sonnet-5.5",
+    ],
+  );
+  assert.match(first.text, /\$ secbot model set lead anthropic\/claude-sonnet-5\.5\n/);
+  assert.match(first.text, /\[models: pass\]\n$/);
+  // A second run reads the models and changes nothing.
+  state.calls.splice(0);
+  const second = await setTestModels(deps, "owner");
+  assert.equal(second.problem, undefined);
+  assert.ok(
+    state.calls.every((call) => !/ set | decision /.test(call)),
+    state.calls.join("; "),
+  );
+  assert.ok(first.text.split("\n").every((line) => line.length <= 80));
+});
+
+test("the charter refuses to start while a role uses Opus or the decision model is not Jev", async () => {
+  const opus = modelCell({ roles: RELEASE_ROLES, decisionModel: "jev" });
+  assert.equal(
+    await checkModels(opus.deps, "owner"),
+    "an Opus model is set for lead; run live:guard -- models first",
+  );
+  const clef = modelCell({
+    roles: RELEASE_ROLES.map((entry) =>
+      entry.role === "lead" ? { ...entry, model: TEST_CELL_MODEL, source: "changed" } : entry,
+    ),
+    decisionModel: "clef",
+  });
+  assert.equal(
+    await checkModels(clef.deps, "owner"),
+    "the decision model is clef, not jev; run live:guard -- models first",
+  );
+  // Checking never changes a model.
+  assert.ok(clef.state.calls.every((call) => !/ set | decision /.test(call)));
+  await setTestModels(clef.deps, "owner");
+  assert.equal(await checkModels(clef.deps, "owner"), undefined);
+  assert.equal(modelsProblem([], "jev"), "no model list from secbot model list");
+  assert.deepEqual(parseModelList("lead      anthropic/claude-opus-5.5  (release default)\n"), [
+    { role: "lead", model: "anthropic/claude-opus-5.5", source: "release default" },
+  ]);
+  assert.equal(decisionModelOf("owner  mode shadow  decision model jev\n"), "jev");
+  assert.equal(decisionModelOf("no such line"), undefined);
 });

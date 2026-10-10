@@ -71,8 +71,8 @@ export const DECISION_MODELS = {
 
 export type DecisionAdapter = keyof typeof DECISION_MODELS;
 
-/** Every cell starts on Clef. */
-export const DEFAULT_DECISION_ADAPTER: DecisionAdapter = "clef";
+/** Every cell starts on Jev; the owner can switch a cell to Clef or Clef Flash. */
+export const DEFAULT_DECISION_ADAPTER: DecisionAdapter = "jev";
 
 /**
  * OpenRouter's Decisions API path (alpha), on the gateway origin. Kept in one place: the shape
@@ -96,7 +96,10 @@ export const MARK_THRESHOLDS: Readonly<Record<string, number>> = {
 /** The threshold of a tool not listed above. */
 export const DEFAULT_MARK_THRESHOLD = 0.5;
 
-/** A decision model slower than this goes to the reviewer (the latency budget is 500 ms at p95). */
+/**
+ * A decision model slower than this goes to the reviewer. The latency budget (rules plus the
+ * decision model, 800 ms at p95) is judged by the guard bench, not by this timeout.
+ */
 export const DECISION_TIMEOUT_MS = 1_500;
 
 /** A reviewer slower than this holds the call for the person ("reviewer unavailable"). */

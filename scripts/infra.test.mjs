@@ -195,8 +195,57 @@ test("the guard-bench routes run only on the test cell, as POST with calls and G
   assert.match(lab, /^\s*do_lab\(\) \{\s*test_cell_only\n/);
   assert.match(
     lab,
-    /guard-bench\) path="\/lab\/guard-bench\?calls=\$\{calls:-100\}\$\{adapter:\+&adapter=\$adapter\}" ;;/,
+    /path="\/lab\/guard-bench\?calls=\$\{calls:-100\}\$\{adapter:\+&adapter=\$adapter\}"/,
   );
   assert.match(lab, /guard-bench-state\) method=GET ;;/);
   assert.match(shellFunction("test_cell_only"), /\[ "\$env" = "test-cell" \] \|\| die/);
+});
+
+test("the guard bench's examples run: --examples [--repeat 1-3] sends examples=1 with the repeat", () => {
+  const lab = shellFunction("do_lab");
+  assert.match(
+    lab,
+    /path="\/lab\/guard-bench\?examples=1&repeat=\$\{repeat:-2\}\$\{adapter:\+&adapter=\$adapter\}"/,
+  );
+  assert.match(releaseTool, /--examples\) examples=1; i=\$\(\(i \+ 1\)\) ;;/);
+  assert.match(releaseTool, /--repeat\) repeat="\$value"/);
+});
+
+/** Runs the release tool's argument checks only: each command here is refused before any step. */
+function refusal(command) {
+  try {
+    execFileSync(
+      "bash",
+      [
+        join(root, "infra", "ansible", "roles", "deploy_users", "files", "secbot-release"),
+        "deploy-test",
+      ],
+      { env: { ...process.env, SSH_ORIGINAL_COMMAND: command }, encoding: "utf8", stdio: "pipe" },
+    );
+  } catch (error) {
+    return { status: error.status, stderr: String(error.stderr) };
+  }
+  return { status: 0, stderr: "" };
+}
+
+// The checks run the tool under bash, so they need a Linux shell (CI, or WSL on a Windows host).
+test("the release tool refuses --examples and --repeat outside the guard bench's examples run", {
+  skip: process.platform === "win32" ? "needs a Linux bash" : false,
+}, () => {
+  const refused = [
+    [
+      "lab --env test-cell --route guard-bench --examples --calls 5",
+      /--calls or --examples, not both/,
+    ],
+    ["lab --env test-cell --route state --examples", /--examples needs --route guard-bench/],
+    ["lab --env test-cell --route guard-bench --repeat 2", /--repeat needs --examples/],
+    ["lab --env test-cell --route guard-bench --examples --repeat 4", /bad --repeat '4'/],
+    ["lab --env test-cell --route guard-bench --examples --repeat 0", /bad --repeat '0'/],
+    ["lab --env production --route guard-bench --examples", /may not use environment 'production'/],
+  ];
+  for (const [command, message] of refused) {
+    const { status, stderr } = refusal(command);
+    assert.equal(status, 1, command);
+    assert.match(stderr, message, command);
+  }
 });
