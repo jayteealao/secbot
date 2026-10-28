@@ -228,13 +228,26 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     description:
       "Start a job: a fresh subagent works on it in the background from a template. Use it for research, anything with several steps, or an outside action. Write a self-contained brief in your own words. Returns at once with the job's number; the result waits on your job board until you pull it with job_result.",
     parameters: Type.Object({
-      title: Type.String({
-        minLength: 1,
-        maxLength: 80,
-        description: "A few words on what the job does, as you tell the person.",
-      }),
-      brief: Type.String({ minLength: 1, description: "The brief, written by you." }),
-      template: Type.String({ description: "The template's name, from your job board." }),
+      title: Type.Optional(
+        Type.String({
+          minLength: 1,
+          maxLength: 80,
+          description: "A few words on what the job does, as you tell the person.",
+        }),
+      ),
+      brief: Type.Optional(
+        Type.String({ minLength: 1, description: "The brief, written by you." }),
+      ),
+      template: Type.Optional(
+        Type.String({ description: "The template's name, from your job board." }),
+      ),
+      request: Type.Optional(
+        Type.Integer({
+          minimum: 1,
+          description:
+            "A job another job asked for: start that row (title, brief, and template come from it).",
+        }),
+      ),
       priority: Type.Optional(
         literals(["urgent", "deadline", "routine", "research"] as const, "Default routine."),
       ),
@@ -251,18 +264,45 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         return refusal(`The deadline "${args.deadline}" is not a date like 2026-11-30.`);
       }
       const turn = await turnOf(api, context);
+      if (
+        args.request === undefined &&
+        (args.title === undefined || args.brief === undefined || args.template === undefined)
+      ) {
+        return refusal("A new job needs a title, a brief, and a template.");
+      }
       const started = await api.commit(async (tx) => {
+        if (args.request !== undefined) {
+          const found = await rowOrError(tx, args.request);
+          if ("error" in found) return found;
+          if (found.requestedBy === null || found.status !== "queued" || found.taskId !== null) {
+            return { error: `job ${args.request} is not a requested job waiting to start.` };
+          }
+          const tier = args.tier ?? found.tier;
+          const requested = args.effort ?? found.effort.requested;
+          const modelId = tierModelOf(tier, (await tx.doc(RoleModelsDoc)).overrides);
+          const row = await setTierEffort(tx, found.number, {
+            tier,
+            requested,
+            applied: appliedEffort(deps.models(), modelId, requested),
+          });
+          await tx.createTask(
+            JobTask,
+            { number: row.number, attempt: 0 },
+            { ownership: { kind: "conversation" }, background: true },
+          );
+          return { ...row, effort: { ...row.effort } };
+        }
         const template = templateNamed(
           templatesOf((await tx.doc(TemplatesDoc)).custom),
-          args.template,
+          args.template ?? "",
         );
         if ("error" in template) return template;
         const tier = args.tier ?? template.tier;
         const requested = args.effort ?? DEFAULT_JOB_EFFORT;
         const modelId = tierModelOf(tier, (await tx.doc(RoleModelsDoc)).overrides);
         const row = await createJobRow(tx, {
-          title: args.title.trim(),
-          brief: args.brief,
+          title: (args.title ?? "").trim(),
+          brief: args.brief ?? "",
           priority: args.priority ?? "routine",
           deadline: args.deadline ?? null,
           template: template.name,

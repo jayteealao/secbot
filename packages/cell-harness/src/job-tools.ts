@@ -1,7 +1,8 @@
 /**
  * The tools a job conversation has beside its template's: ask the lead a question and wait for the
- * answer, and search the transcripts of its own earlier attempts after a restart. A job has no
- * tool that starts a subagent.
+ * answer, ask the lead for a new job, and search the transcripts of its own earlier attempts after
+ * a restart. A job has no tool that starts a subagent: a requested job is a row on the lead's board
+ * that only the lead can start.
  */
 import { Type } from "@earendil-works/pi-ai";
 import {
@@ -15,8 +16,10 @@ import {
   wrapTool,
 } from "@earendil-works/pi-durable";
 import { logEvent } from "./cell-parts.ts";
-import { JobBoardDoc, type JobQuestion } from "./docs.ts";
-import { askQuestion } from "./job-board.ts";
+import { JobBoardDoc, type JobQuestion, TemplatesDoc } from "./docs.ts";
+import { askQuestion, createJobRow } from "./job-board.ts";
+import { DEFAULT_JOB_EFFORT } from "./release-defaults.ts";
+import { templateNamed, templatesOf } from "./templates.ts";
 import type { JobHolds } from "./job-holds.ts";
 import { type HistoryHit, searchHistoryWindow } from "./history-search.ts";
 import { jobOf } from "./telemetry.ts";
@@ -66,6 +69,10 @@ export const QUESTION_MAX_CHARS = 1_000;
 /** The lead's wake notice for a job's question. */
 export const questionNotice = (n: number) =>
   `[job ${n} question: read it with read_job; answer with answer_job]`;
+
+/** The lead's wake notice for a job's request for a new job. */
+export const requestNotice = (n: number, m: number) =>
+  `[job ${n} asks for a new job: job ${m}; start it with start_job request ${m} or leave it]`;
 
 /** The answer as the job reads it. */
 const answerText = (question: JobQuestion) =>
@@ -190,7 +197,69 @@ export function createJobToolsExtension(deps: JobToolsDeps): Extension {
       };
     },
   });
-  const tools = [askLead, searchOldJob];
+  const requestJob = defineTool({
+    name: "request_job",
+    description:
+      "Ask the lead for a new job when this one needs work you cannot do yourself. It is added to the lead's job board and the lead decides whether to start it; you go on with your own job.",
+    parameters: Type.Object({
+      title: Type.String({ minLength: 1, maxLength: 80, description: "A few words on the job." }),
+      brief: Type.String({ minLength: 1, description: "A self-contained brief." }),
+      template: Type.String({ description: "The template's name." }),
+    }),
+    // A crash mid-call gives an interrupted result instead of a second request.
+    replay: "unsafe",
+    execute: async (args, api, context) => {
+      const n = await jobOf(api, api.conversationId, context);
+      if (n === null) return refusal("Only a job can ask for a new job.");
+      const requested = await api.commit(async (tx) => {
+        const template = templateNamed(
+          templatesOf((await tx.doc(TemplatesDoc)).custom),
+          args.template,
+        );
+        if ("error" in template) return template;
+        const row = await createJobRow(tx, {
+          title: args.title.trim(),
+          brief: args.brief,
+          priority: "routine",
+          deadline: null,
+          template: template.name,
+          tier: template.tier,
+          effort: { requested: DEFAULT_JOB_EFFORT, applied: DEFAULT_JOB_EFFORT },
+          owner: deps.person,
+          turn: null,
+          createdAt: deps.now(),
+        });
+        row.requestedBy = n;
+        return { number: row.number };
+      }, context);
+      if ("error" in requested) return refusal(requested.error);
+      const m = requested.number;
+      const lead = await deps.harness().conversation(ROOT_CONVERSATION_ID, context);
+      await lead?.submit(
+        {
+          type: "input",
+          content: requestNotice(n, m),
+          whenBusy: "followUp",
+          requestId: `request:${n}:${m}`,
+        },
+        context,
+      );
+      logEvent("job.requested", {
+        cell: deps.person,
+        job: m,
+        by_job: n,
+        brief_chars: args.brief.length,
+      });
+      return {
+        ...text(
+          `job ${m} is on the lead's board; the lead decides whether to start it. Go on with your own job.`,
+        ),
+        details: { job: m },
+      };
+    },
+  });
+
+  const tools = [askLead, requestJob, searchOldJob];
   return defineExtension({
     name: "secbot-job-tools",
     tools,

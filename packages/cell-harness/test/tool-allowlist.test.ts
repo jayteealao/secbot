@@ -33,6 +33,7 @@ const JOB_TOOLS = [
   "broker_call",
   "household_change",
   "household_read",
+  "request_job",
   "search_history",
   "search_old_job",
   "secret_get",

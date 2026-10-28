@@ -4,9 +4,9 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { answerQuestion } from "../src/job-board.ts";
-import { questionNotice } from "../src/job-tools.ts";
+import { questionNotice, requestNotice } from "../src/job-tools.ts";
 import { askPersonText } from "../src/lead-tools.ts";
-import { job } from "./escalation-helpers.ts";
+import { job, leadCalls } from "./escalation-helpers.ts";
 import {
   createFauxGateway,
   fauxAssistantMessage,
@@ -198,5 +198,71 @@ describe("the lead answers, or asks the person", () => {
       message: "job 1 has no question waiting",
     });
     expect(await t.cell.answerJob(9, "x")).toMatchObject({ ok: false, message: "no job #9" });
+  });
+});
+
+describe("no spawn: a job asks for a new job (AC-23)", () => {
+  it("gives a job no tool that starts work; request_job adds a row only the lead starts", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const requests: Responder = (request) => {
+      if (request.role !== "research") return jobResponder(request);
+      if (request.lastText.includes("find hotels near the venue")) {
+        return fauxAssistantMessage([fauxText("Hotels: three near the venue.")]);
+      }
+      if (request.last?.role === "toolResult") {
+        return fauxAssistantMessage([fauxText("Flights found; hotels asked for.")]);
+      }
+      return fauxAssistantMessage(
+        [
+          fauxToolCall("request_job", {
+            title: "hotels",
+            brief: "find hotels near the venue",
+            template: "research",
+          }),
+        ],
+        { stopReason: "toolUse" },
+      );
+    };
+    test = await openTestCell({ gateway: createFauxGateway(requests) });
+    const t = test;
+    await (
+      await t.cell.submit(
+        startJobLine({ title: "flights", brief: "find flights to Lisbon", template: "research" }),
+        "req-1",
+      )
+    ).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await job(t))?.result != null);
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+
+    const id = (await job(t))?.conversationId;
+    if (id === null || id === undefined) throw new Error("no job conversation");
+    const agent = await (await t.cell.harness.conversation(id, BACKGROUND_CONTEXT))?.agent(
+      BACKGROUND_CONTEXT,
+    );
+    const names = agent?.tools.map((tool) => tool.name) ?? [];
+    for (const name of ["start_job", "restart_job", "set_job", "answer_job"]) {
+      expect(names).not.toContain(name);
+    }
+
+    const requested = await job(t, 2);
+    expect(requested).toMatchObject({
+      status: "queued",
+      requestedBy: 1,
+      taskId: null,
+      conversationId: null,
+      title: "hotels",
+    });
+    expect(await wakeNoticesOf(t.cell.root)).toContain(requestNotice(1, 2));
+    expect(
+      loggedEvents(log.mock.calls).find((each) => each.event === "job.requested"),
+    ).toMatchObject({ job: 2, by_job: 1 });
+
+    const said = await leadCalls(t, "start_job", { request: 2 });
+    expect(said).toContain("job 2 started: research");
+    await until(async () => (await job(t, 2))?.result != null);
+    expect((await job(t, 2))?.result?.text).toBe("Hotels: three near the venue.");
+    expect(await leadCalls(t, "start_job", { request: 2 })).toBe(
+      "job 2 is not a requested job waiting to start.",
+    );
   });
 });
