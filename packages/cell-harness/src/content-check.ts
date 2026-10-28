@@ -4,6 +4,15 @@
  * overlapping chunks, every chunk is checked, and a hit, a timeout, or an error stops the job: the
  * check fails closed, in every guard mode.
  */
+import type { Usage } from "@earendil-works/pi-ai";
+import { buildContentState, DecisionFailure, type DecisionModel } from "./decision-model.ts";
+import {
+  CONTENT_CHECK_MAX_BYTES,
+  CONTENT_CHECK_PARALLEL,
+  CONTENT_CHUNK_BYTES,
+  CONTENT_CHUNK_OVERLAP_BYTES,
+  type OutsideKind,
+} from "./release-defaults.ts";
 
 /** A chunk's size as written into the decision request: its JSON-escaped UTF-8 bytes. */
 export function requestBytes(text: string): number {
@@ -93,4 +102,113 @@ export function chunkContent(text: string, sizes: ChunkSizes): Chunks {
     start = next;
   }
   return { chunks, starts, checkedText, cut };
+}
+
+/** One read of outside content to check: its kind, the reading tool, and the text. */
+export interface ContentRead {
+  readonly kind: OutsideKind;
+  readonly tool: string;
+  readonly text: string;
+}
+
+interface Checked {
+  /** How many chunks the kept text has. */
+  readonly chunks: number;
+  readonly checkedText: string;
+  readonly cut: boolean;
+  /** What the answers cost, failed ones included. */
+  readonly costUsd: number;
+  readonly usages: Usage[];
+}
+
+/** The check's verdict on one read: clean, or why it stops the job and at which chunk. */
+export type ContentVerdict =
+  | (Checked & { readonly outcome: "clean" })
+  | (Checked & {
+      readonly outcome: "hit" | "timeout" | "error";
+      /** The chunk that answered (from 0), or null when the check failed before any chunk. */
+      readonly chunk: number | null;
+      /** The answer's choice for a hit, the failure's cause, or `thrown`. */
+      readonly cause: string;
+    });
+
+type Stop = { outcome: "hit" | "timeout" | "error"; chunk: number | null; cause: string };
+
+const DEFAULT_SIZES: ChunkSizes = {
+  chunkBytes: CONTENT_CHUNK_BYTES,
+  overlapBytes: CONTENT_CHUNK_OVERLAP_BYTES,
+  maxBytes: CONTENT_CHECK_MAX_BYTES,
+};
+
+/** The abort reason of a signal, as an error to throw. */
+const abortError = (signal: AbortSignal): unknown =>
+  signal.reason ?? new DOMException("The content check was aborted", "AbortError");
+
+/**
+ * Checks one read: the kept text's chunks are asked, `parallel` at a time; the first answer that is
+ * not clean ends the others (their aborts are not failures). A hit stops with the chunk; a timeout
+ * stops as `timeout`; any other failure or throw stops as `error`. An abort of `signal` is thrown.
+ */
+export async function checkContent(
+  model: DecisionModel,
+  read: ContentRead,
+  signal?: AbortSignal,
+  sizes: ChunkSizes = DEFAULT_SIZES,
+  parallel: number = CONTENT_CHECK_PARALLEL,
+): Promise<ContentVerdict> {
+  if (signal?.aborted) throw abortError(signal);
+  const { chunks, checkedText, cut } = chunkContent(read.text, sizes);
+  const inner = new AbortController();
+  const onAbort = () => inner.abort(signal?.reason);
+  signal?.addEventListener("abort", onAbort, { once: true });
+  let stop: Stop | null = null;
+  let costUsd = 0;
+  const usages: Usage[] = [];
+  let next = 0;
+  const worker = async () => {
+    while (stop === null && !inner.signal.aborted) {
+      const index = next++;
+      if (index >= chunks.length) return;
+      try {
+        const state = buildContentState({
+          kind: read.kind,
+          tool: read.tool,
+          index,
+          of: chunks.length,
+          text: chunks[index] ?? "",
+        });
+        const answer = await model.checkContent(state, inner.signal);
+        costUsd += answer.costUsd;
+        if (answer.usage !== undefined) usages.push(answer.usage);
+        if (answer.outcome !== "clean")
+          stop ??= { outcome: "hit", chunk: index, cause: answer.choice };
+      } catch (error) {
+        if (error instanceof DecisionFailure) {
+          costUsd += error.costUsd;
+          if (error.usage !== undefined) usages.push(error.usage);
+        }
+        // An abort after another chunk's stop, or the outer abort, is not this chunk's failure.
+        if (stop !== null || signal?.aborted) return;
+        stop =
+          error instanceof DecisionFailure
+            ? {
+                outcome: error.cause === "timeout" ? "timeout" : "error",
+                chunk: index,
+                cause: error.cause,
+              }
+            : { outcome: "error", chunk: index, cause: "thrown" };
+      }
+      if (stop !== null) inner.abort();
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: Math.min(parallel, chunks.length) }, worker));
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+  if (signal?.aborted) throw abortError(signal);
+  const checked = { chunks: chunks.length, checkedText, cut, costUsd, usages };
+  // The workers set `stop`; flow analysis does not follow closures.
+  const found = stop as Stop | null;
+  return found === null ? { outcome: "clean", ...checked } : { ...found, ...checked };
 }
