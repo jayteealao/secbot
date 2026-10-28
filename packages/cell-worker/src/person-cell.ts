@@ -252,11 +252,11 @@ const answerJson = <T>(
 const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
 
 /** A real calendar day written YYYY-MM-DD. */
-export function isDay(text: string): boolean {
-  const parts = DAY.exec(text);
+export function isDay(value: string): boolean {
+  const parts = DAY.exec(value);
   if (parts === null) return false;
   const date = new Date(Date.UTC(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3])));
-  return date.toISOString().slice(0, 10) === text;
+  return date.toISOString().slice(0, 10) === value;
 }
 
 /** The reorder a priority body asks for; undefined when it asks for none or for two. */

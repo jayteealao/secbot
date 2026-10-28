@@ -30,6 +30,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { HOUSEHOLD_CELL } from "./cell-names.ts";
 import { CellClient, OperatorClient } from "./client.ts";
 import { activity } from "./commands/activity.ts";
 import { chat } from "./commands/chat.ts";
@@ -230,7 +231,7 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
           return await jobsBoardOf(
             await OperatorClient.from(environment, options.fetch),
             io,
-            values.person ?? "household",
+            values.person ?? HOUSEHOLD_CELL,
           );
         }
         return await jobsBoard(await client(), io);

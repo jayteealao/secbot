@@ -73,6 +73,7 @@ describe("the person's guard routes (device key)", () => {
     expect(listed.person.map((r) => r.tool)).toEqual([
       "start_job",
       "restart_job",
+      "resume_job",
       "answer_job",
       "ask_person",
       "mark_risky",

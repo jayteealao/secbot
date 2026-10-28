@@ -21,6 +21,7 @@ const LEAD_TOOLS = [
   "read_job",
   "read_result",
   "restart_job",
+  "resume_job",
   "resume_work",
   "search_history",
   "secret_get",

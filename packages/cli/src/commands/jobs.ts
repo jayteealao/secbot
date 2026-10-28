@@ -4,6 +4,7 @@
  * job's current tier, and `TIER` is the tier with the effort the model applied. The owner, with
  * the operator key: `--person <name>` for one person's board, `--household` for shared jobs.
  */
+import { HOUSEHOLD_CELL } from "../cell-names.ts";
 import type { CellClient, OperatorClient } from "../client.ts";
 import type { Io } from "../io.ts";
 import { columns, plain, RULE, WIDTH } from "../text.ts";
@@ -152,7 +153,7 @@ export async function jobsBoard(client: CellClient, io: Io): Promise<number> {
 export async function jobsBoardOf(client: OperatorClient, io: Io, cell: string): Promise<number> {
   const view = await client.request<BoardView>("GET", `/ops/jobs?cell=${encodeURIComponent(cell)}`);
   // The household's shared jobs have no activity of their own to point at.
-  io.stdout(`${boardLines(view, true, cell === "household" ? undefined : cell).join("\n")}\n`);
+  io.stdout(`${boardLines(view, true, cell === HOUSEHOLD_CELL ? undefined : cell).join("\n")}\n`);
   return 0;
 }
 
@@ -169,11 +170,11 @@ const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /** A real calendar day written YYYY-MM-DD. */
-export function isDay(text: string): boolean {
-  const parts = DAY.exec(text);
+export function isDay(value: string): boolean {
+  const parts = DAY.exec(value);
   if (parts === null) return false;
   const date = new Date(Date.UTC(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3])));
-  return date.toISOString().slice(0, 10) === text;
+  return date.toISOString().slice(0, 10) === value;
 }
 
 /** `12 Oct` for `2026-10-12`. */

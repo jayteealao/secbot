@@ -537,6 +537,7 @@ describe("the rule store", () => {
     expect(first.person.map((r) => [r.agent, r.tool, r.verdict, r.source])).toEqual([
       ["all", "start_job", "permit", "default"],
       ["all", "restart_job", "permit", "default"],
+      ["all", "resume_job", "permit", "default"],
       ["all", "answer_job", "permit", "default"],
       ["all", "ask_person", "permit", "default"],
       ["all", "mark_risky", "permit", "default"],
@@ -552,7 +553,7 @@ describe("the rule store", () => {
     await test.cell.removeRule("person", { agent: "all", tool: "search_history" });
     await test.reopen();
     const after = await test.cell.rules();
-    expect(after.person).toHaveLength(12);
+    expect(after.person).toHaveLength(13);
     expect(after.owner).toHaveLength(3);
   });
 
@@ -577,6 +578,7 @@ describe("the rule store", () => {
     expect(after.person.map((r) => r.tool)).toEqual([
       "start_job",
       "restart_job",
+      "resume_job",
       "answer_job",
       "ask_person",
       "mark_risky",

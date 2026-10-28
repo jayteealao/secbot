@@ -22,11 +22,14 @@ const DISPATCH_DIRS = [join(packages, "cli", "src"), join(packages, "cell-worker
  * holds only the developer budget's name, which the cost and limits commands print and type; it
  * names a budget and routes nothing. The CLI's `secret-kinds.ts` holds only the broker kinds
  * (`health`, `production`) that `secbot secrets add --broker` types; a kind names the service the
- * secrets cell calls, and routes nothing.
+ * secrets cell calls, and routes nothing. The CLI's `cell-names.ts` holds only the household cell's name,
+ * which `secbot jobs --household` reads a board of; the name is also a template name, but it names a
+ * cell to read and routes nothing.
  */
 const NOT_DISPATCH = new Set([
   "budget-names.ts",
   "cell-assertions.ts",
+  "cell-names.ts",
   "conformance-cell.ts",
   "durability-lab.ts",
   "held.ts",
