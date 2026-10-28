@@ -19,6 +19,8 @@ import {
   defineTool,
   type Extension,
   type ToolExecutionApi,
+  type ToolExecutionResult,
+  type Tx,
 } from "@earendil-works/pi-durable";
 import { appendRecord, recordOf } from "./activity.ts";
 import { errorFields, logEvent } from "./cell-parts.ts";
@@ -134,8 +136,8 @@ export const secretsReason = (error: unknown): string =>
 const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
 
 /** The id that ties a secrets request to its tool call in every cell's log. */
-const requestIdOf = (api: Pick<ToolExecutionApi, "taskId" | "callId">) =>
-  `${String(api.taskId)}:${api.callId}`;
+const requestIdOf = (call: { readonly taskId: unknown; readonly callId: string }) =>
+  `${String(call.taskId)}:${call.callId}`;
 
 export interface SecretsExtensionOptions {
   readonly now: () => number;
@@ -163,53 +165,176 @@ export function redactionLoader(person: string, client: () => SecretsClient | un
   };
 }
 
+/**
+ * What a secrets effect needs of its caller: the call's identity (a tool call, or a background
+ * receipt task running the lead's call) and a commit for the refusal's activity record.
+ */
+export interface SecretsCall {
+  readonly taskId: unknown;
+  readonly callId: string;
+  readonly agent: string;
+  readonly commit: <T>(change: (tx: Tx) => T | Promise<T>, context: Context) => Promise<T>;
+}
+
+/** The secrets cell, the cell's clock and zone, and the redactor's loader, as the effects use them. */
+export interface SecretsDeps {
+  readonly person: string;
+  readonly client: () => SecretsClient | undefined;
+  readonly options: SecretsExtensionOptions;
+  readonly loadRedaction: () => Promise<void>;
+}
+
+/** One `secrets`-layer activity record for a refused or unanswered request. */
+async function refused(
+  deps: SecretsDeps,
+  call: SecretsCall,
+  fields: {
+    readonly label: string;
+    readonly arguments: Record<string, JsonValue>;
+    readonly reason: string;
+  },
+  context: Context,
+) {
+  const record = recordOf({
+    key: `${String(call.taskId)}:${call.callId}:secrets`,
+    at: deps.options.now(),
+    kind: "verdict",
+    agent: call.agent,
+    tool: fields.label,
+    verdict: "refused",
+    layer: "secrets",
+    reason: fields.reason,
+    ruleId: null,
+    ruleLevel: null,
+    arguments: fields.arguments,
+    keep: [],
+    cost: 0,
+  });
+  await call.commit((tx) => appendRecord(tx, record, deps.options.timeZone), context);
+  logEvent(
+    "secrets.request",
+    {
+      cell: deps.person,
+      role: call.agent,
+      tool: fields.label,
+      task_id: call.taskId,
+      call_id: call.callId,
+      outcome: "refused",
+      reason: record.reason,
+    },
+    "warn",
+  );
+}
+
+/** `secret_get`'s effect: one granted secret's value, or a refusal (recorded in activity). */
+export async function secretGet(
+  deps: SecretsDeps,
+  call: SecretsCall,
+  args: { readonly name: string },
+  context: Context,
+): Promise<ToolExecutionResult> {
+  const label = `secret ${args.name}`;
+  const secrets = deps.client();
+  try {
+    if (secrets === undefined) throw new SecretsUnavailable();
+    await deps.loadRedaction();
+    const { value } = await secrets.get(deps.person, call.agent, args.name, requestIdOf(call));
+    addKnownSecretValues([value], deps.person);
+    logEvent("secrets.request", {
+      cell: deps.person,
+      role: call.agent,
+      tool: label,
+      task_id: call.taskId,
+      call_id: call.callId,
+      outcome: "ok",
+    });
+    return { ...text(value), details: { name: args.name } };
+  } catch (error) {
+    const reason = secretsReason(error);
+    await refused(deps, call, { label, arguments: { name: args.name }, reason }, context);
+    return { ...text(`Refused: ${reason}.`), isError: true };
+  }
+}
+
+export interface BrokerArgs {
+  readonly secret: string;
+  readonly method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  readonly path: string;
+  readonly body?: string;
+}
+
+/** `broker_call`'s effect: the service's answer through the secrets cell, or a refusal. */
+export async function brokerCall(
+  deps: SecretsDeps,
+  call: SecretsCall,
+  args: BrokerArgs,
+  context: Context,
+): Promise<ToolExecutionResult> {
+  const label = `broker ${args.secret}`;
+  const secrets = deps.client();
+  const request: BrokerRequest = {
+    method: args.method,
+    path: args.path,
+    ...(args.body === undefined ? {} : { body: args.body }),
+  };
+  try {
+    if (secrets === undefined) throw new SecretsUnavailable();
+    await deps.loadRedaction();
+    const answer = await secrets.broker(
+      deps.person,
+      call.agent,
+      args.secret,
+      request,
+      requestIdOf(call),
+    );
+    logEvent("secrets.request", {
+      cell: deps.person,
+      role: call.agent,
+      tool: label,
+      task_id: call.taskId,
+      call_id: call.callId,
+      outcome: "ok",
+      status: answer.status,
+    });
+    const said =
+      answer.status === 0 ? answer.body : `The service answered ${answer.status}.\n${answer.body}`;
+    return {
+      ...text(said),
+      details: { secret: args.secret, status: answer.status },
+      ...(answer.status === 0 || answer.status >= 400 ? { isError: true } : {}),
+    };
+  } catch (error) {
+    const reason = secretsReason(error);
+    await refused(
+      deps,
+      call,
+      {
+        label,
+        arguments: { secret: args.secret, method: args.method, path: args.path },
+        reason,
+      },
+      context,
+    );
+    return { ...text(`Refused: ${reason}.`), isError: true };
+  }
+}
+
 export function createSecretsExtension(
   person: string,
   client: () => SecretsClient | undefined,
   options: SecretsExtensionOptions,
   loadRedaction: () => Promise<void> = redactionLoader(person, client),
 ): Extension {
-  /** One `secrets`-layer activity record for a refused or unanswered request. */
-  async function refused(
-    api: Pick<ToolExecutionApi, "taskId" | "callId" | "commit">,
-    fields: {
-      readonly agent: string;
-      readonly label: string;
-      readonly arguments: Record<string, JsonValue>;
-      readonly reason: string;
-    },
+  const deps: SecretsDeps = { person, client, options, loadRedaction };
+  const callOf = async (
+    api: Pick<ToolExecutionApi, "taskId" | "callId" | "commit" | "conversationId" | "snapshot">,
     context: Context,
-  ) {
-    const record = recordOf({
-      key: `${String(api.taskId)}:${api.callId}:secrets`,
-      at: options.now(),
-      kind: "verdict",
-      agent: fields.agent,
-      tool: fields.label,
-      verdict: "refused",
-      layer: "secrets",
-      reason: fields.reason,
-      ruleId: null,
-      ruleLevel: null,
-      arguments: fields.arguments,
-      keep: [],
-      cost: 0,
-    });
-    await api.commit((tx) => appendRecord(tx, record, options.timeZone), context);
-    logEvent(
-      "secrets.request",
-      {
-        cell: person,
-        role: fields.agent,
-        tool: fields.label,
-        task_id: api.taskId,
-        call_id: api.callId,
-        outcome: "refused",
-        reason: record.reason,
-      },
-      "warn",
-    );
-  }
+  ): Promise<SecretsCall> => ({
+    taskId: api.taskId,
+    callId: api.callId,
+    agent: await roleOf(api, api.conversationId, context),
+    commit: (change, commitContext) => api.commit(change, commitContext),
+  });
 
   const get = defineTool({
     name: "secret_get",
@@ -217,30 +342,8 @@ export function createSecretsExtension(
       "Read one secret that the person granted to you, by name. Health and production secrets are never returned: use broker_call for those.",
     parameters: Type.Object({ name: Type.String({ description: "The secret's name." }) }),
     replay: "safe",
-    execute: async (args, api, context) => {
-      const agent = await roleOf(api, api.conversationId, context);
-      const label = `secret ${args.name}`;
-      const secrets = client();
-      try {
-        if (secrets === undefined) throw new SecretsUnavailable();
-        await loadRedaction();
-        const { value } = await secrets.get(person, agent, args.name, requestIdOf(api));
-        addKnownSecretValues([value], person);
-        logEvent("secrets.request", {
-          cell: person,
-          role: agent,
-          tool: label,
-          task_id: api.taskId,
-          call_id: api.callId,
-          outcome: "ok",
-        });
-        return { ...text(value), details: { name: args.name } };
-      } catch (error) {
-        const reason = secretsReason(error);
-        await refused(api, { agent, label, arguments: { name: args.name }, reason }, context);
-        return { ...text(`Refused: ${reason}.`), isError: true };
-      }
-    },
+    execute: async (args, api, context) =>
+      secretGet(deps, await callOf(api, context), args, context),
   });
 
   const broker = defineTool({
@@ -261,52 +364,8 @@ export function createSecretsExtension(
     }),
     // A brokered call can change something outside: a crash mid-call is never repeated blindly.
     replay: "unsafe",
-    execute: async (args, api, context) => {
-      const agent = await roleOf(api, api.conversationId, context);
-      const label = `broker ${args.secret}`;
-      const secrets = client();
-      const request: BrokerRequest = {
-        method: args.method,
-        path: args.path,
-        ...(args.body === undefined ? {} : { body: args.body }),
-      };
-      try {
-        if (secrets === undefined) throw new SecretsUnavailable();
-        await loadRedaction();
-        const answer = await secrets.broker(person, agent, args.secret, request, requestIdOf(api));
-        logEvent("secrets.request", {
-          cell: person,
-          role: agent,
-          tool: label,
-          task_id: api.taskId,
-          call_id: api.callId,
-          outcome: "ok",
-          status: answer.status,
-        });
-        const said =
-          answer.status === 0
-            ? answer.body
-            : `The service answered ${answer.status}.\n${answer.body}`;
-        return {
-          ...text(said),
-          details: { secret: args.secret, status: answer.status },
-          ...(answer.status === 0 || answer.status >= 400 ? { isError: true } : {}),
-        };
-      } catch (error) {
-        const reason = secretsReason(error);
-        await refused(
-          api,
-          {
-            agent,
-            label,
-            arguments: { secret: args.secret, method: args.method, path: args.path },
-            reason,
-          },
-          context,
-        );
-        return { ...text(`Refused: ${reason}.`), isError: true };
-      }
-    },
+    execute: async (args, api, context) =>
+      brokerCall(deps, await callOf(api, context), args, context),
   });
 
   return defineExtension({ name: "secbot-secrets", tools: [get, broker] });

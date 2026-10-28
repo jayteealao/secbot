@@ -7,7 +7,12 @@
  * source: .scratch/sources/git/celld tag v0.6.1, docs/cloudflare-compat.md:95-99).
  */
 import { Type } from "@earendil-works/pi-ai";
-import { defineExtension, defineTool, type Extension } from "@earendil-works/pi-durable";
+import {
+  defineExtension,
+  defineTool,
+  type Extension,
+  type ToolExecutionResult,
+} from "@earendil-works/pi-durable";
 import {
   DEFAULT_HOUSEHOLD_DOCUMENT,
   HOUSEHOLD_DOCUMENT,
@@ -18,6 +23,94 @@ import {
 const UNREACHABLE = "The household cell is not reachable from here.";
 
 const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
+
+export interface HouseholdReadArgs {
+  readonly document?: string;
+}
+
+export interface HouseholdChangeArgs {
+  readonly document?: string;
+  readonly op: "add" | "edit" | "remove";
+  readonly itemId?: string;
+  readonly text?: string;
+  readonly done?: boolean;
+}
+
+/** `household_read`'s effect: the document's items with their ids. */
+export async function householdRead(
+  client: HouseholdClient | undefined,
+  args: HouseholdReadArgs,
+): Promise<ToolExecutionResult> {
+  const document = args.document ?? DEFAULT_HOUSEHOLD_DOCUMENT;
+  if (!HOUSEHOLD_DOCUMENT.test(document)) {
+    return { ...text(`No document named "${document}".`), isError: true };
+  }
+  if (client === undefined) return { ...text(UNREACHABLE), isError: true };
+  const found = await client.read(document);
+  const lines = found.items.map(
+    (item) => `- [${item.done ? "x" : " "}] ${item.text} (id ${item.itemId})`,
+  );
+  return {
+    ...text(
+      lines.length === 0 ? `The ${document} is empty.` : [`The ${document}:`, ...lines].join("\n"),
+    ),
+    details: { document, items: found.items.length },
+  };
+}
+
+/**
+ * `household_change`'s effect: one item change, applied once per `opId` by the household cell
+ * (the caller makes the id from durable values, so a rerun sends the same one).
+ */
+export async function householdChange(
+  client: HouseholdClient | undefined,
+  args: HouseholdChangeArgs,
+  opId: string,
+  cell: string,
+): Promise<ToolExecutionResult> {
+  const document = args.document ?? DEFAULT_HOUSEHOLD_DOCUMENT;
+  if (!HOUSEHOLD_DOCUMENT.test(document)) {
+    return { ...text(`No document named "${document}".`), isError: true };
+  }
+  if (client === undefined) return { ...text(UNREACHABLE), isError: true };
+  const base = { opId, document, fromCell: cell };
+  let request: HouseholdChange;
+  if (args.op === "add") {
+    if (args.text === undefined || args.text.trim() === "") {
+      return { ...text("An add needs the item's text."), isError: true };
+    }
+    request = { ...base, kind: "add", text: args.text };
+  } else if (args.itemId === undefined) {
+    return { ...text(`An ${args.op} needs the item's id.`), isError: true };
+  } else if (args.op === "edit") {
+    if (args.text === undefined && args.done === undefined) {
+      return { ...text("An edit needs a new text or a done mark."), isError: true };
+    }
+    request = {
+      ...base,
+      kind: "edit",
+      itemId: args.itemId,
+      ...(args.text === undefined ? {} : { text: args.text }),
+      ...(args.done === undefined ? {} : { done: args.done }),
+    };
+  } else {
+    request = { ...base, kind: "remove", itemId: args.itemId };
+  }
+  const result = await client.apply(request);
+  const said =
+    result.outcome === "missing"
+      ? `No item ${result.itemId} in the ${document}; nothing changed.`
+      : `${result.kind === "add" ? "Added" : result.kind === "edit" ? "Changed" : "Removed"} item ${result.itemId} in the ${document}.`;
+  return {
+    ...text(said),
+    details: {
+      outcome: result.outcome,
+      itemId: result.itemId,
+      seq: result.seq,
+      duplicate: result.duplicate,
+    },
+  };
+}
 
 export function createHouseholdExtension(
   cell: string,
@@ -32,26 +125,7 @@ export function createHouseholdExtension(
       "Read a shared household document, such as the household list, that both people in the household see. Returns each item with its id.",
     parameters: Type.Object({ document: documentParameter }),
     replay: "safe",
-    execute: async (args) => {
-      const document = args.document ?? DEFAULT_HOUSEHOLD_DOCUMENT;
-      if (!HOUSEHOLD_DOCUMENT.test(document)) {
-        return { ...text(`No document named "${document}".`), isError: true };
-      }
-      const household = client();
-      if (household === undefined) return { ...text(UNREACHABLE), isError: true };
-      const found = await household.read(document);
-      const lines = found.items.map(
-        (item) => `- [${item.done ? "x" : " "}] ${item.text} (id ${item.itemId})`,
-      );
-      return {
-        ...text(
-          lines.length === 0
-            ? `The ${document} is empty.`
-            : [`The ${document}:`, ...lines].join("\n"),
-        ),
-        details: { document, items: found.items.length },
-      };
-    },
+    execute: async (args) => householdRead(client(), args),
   });
   const change = defineTool({
     name: "household_change",
@@ -66,51 +140,8 @@ export function createHouseholdExtension(
     }),
     // The operation id is the same on a rerun, so the household cell applies the change once.
     replay: "safe",
-    execute: async (args, api) => {
-      const document = args.document ?? DEFAULT_HOUSEHOLD_DOCUMENT;
-      if (!HOUSEHOLD_DOCUMENT.test(document)) {
-        return { ...text(`No document named "${document}".`), isError: true };
-      }
-      const household = client();
-      if (household === undefined) return { ...text(UNREACHABLE), isError: true };
-      const base = { opId: `${cell}:${api.taskId}:${api.callId}`, document, fromCell: cell };
-      let request: HouseholdChange;
-      if (args.op === "add") {
-        if (args.text === undefined || args.text.trim() === "") {
-          return { ...text("An add needs the item's text."), isError: true };
-        }
-        request = { ...base, kind: "add", text: args.text };
-      } else if (args.itemId === undefined) {
-        return { ...text(`An ${args.op} needs the item's id.`), isError: true };
-      } else if (args.op === "edit") {
-        if (args.text === undefined && args.done === undefined) {
-          return { ...text("An edit needs a new text or a done mark."), isError: true };
-        }
-        request = {
-          ...base,
-          kind: "edit",
-          itemId: args.itemId,
-          ...(args.text === undefined ? {} : { text: args.text }),
-          ...(args.done === undefined ? {} : { done: args.done }),
-        };
-      } else {
-        request = { ...base, kind: "remove", itemId: args.itemId };
-      }
-      const result = await household.apply(request);
-      const said =
-        result.outcome === "missing"
-          ? `No item ${result.itemId} in the ${document}; nothing changed.`
-          : `${result.kind === "add" ? "Added" : result.kind === "edit" ? "Changed" : "Removed"} item ${result.itemId} in the ${document}.`;
-      return {
-        ...text(said),
-        details: {
-          outcome: result.outcome,
-          itemId: result.itemId,
-          seq: result.seq,
-          duplicate: result.duplicate,
-        },
-      };
-    },
+    execute: async (args, api) =>
+      householdChange(client(), args, `${cell}:${api.taskId}:${api.callId}`, cell),
   });
   return defineExtension({ name: "secbot-household", tools: [read, change] });
 }
