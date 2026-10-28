@@ -213,10 +213,21 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
    * waits on its hold, which the abort rejects); the lead asks the person in its own words.
    */
   const endExhausted = async (
-    ended: { readonly number: number; readonly taskId: TaskId | null },
+    ended: {
+      readonly number: number;
+      readonly taskId: TaskId | null;
+      readonly cost: number;
+      readonly cap: number;
+    },
     context: Context,
   ) => {
-    logEvent("job.paused", { cell: person, job: ended.number, reason: "escalation" });
+    logEvent("job.paused", {
+      cell: person,
+      job: ended.number,
+      reason: "escalation",
+      cost_usd: ended.cost,
+      cap_usd: ended.cap,
+    });
     if (ended.taskId !== null) {
       await deps.harness().abortTask(ended.taskId, withoutAbortSignal(context));
     }
@@ -426,7 +437,14 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
           if ("refused" in counted) {
             if (escalationsUsed(found)) {
               const ended = await exhaust(tx, args.job, deps.now());
-              return { exhausted: { number: ended.number, taskId: ended.taskId } };
+              return {
+                exhausted: {
+                  number: ended.number,
+                  taskId: ended.taskId,
+                  cost: ended.cost,
+                  cap: ended.cap,
+                },
+              };
             }
             return { error: `Refused: job ${args.job} has used its raise; restart_job is left.` };
           }
@@ -532,7 +550,14 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         if ("refused" in counted) {
           if (escalationsUsed(found)) {
             const ended = await exhaust(tx, args.job, at);
-            return { exhausted: { number: ended.number, taskId: ended.taskId } };
+            return {
+              exhausted: {
+                number: ended.number,
+                taskId: ended.taskId,
+                cost: ended.cost,
+                cap: ended.cap,
+              },
+            };
           }
           return {
             error: `Refused: job ${args.job} has used its restart; a raise with set_job is left.`,

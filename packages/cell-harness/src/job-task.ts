@@ -312,7 +312,9 @@ export function createJobTask(deps: JobTaskDeps) {
           context,
         );
         const settled = await submission.wait(context);
-        let ended: { row: JobRow; kind: ResultKind; chars: number; outcome: string } | undefined;
+        let ended:
+          | { row: JobRow; kind: ResultKind; chars: number; outcome: string; marked: number }
+          | undefined;
         await runtime.commit(async (tx) => {
           // A run the lead restarted while it answered leaves the new run's row alone.
           if (!ownsRow(await rowOf(tx, n), String(job.id))) {
@@ -359,6 +361,7 @@ export function createJobTask(deps: JobTaskDeps) {
             kind: stored.kind,
             chars: text.length,
             outcome: status === "done" ? "answered" : "failed",
+            marked: reasons.length,
           };
           // A risky result is reviewed first; the review wakes the lead when it is done.
           if (stored.kind === "risky" && status === "done") {
@@ -371,6 +374,9 @@ export function createJobTask(deps: JobTaskDeps) {
               : { phase: "notify", kind: stored.kind };
           return { status: "running", checkpoint: next };
         }, context);
+        if (ended !== undefined && ended.marked > 0) {
+          logEvent("job.risky_marked", { cell: person, job: n, by: "code", reasons: ended.marked });
+        }
         if (ended !== undefined) {
           logEvent("job.finished", {
             cell: person,

@@ -13,12 +13,15 @@ import {
   createHouseholdStub,
   fauxAssistantMessage,
   fauxText,
+  fauxToolCall,
   loggedEvents,
   openTestCell,
   type Responder,
+  resultReviewer,
   type TestCell,
   until,
 } from "./fixtures.ts";
+import { failingResearch, job, leadCalls } from "./escalation-helpers.ts";
 import { createHold, jobResponder, startJobLine } from "./responders.ts";
 
 let test: TestCell | undefined;
@@ -236,5 +239,123 @@ describe("the job signals", () => {
     expect(queued[0]).toMatchObject({ cell: "owner", job: late, level: "warn" });
     expect(queued[0]?.queued_ms).toBeGreaterThanOrEqual(QUEUED_LONG_MS);
     expect(JSON.stringify(queued)).not.toContain("kale-7731");
+  });
+});
+
+describe("the escalation, review, and question signals", () => {
+  const SECRET_WORDS = /kale-7731|plum-4410|fig-2208|pear-5512|lime-9930/;
+  const QUESTION = "Question text that must stay out of the log: pear-5512.";
+  const REPLY = "Answer text that must stay out of the log: lime-9930.";
+
+  it("logs a pause, a raise, a restart, and an escalation end with their fields", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(failingResearch) });
+    const t = test;
+    await (
+      await t.cell.submit(startJobLine({ title: "a", brief: BRIEF, template: "research" }), "s-1")
+    ).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await job(t))?.status === "paused");
+    await leadCalls(t, "set_job", { job: 1, tier: "frontier" });
+    await until(async () => (await job(t))?.status === "paused");
+    await leadCalls(t, "restart_job", { job: 1, note: NOTE });
+    await until(async () => (await job(t))?.status === "paused");
+    await leadCalls(t, "set_job", { job: 1, effort: "high" });
+    await until(async () => (await job(t))?.status === "failed");
+    const events = loggedEvents(log.mock.calls);
+    const of = (name: string) => events.filter((each) => each.event === name);
+    expect(of("job.paused")).toEqual([
+      expect.objectContaining({ cell: "owner", job: 1, reason: "loop", streak: 3 }),
+      expect.objectContaining({ job: 1, reason: "loop" }),
+      expect.objectContaining({ job: 1, reason: "loop" }),
+      expect.objectContaining({ job: 1, reason: "escalation", cap_usd: expect.any(Number) }),
+    ]);
+    expect(of("job.paused")[0]).toMatchObject({ cost_usd: expect.any(Number), cap_usd: 1 });
+    expect(of("job.raised")).toEqual([
+      expect.objectContaining({ cell: "owner", job: 1, attempts: 1 }),
+    ]);
+    expect(of("job.restarted")).toEqual([
+      expect.objectContaining({ job: 1, attempts: 2, note_chars: NOTE.length }),
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(SECRET_WORDS);
+  });
+
+  it("logs a question, its answer, a request, a lead's mark, and a review with their fields", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const respond: Responder = (request) => {
+      if (request.role === "research") {
+        if (
+          request.last?.role === "toolResult" &&
+          request.lastText.startsWith("The lead answers")
+        ) {
+          return fauxAssistantMessage(
+            [fauxToolCall("request_job", { title: "b", brief: BRIEF, template: "research" })],
+            { stopReason: "toolUse" },
+          );
+        }
+        if (request.last?.role === "toolResult") return fauxAssistantMessage([fauxText(ANSWER)]);
+        if (request.lastText.includes("kale-7731") && request.last?.role === "user") {
+          return fauxAssistantMessage([fauxToolCall("ask_lead", { question: QUESTION })], {
+            stopReason: "toolUse",
+          });
+        }
+      }
+      if (request.role === "lead" && request.lastText.startsWith("[job 1 question:")) {
+        return fauxAssistantMessage([fauxToolCall("answer_job", { job: 1, answer: REPLY })], {
+          stopReason: "toolUse",
+        });
+      }
+      return jobResponder(request);
+    };
+    test = await openTestCell({
+      gateway: createFauxGateway(
+        resultReviewer(respond, () => ({ verdict: "reject", reason: "it does not match" })),
+      ),
+    });
+    const t = test;
+    await (
+      await t.cell.submit(startJobLine({ title: "a", brief: BRIEF, template: "research" }), "s-2")
+    ).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await job(t))?.result != null);
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    await leadCalls(t, "mark_risky", { job: 1, reason: "it quotes prices" });
+    await until(async () => (await job(t))?.review?.status === "rejected");
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    const events = loggedEvents(log.mock.calls);
+    const of = (name: string) => events.filter((each) => each.event === name);
+    expect(of("job.question_asked")).toEqual([
+      expect.objectContaining({ cell: "owner", job: 1, to_person: false }),
+    ]);
+    expect(of("job.answered")).toEqual([
+      expect.objectContaining({ cell: "owner", job: 1, by: "lead", answer_chars: REPLY.length }),
+    ]);
+    expect(of("job.requested")).toEqual([
+      expect.objectContaining({ cell: "owner", job: 2, by_job: 1 }),
+    ]);
+    expect(of("job.risky_marked")).toEqual([
+      expect.objectContaining({ cell: "owner", job: 1, by: "lead", reasons: 1 }),
+    ]);
+    expect(of("job.review_rejected")).toEqual([
+      expect.objectContaining({ cell: "owner", job: 1, reviewer_model: expect.any(String) }),
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(SECRET_WORDS);
+  });
+
+  it("logs code's risky mark and a passed review", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(resultReviewer(jobResponder)) });
+    const t = test;
+    await (
+      await t.cell.submit(startJobLine({ title: "a", brief: BRIEF, template: "health" }), "s-3")
+    ).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await job(t))?.review?.status === "passed");
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    const events = loggedEvents(log.mock.calls);
+    expect(events.filter((each) => each.event === "job.risky_marked")).toEqual([
+      expect.objectContaining({ job: 1, by: "code", reasons: 1 }),
+    ]);
+    expect(events.filter((each) => each.event === "job.review_passed")).toEqual([
+      expect.objectContaining({ job: 1, reviewer_model: expect.any(String) }),
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(SECRET_WORDS);
   });
 });
