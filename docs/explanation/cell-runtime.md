@@ -19,6 +19,10 @@ brief itself; no keyword, flag, or code rule routes a message. The specialist ru
 background with its own model and instructions, can search the lead's history, and returns its
 answer to the lead as a follow-up with a stable request id, so a restart never delivers it twice.
 
+The lead now hands work out as jobs instead: each job runs in a fresh conversation owned by its
+own task, from a template on a tier, and the specialist conversations above are kept frozen. See
+[How the lead runs jobs](orchestration.md).
+
 ## The household cell
 
 Shared documents, such as the household list, live in a separate household cell. Each person's

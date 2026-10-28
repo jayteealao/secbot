@@ -19,9 +19,10 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | GET | `/alarm` | none | the stored alarm against the earliest stored timer; never re-arms | 200 |
 | GET | `/missed` | none | `{held: [HeldCall], notices: [LimitNotice], waiting: [Waiting], messages: [{kind: "answer", entryId, text} \| {kind: "followup", entryId, from, text}], remaining}`; `held` lists every call waiting for an answer, oldest first; `notices` the limit notices this device has not seen (shown once per device, here or in a session), with `waiting` beside them; `messages` are the oldest 100 after this device's cursor, which moves past them only | 200 |
 | GET | `/cost` | none | `CostView`: the person's month of spend (below) | 200 |
-| GET | `/models` | none | `{roles: [{role, model, source}]}`: the lead, each specialist, then the guard's `reviewer` (default `anthropic/claude-sonnet-5.5`) | 200 |
-| PUT | `/models/{role}` | `{"model": "<id>"}` (at most 16 KiB) | the role's new model | 200, 400 (unknown role or model, bad body), 413 |
-| POST | `/specialists` | `{"name", "instruction", "model"?}` (at most 16 KiB; instruction at most 4000 characters) | `{name, status: "added"}` | 201, 400, 413 |
+| GET | `/models` | none | `{roles: [{role, model, source, capUsd?}]}`: the lead, each frozen specialist, the job tiers `cheap`, `mid`, and `frontier` (each with `capUsd`, its per-job cap in dollars), then the guard's `reviewer` (default `anthropic/claude-sonnet-5.5`) | 200 |
+| PUT | `/models/{role}` | `{"model": "<id>"}` (at most 16 KiB) | the role's new model; for a tier, new jobs and a job moved onto it with `set_job` use it | 200, 400 (unknown role or model, bad body), 413 |
+| PUT | `/tiers/{tier}/cap` | `{"usd": <amount>}` (a number or a numeric string; above 0, at most the limit maximum, two decimals) | `{tier, capUsd}`; new jobs on the tier take the cap, a running job keeps its own | 200, 400 (unknown tier, bad amount, bad body), 413 |
+| POST | `/specialists` | `{"name", "instruction"}` (at most 16 KiB; instruction at most 4000 characters) | `{name, status: "added"}`: a job template that starts on the cheap tier; a `model` is refused (`refused: a template starts on a tier; the lead picks the tier per job and the owner maps tiers to models`) | 201, 400, 413 |
 | GET | `/session` | WebSocket upgrade | the frame stream below | 101, 501 (no WebSocket support) |
 | GET | `/rules` | none | `{owner: [Rule], person: [Rule], timeZone}`: the owner's rules (read only here) and the person's own rules | 200 |
 | POST | `/rules` | one rule without an id: `{agent, tool, verdict, match?}` (at most 16 KiB) | `{rule: Rule}` | 201, 400 (`refused: …`), 413 |
