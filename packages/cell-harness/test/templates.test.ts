@@ -23,6 +23,7 @@ import {
   templatesOf,
   tierModelOf,
 } from "../src/templates.ts";
+import { createFauxGateway } from "./fixtures.ts";
 
 describe("release defaults of the job model", () => {
   it("names three tiers with their models and caps", () => {
@@ -137,5 +138,14 @@ describe("template and tier resolution", () => {
     expect(isTier("huge")).toBe(false);
     expect(isEffort("low")).toBe(true);
     expect(isEffort("max")).toBe(false);
+  });
+});
+
+describe("the faux tier models of the test cell", () => {
+  it("reason, and the cheap one clamps low effort up to medium", () => {
+    const gateway = createFauxGateway();
+    expect(appliedEffort(gateway.models, TIER_MODELS.cheap, "low")).toBe("medium");
+    expect(appliedEffort(gateway.models, TIER_MODELS.mid, "low")).toBe("low");
+    expect(appliedEffort(gateway.models, TIER_MODELS.frontier, "high")).toBe("high");
   });
 });

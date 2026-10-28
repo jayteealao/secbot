@@ -32,7 +32,11 @@ export function templatesOf(custom: Readonly<Record<string, CustomTemplate>> = {
     ...JOB_TEMPLATES,
     ...Object.entries(custom)
       .filter(([name]) => !release.has(name))
-      .map(([name, template]) => ({ name, instruction: template.instruction, tier: template.tier })),
+      .map(([name, template]) => ({
+        name,
+        instruction: template.instruction,
+        tier: template.tier,
+      })),
   ];
 }
 

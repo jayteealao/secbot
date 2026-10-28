@@ -33,7 +33,11 @@ import {
   type OpenCellOptions,
   openCellHarness,
 } from "../src/open-harness.ts";
-import { DEFAULT_LEAD_MODEL, DEFAULT_SPECIALIST_MODEL } from "../src/release-defaults.ts";
+import {
+  DEFAULT_LEAD_MODEL,
+  DEFAULT_SPECIALIST_MODEL,
+  TIER_MODELS,
+} from "../src/release-defaults.ts";
 import { REVIEWER_FIRST_LINE } from "../src/reviewer.ts";
 
 export { FakeCelldStorage, fauxAssistantMessage, fauxText, fauxToolCall };
@@ -102,11 +106,18 @@ export function createFauxGateway(
   const faux = fauxProvider({
     provider: "openrouter",
     ...(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond }),
+    // The three tier models reason, so a job's effort reaches its requests.
     models: [DEFAULT_LEAD_MODEL, DEFAULT_SPECIALIST_MODEL, ALTERNATE_MODEL].map((id) => ({
       id,
+      reasoning: true,
       cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
     })),
   });
+  // The cheap tier's model has no low effort, so pi-ai clamps a cheap job's low up to medium
+  // (a faux model definition has no thinkingLevelMap field, so it is set on the listed model).
+  const cheap = faux.provider.getModels().find((model) => model.id === TIER_MODELS.cheap);
+  if (cheap !== undefined)
+    (cheap as { thinkingLevelMap?: object }).thinkingLevelMap = { low: null };
   const gateway: FauxGateway = {
     models: createModels(),
     requests: [],
