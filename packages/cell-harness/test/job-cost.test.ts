@@ -18,7 +18,7 @@ import {
   type TestCell,
   until,
 } from "./fixtures.ts";
-import { jobResponder, startJobLine } from "./responders.ts";
+import { createHold, jobResponder, startJobLine } from "./responders.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -135,5 +135,30 @@ describe("the month ledger counts job conversations", () => {
     const after = await readMonth(t.cell.harness, Date.now(), "UTC", BACKGROUND_CONTEXT);
     expect(after.developer.spentUsd - before.developer.spentUsd).toBeCloseTo(2, 10);
     expect(after.person.spentUsd).toBeCloseTo(before.person.spentUsd, 10);
+  });
+});
+
+describe("usage watches per job", () => {
+  it("the watch stops when the job ends", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const hold = createHold();
+    hold.hold("research");
+    test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
+    const t = test;
+    const base = t.cell.budget.watching();
+    await (
+      await t.cell.submit(startJobLine({ title: "a", brief: "look", template: "research" }), "w-1")
+    ).wait(BACKGROUND_CONTEXT);
+    await until(() => t.cell.budget.watching() === base + 1);
+    // Spend inside the running job reaches the limit watch.
+    await addJobSpend(t.cell, 1, 0.2);
+    await until(async () => (await t.cell.budgetState()).person.spentUsd >= 0.2);
+    hold.release("research");
+    await until(boardResult(t, 1));
+    await until(() => t.cell.budget.watching() === base);
+    expect(loggedEvents(log.mock.calls).find((e) => e.event === "job.watch_closed")).toMatchObject({
+      job: 1,
+      open_watches: base,
+    });
   });
 });

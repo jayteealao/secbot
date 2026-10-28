@@ -146,6 +146,8 @@ export interface CellBudget {
   readonly gate: BudgetGate;
   /** Stops the watches of the cell's `pi.usage` documents. */
   readonly stop: () => Promise<void>;
+  /** How many `pi.usage` documents are watched now. */
+  readonly watching: () => number;
 }
 
 export interface OpenCellOptions {
@@ -833,7 +835,7 @@ async function finishOpen(
     onChange: () => parts.gate.wake(),
     onReport: parts.onReport,
   });
-  let stopWatches: () => Promise<void> = async () => {};
+  let spendWatch: SpendWatch = { stop: async () => {}, count: () => 0 };
   const cell = new CellHarness(
     person,
     options.version,
@@ -846,7 +848,12 @@ async function finishOpen(
     reminders,
     now,
     parts.timeZone,
-    { watch, gate: parts.gate, stop: () => stopWatches() },
+    {
+      watch,
+      gate: parts.gate,
+      stop: () => spendWatch.stop(),
+      watching: () => spendWatch.count(),
+    },
     new Set(
       [...recurring.map(({ routine }) => routine), reminders]
         .filter((routine) => !routine.spends)
@@ -904,7 +911,7 @@ async function finishOpen(
   const pendingWork = left.length - routineTasks.length;
   await ensureRoutines(harness, recurring, now(), context);
   const pending = (await harness.inspect(context)).tasks.length;
-  stopWatches = await watchSpend(harness, () => watch.trigger(), context);
+  spendWatch = await watchSpend(person, harness, () => watch.trigger(), context);
   // The first evaluation starts (or rolls) the month.
   watch.trigger();
   harness.resume();
@@ -931,19 +938,46 @@ async function finishOpen(
   return cell;
 }
 
+/** The spend watches of one open harness. */
+interface SpendWatch {
+  readonly stop: () => Promise<void>;
+  readonly count: () => number;
+}
+
 /**
- * Calls `trigger` after every committed change of any conversation's `pi.usage` (a specialist
- * added later included, through a watch of the roster). Returns a function that stops the watches.
+ * Calls `trigger` after every committed change of any conversation's `pi.usage`: the lead's, each
+ * specialist's (one added later included, through a watch of the roster), and each live job's
+ * (through a watch of the board). A job's watch stops in the pass that sees its row ended, after
+ * one last trigger, so the watches of a busy cell do not grow with every job it ever ran.
  */
 async function watchSpend(
+  person: string,
   harness: Harness,
   trigger: () => void,
   context: Context,
-): Promise<() => Promise<void>> {
+): Promise<SpendWatch> {
   const watches = new Map<string, DocumentWatch<UsageState>>();
+  const ended = new Set<string>();
+  let pass = Promise.resolve();
   const ensure = async () => {
+    const board = await harness.snapshot(JobBoardDoc, context);
+    for (const row of Object.values(board?.jobs ?? {})) {
+      if (row.conversationId === null || !ENDED.has(row.status)) continue;
+      const key = String(row.conversationId);
+      ended.add(key);
+      const watch = watches.get(key);
+      if (watch === undefined) continue;
+      watches.delete(key);
+      await watch.stop();
+      logEvent("job.watch_closed", {
+        cell: person,
+        job: row.number,
+        conversation_id: key,
+        open_watches: watches.size,
+      });
+    }
     for (const { id, conversationId } of await ledgerConversations(harness, context)) {
-      if (watches.has(conversationId)) continue;
+      if (watches.has(conversationId) || ended.has(conversationId)) continue;
       let watch = await harness.watchDoc(UsageDoc, id, context);
       if (watch === undefined) {
         // A conversation created after the open has no ledger document until its first cost.
@@ -957,14 +991,29 @@ async function watchSpend(
       watch.start(async () => trigger());
     }
   };
+  // One pass at a time: the roster and the board change together when a job starts.
+  const again = () => {
+    pass = pass
+      .then(ensure)
+      .then(trigger)
+      // A failed pass is logged; the next change runs the next one.
+      .catch((error: unknown) =>
+        logEvent("spend.watch_failed", { cell: person, ...errorFields(error) }, "warn"),
+      );
+    return pass;
+  };
   await ensure();
   const roster = await harness.watchDoc(RosterDoc, context);
-  roster?.start(async () => {
-    await ensure();
-    trigger();
-  });
-  return async () => {
-    await roster?.stop();
-    for (const watch of watches.values()) await watch.stop();
+  roster?.start(again);
+  const jobs = await harness.watchDoc(JobBoardDoc, context);
+  jobs?.start(again);
+  return {
+    count: () => watches.size,
+    stop: async () => {
+      await roster?.stop();
+      await jobs?.stop();
+      await pass.catch(() => {});
+      for (const watch of watches.values()) await watch.stop();
+    },
   };
 }
