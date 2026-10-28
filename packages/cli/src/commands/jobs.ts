@@ -155,3 +155,103 @@ export async function jobsBoardOf(client: OperatorClient, io: Io, cell: string):
   io.stdout(`${boardLines(view, true, cell === "household" ? undefined : cell).join("\n")}\n`);
   return 0;
 }
+
+/** The usage line of each job command; a malformed number or date prints it with exit code 2. */
+export const JOBS_USAGE = {
+  urgent: "usage: secbot jobs urgent <#>",
+  deadline: "usage: secbot jobs deadline <#> YYYY-MM-DD|clear",
+  move: "usage: secbot jobs move <#> --before <#>",
+  restart: "usage: secbot jobs restart <#>",
+} as const;
+
+const NUMBER = /^[1-9][0-9]{0,8}$/;
+const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** A real calendar day written YYYY-MM-DD. */
+export function isDay(text: string): boolean {
+  const parts = DAY.exec(text);
+  if (parts === null) return false;
+  const date = new Date(Date.UTC(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3])));
+  return date.toISOString().slice(0, 10) === text;
+}
+
+/** `12 Oct` for `2026-10-12`. */
+export const dayMonth = (day: string): string => {
+  const [, month = "1", date = "1"] = day.split("-");
+  return `${Number(date)} ${MONTHS[Number(month) - 1] ?? month}`;
+};
+
+/** 1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st. */
+export function ordinal(n: number): string {
+  const teen = n % 100 >= 11 && n % 100 <= 13;
+  const suffix = teen ? "th" : (["th", "st", "nd", "rd"][n % 10] ?? "th");
+  return `${n}${suffix}`;
+}
+
+/** The cell's answer to a reorder. */
+export interface ReorderAnswer {
+  readonly job: number;
+  readonly title: string;
+  readonly priority: string;
+  readonly deadline: string | null;
+  readonly place: number;
+  readonly of: number;
+  readonly before?: number;
+}
+
+/** The line a reorder prints: the job's new label and its place in the queue. */
+export function reorderLine(change: "urgent" | "deadline" | "move", answer: ReorderAnswer): string {
+  const label =
+    change === "urgent"
+      ? "urgent"
+      : change === "move"
+        ? "moved"
+        : answer.deadline === null
+          ? "no deadline"
+          : `due ${dayMonth(answer.deadline)}`;
+  const place = `${ordinal(answer.place)} of ${answer.of} live jobs`;
+  const where = change === "move" ? `before #${answer.before}, ${place}` : place;
+  return `[ ${label} ] #${answer.job} ${plain(answer.title)} -> now ${where}`;
+}
+
+/**
+ * `secbot jobs urgent <#>`, `deadline <#> YYYY-MM-DD|clear`, and `move <#> --before <#>`: the
+ * job's new place in the queue. A missing job prints `no job #<n>` with exit code 1.
+ */
+export async function jobsReorder(
+  client: CellClient,
+  io: Io,
+  change: "urgent" | "deadline" | "move",
+  args: readonly (string | undefined)[],
+  before?: string,
+): Promise<number> {
+  const [number, day, extra] = args;
+  const usage = () => {
+    io.stderr(`${JOBS_USAGE[change]}\n`);
+    return 2;
+  };
+  if (number === undefined || !NUMBER.test(number)) return usage();
+  let body: Record<string, unknown>;
+  if (change === "urgent") {
+    if (day !== undefined || before !== undefined) return usage();
+    body = { urgent: true };
+  } else if (change === "deadline") {
+    if (day === undefined || extra !== undefined || before !== undefined) return usage();
+    if (day !== "clear" && !isDay(day)) return usage();
+    body = { deadline: day === "clear" ? null : day };
+  } else {
+    if (day !== undefined || before === undefined || !NUMBER.test(before)) return usage();
+    body = { before: Number(before) };
+  }
+  const answer = await client.answer<ReorderAnswer>("POST", `/jobs/${number}/priority`, body);
+  if (answer.ok) {
+    io.stdout(`${reorderLine(change, answer.value)}\n`);
+    return 0;
+  }
+  const job = typeof answer.body.job === "number" ? answer.body.job : Number(number);
+  if (answer.status === 404) io.stderr(`no job #${job}\n`);
+  else if (answer.status === 409) io.stderr(`job ${job} has ended\n`);
+  else io.stderr(`secbot: ${plain(String(answer.body.error ?? answer.status))}\n`);
+  return 1;
+}

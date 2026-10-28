@@ -126,6 +126,44 @@ export class CellClient {
     );
   }
 
+  /**
+   * Calls a cell route and gives back a refusal's status and body (400 to 499) instead of
+   * throwing, so a command can word each refusal; a key refusal and an error still throw.
+   */
+  async answer<T>(
+    method: string,
+    route: string,
+    body?: unknown,
+  ): Promise<
+    | { readonly ok: true; readonly value: T }
+    | { readonly ok: false; readonly status: number; readonly body: Record<string, unknown> }
+  > {
+    let response: Response;
+    try {
+      response = await this.fetcher(`${this.base}${this.path(route)}`, {
+        method,
+        headers: {
+          ...this.headers,
+          ...(body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      });
+    } catch (error) {
+      throw new CliError(`cannot reach the cell: ${(error as Error).message}`);
+    }
+    const payload = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+    if (response.status === 401 || response.status === 403) {
+      throw new CliError(
+        `the cell refused this device (${String(payload.error ?? response.status)})`,
+      );
+    }
+    if (response.ok) return { ok: true, value: payload as T };
+    if (response.status >= 400 && response.status < 500) {
+      return { ok: false, status: response.status, body: payload };
+    }
+    throw new CliError(String(payload.error ?? `the cell answered ${response.status}`));
+  }
+
   sessionUrl(): string {
     return `${this.base.replace(/^http/, "ws")}${this.path("/session")}`;
   }
