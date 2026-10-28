@@ -42,7 +42,16 @@ export {
   type SetTimer,
   USED_TEXT,
 } from "./approvals.ts";
-export type { BoardReason, BoardRow, BoardView } from "./board-view.ts";
+export {
+  type BoardReason,
+  type BoardRow,
+  type BoardView,
+  type BoardViewInput,
+  boardView,
+  budgetJobs,
+  FINISHED_WINDOW_MS,
+  reasonOf,
+} from "./board-view.ts";
 export { bookmarkText, recordInterruption } from "./bookmark.ts";
 export {
   BudgetGate,
@@ -112,7 +121,15 @@ export type {
   Receipt,
   ResultKind,
 } from "./docs.ts";
-export { BookmarkDoc, JobBoardDoc, StopDoc } from "./docs.ts";
+export {
+  BookmarkDoc,
+  CapacityDoc,
+  HandoffNoteDoc,
+  JobBoardDoc,
+  type JobStop,
+  priorityKey,
+  StopDoc,
+} from "./docs.ts";
 export { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 export {
   createGuardExtension,
@@ -134,6 +151,7 @@ export {
   isDecisionAdapter,
   isGuardMode,
 } from "./guard-settings.ts";
+export { createHandoffNoteExtension, type HandoffNoteDeps } from "./handoff-note.ts";
 export { HarnessSlot, type OpenHarness, SLOT_CLOSE_WAIT_MS } from "./harness-slot.ts";
 export {
   createHeartbeatRoutine,
@@ -182,7 +200,15 @@ export {
   blockReason,
   ENDED,
   liveRows,
+  markUrgent,
+  moveBefore,
+  placeOf,
+  queueOf,
+  type ReorderAnswer,
+  type ResumeRefusal,
   restCount,
+  resumeStoppedRow,
+  setDeadline,
   type WaitingCounts,
   waitingCounts,
 } from "./job-board.ts";
@@ -339,7 +365,7 @@ export {
   secretsReason,
 } from "./secret-tools.ts";
 export { FRAME_TYPES, type Frame, type SessionStream } from "./session-stream.ts";
-export type { StopAnswer } from "./stop.ts";
+export { STOP_RUNNING, type StopAnswer, stopJobs } from "./stop.ts";
 export { capOf, isEffort, isTier, templatesOf, tierModelOf } from "./templates.ts";
 export {
   earliestTimer,
