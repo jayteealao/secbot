@@ -33,6 +33,7 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | POST | `/secrets/grants` | `{"secret", "agent"}` (at most 16 KiB); the agent is one of this person's roles | `{person, secret, agent, granted}` | 201 (granted), 200 (already granted), 400 (`refused: no agent named <agent>`, `refused: no secret named <secret>`, `refused: <secret> is not in the owner's allowlist for <agent>`), 413, 503 |
 | DELETE | `/secrets/grants` | `{"secret", "agent"}` | `{person, secret, agent, revoked}` | 200, 400, 413, 503 |
 | POST | `/approvals/{n}` | `{"answer": "allow" \| "always" \| "deny"}` (at most 16 KiB) | `{number, status, answer, agent, tool, summary, answeredBy, rule}` (`rule` is the person rule allow always added, or `null`) | 200, 400 (a bad body, or `refused: …`), 404 (`no held call #n`), 409 (`{"error": "lapsed"}` or `{"error": "answered"}`), 413 |
+| POST | `/jobs/{n}/answer` | `{"text": "<1 to 2000 characters>"}` (at most 16 KiB) | `{job, title}`: the person's answer to the question the lead put to them; a job waiting on it goes on, and the answer to a job that used its raise and its restart goes to the lead | 200, 400 (a bad body), 404 (`no job #n`), 409 (`job n has no question waiting`), 413 |
 
 ### Spend and limits
 
@@ -231,10 +232,11 @@ The cell sends these, as JSON text frames:
 | `held` | `call` (a `HeldCall`), `count` | A call waiting for the person: every waiting call right after `connected`, oldest first, and each new one once when it is held. `count` is how many calls wait. The client answers through `POST /approvals/{n}`; a chat line is never an answer. |
 | `usage` | `usage`: `{month, zone, resetsAt, spentUsd, limitUsd, percent, line, mode}` | The person's month against their limit and the guard mode: right after `connected`, and after each `answer`. |
 | `notice` | `notice` (a `LimitNotice`), `waiting` (`[Waiting]`) | A limit line reached: once when it is recorded, and at connect for each notice this device has not seen. A device that took it does not see it again in `GET /missed`. |
+| `question` | `job`, `title` | A job's question the lead put to the person: once, right after the lead's `answer` that asks it, and at connect for each question still open. The client answers through `POST /jobs/{n}/answer`; a chat line is never an answer. |
 
 Ordering and reconnects: `connected`, then `usage`, then a `held` frame for every waiting call,
-then a `notice` frame for every notice this device has not seen, then every `missed` frame, then
-live frames. An input with no `accepted` or `rejected` frame is resent on the
+then a `notice` frame for every notice this device has not seen, then every `missed` frame, then a
+`question` frame for every open job question, then live frames. An input with no `accepted` or `rejected` frame is resent on the
 next connection under the same `requestId`.
 
 ## Host routes

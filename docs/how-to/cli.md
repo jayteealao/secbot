@@ -96,6 +96,24 @@ HELD CALLS
 answer in secbot chat: /allow 1, /always 1, /deny 1
 ```
 
+### Answer a job's question
+
+When a job needs something only you can answer, the lead asks you in its own words, and the chat
+adds a line with the job's number:
+
+```
+The passport job needs one fact from you: which address goes on the form,
+home or the office?
+
+[ job 11 asks ] answer with /answer 11 <text>
+```
+
+Answer with `/answer <job> <text>`, for example `/answer 11 home address`. The chat prints
+`[ answered ] #11 renew passport form continues`, and the job goes on with your words. The job
+waits with no time limit and no spend until you answer. A plain chat line never answers a job,
+and a line that only looks like an answer (`/answer eleven home`) is not sent at all. A question
+asked while no session was open is shown again the next time you open `secbot chat`.
+
 ### Your month's spend and limits
 
 `secbot chat` prints the month's spend against your limit when it connects and after each answer:

@@ -63,6 +63,56 @@ question, a risky mark) wakes it with one short notice, `[job <n> <kind>: pull i
 job_result]`. A routine result wakes it only if nobody pulled it for 30 minutes. A notice carries
 no result text.
 
+## When a job goes wrong: the lead decides, code bounds
+
+A job can stop making progress in two ways the cell watches for. It can reach its cost cap: the
+job's cost counts every conversation it used (each run's and its review's), and it pauses before a
+step that would pass the cap. Or it can fail the same step three times in a row: the same tool
+with near-identical arguments, each answer an error. Steps that succeed, steps with different
+arguments, and errors from before the job was last resumed are not counted. An empty or cut-off
+reply does not end a job; it gets one nudge to continue.
+
+A paused job waits with no model request and no spend, for as long as it takes, across restarts
+of the cell, and the lead gets one notice, `[job <n> paused: ...; choose set_job or restart_job]`.
+The lead chooses what happens next; code only bounds it. Each job gets one raise and one restart:
+
+- A raise is `set_job` with a higher tier or effort. A paused job runs again on it, unless it is
+  still over the new cap.
+- A restart is `restart_job` with a failure note the lead writes after reading the job's
+  transcript (`job_transcript`). A fresh subagent starts on the same job number with the note
+  and the brief, and can search the earlier attempt with `search_old_job`. The job's cost keeps
+  counting across the restart, so a restart is not a way around the cap.
+
+A third move is refused and ends the job failed, with a question to the person about what should
+happen next. The lead asks them in its own words; their answer goes to the lead.
+
+## Risky results and the reviewer
+
+A result is risky when its job used a tool that acts (`household_change`), spends
+(`broker_call`), or touches money (`secret_get`), or ran on the health template. The lead can add
+a mark with `mark_risky`, never remove one. Before the lead can pull a risky result, a reviewer
+subagent with no tools checks it against the brief and returns one verdict, pass or reject, with
+a reason. The result is shown to it inside an untrusted block it is told not to follow.
+
+The reviewer runs on a model the job never ran on: the reviewer role's model, unless the job used
+it; then the frontier tier's, the mid tier's, or the cheap tier's, the first the job did not use.
+A model that agrees with itself is not a second opinion. A rejected result is never shown to the
+lead: `job_result` gives the reviewer's reason, and the job goes to the same escalation rules. A
+routine result is not reviewed.
+
+## Questions and requests
+
+A job that needs a fact the brief left out asks the lead with `ask_lead` and waits, with no spend,
+until it is answered. The lead answers from what it knows with `answer_job`, or hands the question
+to the person with `ask_person` when it lacks the answer or the answer commits the person; it then
+asks in its own words, and the chat adds `[ job <n> asks ]`. The person answers with
+`/answer <n> <text>`, which goes to the job through the cell, never through the lead. A question
+has no time limit.
+
+A job never starts other agents. When it needs more work than it can do, it asks with
+`request_job`: a row is added to the lead's board, and only the lead can start it, with
+`start_job` and the row's number.
+
 ## Tools that answer in their round
 
 Every tool on the lead's list returns in the round that called it, so the lead is never blocked
