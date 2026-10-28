@@ -9,6 +9,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Usage } from "@earendil-works/pi-ai";
 import {
   type AssistantMessage,
+  type AssistantMessageEventStream,
+  createAssistantMessageEventStream,
   createModels,
   type FauxResponseFactory,
   fauxAssistantMessage,
@@ -16,6 +18,7 @@ import {
   fauxText,
   fauxToolCall,
   type Message,
+  type Provider,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { ROOT_CONVERSATION_ID, UsageDoc } from "@earendil-works/pi-durable";
@@ -102,9 +105,52 @@ export const defaultResponder: Responder = (request) => {
   return fauxAssistantMessage([fauxText(`${request.role} says: ${request.lastText.slice(0, 40)}`)]);
 };
 
+/**
+ * Prices each answered step: pi-ai's faux provider reports every cost as 0, so a test that needs
+ * spend sets the cost of one step per model id (`stepCostUsd`) on each finished message.
+ */
+function withStepCost<TApi extends string>(
+  inner: Provider<TApi>,
+  stepCostUsd: (modelId: string) => number,
+): Provider<TApi> {
+  const priced = (stream: AssistantMessageEventStream, modelId: string) => {
+    const outer = createAssistantMessageEventStream();
+    void (async () => {
+      for await (const event of stream) {
+        if (event.type !== "done") {
+          outer.push(event);
+          continue;
+        }
+        const total = stepCostUsd(modelId);
+        const { usage } = event.message;
+        outer.push({
+          ...event,
+          message: { ...event.message, usage: { ...usage, cost: { ...usage.cost, total } } },
+        });
+      }
+      outer.end();
+    })();
+    return outer;
+  };
+  return Object.assign(Object.create(inner) as Provider<TApi>, {
+    stream: ((model, context, options) =>
+      priced(inner.stream(model, context, options), model.id)) as Provider<TApi>["stream"],
+    streamSimple: ((model, context, options) =>
+      priced(
+        inner.streamSimple(model, context, options),
+        model.id,
+      )) as Provider<TApi>["streamSimple"],
+    getModels: () => inner.getModels(),
+  });
+}
+
 export function createFauxGateway(
   respond: Responder = defaultResponder,
-  options: { readonly tokensPerSecond?: number } = {},
+  options: {
+    readonly tokensPerSecond?: number;
+    /** The cost of one answered step of a model, in USD (default 0, as the faux provider). */
+    readonly stepCostUsd?: (modelId: string) => number;
+  } = {},
 ): FauxGateway {
   const faux = fauxProvider({
     provider: "openrouter",
@@ -132,7 +178,11 @@ export function createFauxGateway(
     return gateway.respond(request);
   };
   faux.setResponses(Array.from({ length: 5_000 }, () => step));
-  gateway.models.setProvider(withCreditPause(faux.provider));
+  const provider =
+    options.stepCostUsd === undefined
+      ? faux.provider
+      : withStepCost(faux.provider, options.stepCostUsd);
+  gateway.models.setProvider(withCreditPause(provider));
   return gateway;
 }
 

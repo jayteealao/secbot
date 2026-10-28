@@ -13,8 +13,6 @@ import { wakesOf } from "../src/wake-times.ts";
 import {
   createFauxGateway,
   type FakeCelldStorage,
-  fauxAssistantMessage,
-  fauxText,
   openTestCell,
   type Responder,
   type TestCell,

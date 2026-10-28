@@ -2,6 +2,7 @@
 // tier cap (AC-16), and never for a provider wait (AC-15). A paused job makes no request.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { TIER_MODELS } from "../src/release-defaults.ts";
 import {
   createFauxGateway,
   type FauxRequest,
@@ -95,5 +96,64 @@ describe("the loop guard pauses a job (AC-14)", () => {
     expect((await job(t))?.status).toBe("paused");
     expect(researchRequests(t)).toBe(3);
     expect(await wakeNoticesOf(t.cell.root)).toHaveLength(1);
+  });
+});
+
+/** A cheap job that keeps working: every step calls a tool that succeeds, at $0.02 a step. */
+const workingHousehold = () =>
+  fauxAssistantMessage([fauxToolCall("search_history", { query: "milk" })], {
+    stopReason: "toolUse",
+  });
+
+const CHEAP_STEP_USD = 0.02;
+const pricedGateway = (respond: Responder) =>
+  createFauxGateway(respond, {
+    stepCostUsd: (modelId) => (modelId === TIER_MODELS.cheap ? CHEAP_STEP_USD : 0),
+  });
+
+const householdRequests = (t: TestCell) =>
+  t.gateway.requests.filter((request) => request.role === "household").length;
+
+const startHousehold = async (t: TestCell) =>
+  (
+    await t.cell.submit(
+      startJobLine({ title: "groceries", brief: "plan the groceries", template: "household" }),
+      "start-cheap",
+    )
+  ).wait(BACKGROUND_CONTEXT);
+
+describe("the cap gate (AC-16)", () => {
+  it("pauses a cheap job at $0.24 before the step that would pass $0.25", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({
+      gateway: pricedGateway(jobAnswers("household", workingHousehold)),
+    });
+    const t = test;
+    await startHousehold(t);
+    await until(async () => (await job(t))?.status === "paused");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const row = await job(t);
+    expect(row?.pause?.reason).toBe("cap");
+    expect(row?.cap).toBe(0.25);
+    expect(row?.cost).toBeCloseTo(0.24, 10);
+    // Twelve steps of $0.02 ran; the thirteenth would pass the cap and was never sent.
+    expect(householdRequests(t)).toBe(12);
+    expect(await wakeNoticesOf(t.cell.root)).toEqual([
+      "[job 1 paused: cap reached; choose set_job or restart_job]",
+    ]);
+  });
+
+  it("stays paused at the cap with no request across a reopen", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({
+      gateway: pricedGateway(jobAnswers("household", workingHousehold)),
+    });
+    const t = test;
+    await startHousehold(t);
+    await until(async () => (await job(t))?.status === "paused");
+    await t.reopen();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect((await job(t))?.status).toBe("paused");
+    expect(householdRequests(t)).toBe(12);
   });
 });
