@@ -1,7 +1,9 @@
 // The loop guard's pure parts: near-same tool arguments, the failing-step streak read from a
 // request's messages, and the projected cost of the next step.
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import type { Context } from "@earendil-works/chord";
 import { describe, expect, it } from "vitest";
+import { JobHolds } from "../src/job-holds.ts";
 import { failingStreak, nearSame, normalizeArgs, projectNext } from "../src/loop-guard.ts";
 import { EMPTY_REPLY_NUDGE } from "../src/release-defaults.ts";
 
@@ -186,5 +188,60 @@ describe("the next step's projected cost", () => {
         assistant([{ type: "text", text: "y" }], "stop", 0.02),
       ]),
     ).toBe(0.05);
+  });
+});
+
+describe("job holds", () => {
+  const ctx = (signal?: AbortSignal) => ({ abortSignal: signal }) as unknown as Context;
+
+  it("waits while the check holds and checks again on wake", async () => {
+    const holds = new JobHolds();
+    let paused = true;
+    let checks = 0;
+    const done = holds.waitWhile(
+      4,
+      async () => {
+        checks++;
+        return paused;
+      },
+      ctx(),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(checks).toBe(1);
+    expect(holds.waiting(4)).toBe(1);
+    paused = false;
+    holds.wake(4);
+    await done;
+    expect(checks).toBe(2);
+    expect(holds.waiting(4)).toBe(0);
+  });
+
+  it("stays after an unrelated wake, and after a wake whose check still holds", async () => {
+    const holds = new JobHolds();
+    let paused = true;
+    let settled = false;
+    const done = holds
+      .waitWhile(4, async () => paused, ctx())
+      .then(() => {
+        settled = true;
+      });
+    holds.wake(5);
+    holds.wake(4);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(settled).toBe(false);
+    paused = false;
+    holds.wake(4);
+    await done;
+    expect(settled).toBe(true);
+  });
+
+  it("rejects on abort, with no time limit before it", async () => {
+    const holds = new JobHolds();
+    const abort = new AbortController();
+    const done = holds.waitWhile(4, async () => true, ctx(abort.signal));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    abort.abort(new Error("stopped"));
+    await expect(done).rejects.toThrow("stopped");
+    expect(holds.waiting(4)).toBe(0);
   });
 });
