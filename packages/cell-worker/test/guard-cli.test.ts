@@ -76,6 +76,7 @@ const FIRST_RUN = [
 
   "------------------------------------------------------------------------------",
   "AGENT      TOOL               MATCH                          VERDICT",
+  "all        start_job          any                            permit",
   "all        handoff            any                            permit",
   "all        household_change   any                            permit",
   "all        set_reminder       any                            permit",

@@ -43,9 +43,80 @@ export const STARTER_SPECIALISTS: readonly StarterSpecialist[] = [
   },
 ];
 
-/** The lead's standing instructions. Routing is the lead's own decision, through the handoff tool. */
-export const LEAD_INSTRUCTIONS =
-  "You are the lead agent of one person's personal assistant. Answer the person directly when you can. When a request fits one of your specialists, brief that specialist with the handoff tool: write a self-contained brief in your own words. The specialist's answer comes back to you later as a message that starts with [handoff <name> answered]; relay what matters to the person. You can search your own earlier conversation with search_history.";
+/** The job tiers, cheapest first. The lead picks one per job; the owner maps each to a model. */
+export const TIERS = ["cheap", "mid", "frontier"] as const;
+
+export type Tier = (typeof TIERS)[number];
+
+/** The release model of each tier (the owner changes it in the role-to-model map, by tier name). */
+export const TIER_MODELS: Readonly<Record<Tier, string>> = {
+  cheap: "anthropic/claude-haiku-4.5",
+  mid: "anthropic/claude-sonnet-5.5",
+  frontier: "anthropic/claude-opus-5.5",
+};
+
+/** The release per-job cost cap of each tier, in USD (the owner changes it with no release). */
+export const TIER_CAPS_USD: Readonly<Record<Tier, number>> = { cheap: 0.25, mid: 1, frontier: 3 };
+
+/** The efforts the lead can ask for; the model may clamp it, and the board keeps both. */
+export const JOB_EFFORTS = ["low", "medium", "high"] as const;
+
+export type JobEffort = (typeof JOB_EFFORTS)[number];
+
+/** A job's effort when the lead names none. */
+export const DEFAULT_JOB_EFFORT: JobEffort = "medium";
+
+export interface JobTemplate {
+  readonly name: string;
+  readonly instruction: string;
+  /** The tier a job of this template starts on when the lead names none. */
+  readonly tier: Tier;
+}
+
+const JOB_RULES =
+  "You work on one job, from the brief you are given, and your answer goes back to the lead. You have no tool to start other agents; when the job needs more work than you can do, say so and ask the lead in your answer.";
+
+/** The four release templates, with their start tiers. A job runs in a fresh conversation. */
+export const JOB_TEMPLATES: readonly JobTemplate[] = [
+  {
+    name: "household",
+    tier: "cheap",
+    instruction: `You are the household specialist: meals, shopping, chores, and the household's shared plans. ${JOB_RULES} ${NO_TOOLS_YET}`,
+  },
+  {
+    name: "research",
+    tier: "mid",
+    instruction: `You are the research specialist: find out what is known about a question and summarize it with its uncertainty. ${JOB_RULES} ${NO_TOOLS_YET}`,
+  },
+  {
+    name: "health",
+    tier: "mid",
+    instruction: `You are the health specialist: sleep, food, exercise, and general wellbeing. You are not a doctor; say when a question needs one. ${JOB_RULES} ${NO_TOOLS_YET}`,
+  },
+  {
+    name: "developer",
+    tier: "frontier",
+    instruction: `You are the developer specialist: software, code, and the agent system itself. ${JOB_RULES} ${NO_TOOLS_YET}`,
+  },
+];
+
+/** A routine result unpulled this long sends the lead one wake notice: 30 minutes. */
+export const RESULT_WAKE_MS = 30 * 60_000;
+
+/**
+ * The lead's standing instructions. The lead answers and does one-step bookkeeping itself, starts
+ * a job for anything bigger, and pulls results from the board when it is ready for them.
+ */
+export const LEAD_INSTRUCTIONS = [
+  "You are the lead agent of one person's personal assistant.",
+  "Answer the person directly when you can, and do one-step bookkeeping yourself: set reminders, and read or edit household lists.",
+  "For anything with research, several steps, or an outside action, start a job with start_job: write a self-contained brief in your own words, pick the template, and set the priority and any deadline the request gives. You may pick the tier and effort; the template's tier is the default.",
+  "When you start a job, reply to the person with exactly one line: On it: <task> (job <n>, <template>, <tier>), where <task> is a few words on what the job does and the job number comes from the start_job result.",
+  "Job results wait on your job board; the waiting count is in your prompt. Pull a result with job_result when you are ready for it, and check it against its brief before you tell the person.",
+  "Some tools answer with a receipt and run in the background; read their result with read_result before you say the work is done.",
+  "When the person interrupts you, answer them first; then call resume_work to get back to what you were doing.",
+  "You can search your own earlier conversation with search_history.",
+].join(" ");
 
 /**
  * A card number: 13 to 19 digits, with at most one space or dash (ASCII or Unicode) between two
@@ -115,7 +186,9 @@ export const DECISIONS_PATH = "/api/alpha/decisions";
  * shadow week calibrates them before any cell enforces.
  */
 export const MARK_THRESHOLDS: Readonly<Record<string, number>> = {
+  // Kept so rules and history that name the retired hand-off still read.
   handoff: 0.5,
+  start_job: 0.5,
   household_change: 0.5,
   household_read: 0.7,
   // Lowered from 0.5 and 0.7 after Jev scored a card-number reminder 0.15-0.23 and a password
@@ -154,6 +227,7 @@ export const HOLD_MS = 24 * 60 * 60 * 1000;
  */
 export const ALWAYS_KEY_FIELD: Readonly<Record<string, string>> = {
   handoff: "specialist",
+  start_job: "template",
   household_change: "document",
   household_read: "document",
   set_reminder: "text",
@@ -161,10 +235,12 @@ export const ALWAYS_KEY_FIELD: Readonly<Record<string, string>> = {
 };
 
 /**
- * A new person's own rules: permit the four tools agents have today (hand-off, household list
- * edits, reminders, history search). Reading the household list matches no rule and passes.
+ * A new person's own rules: permit the tools agents have today (starting a job, household list
+ * edits, reminders, history search; the retired hand-off stays so older cells read the same).
+ * Reading the household list matches no rule and passes.
  */
 export const DEFAULT_PERSON_RULES = [
+  { agent: "all", tool: "start_job", verdict: "permit" },
   { agent: "all", tool: "handoff", verdict: "permit" },
   { agent: "all", tool: "household_change", verdict: "permit" },
   { agent: "all", tool: "set_reminder", verdict: "permit" },
