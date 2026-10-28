@@ -47,7 +47,7 @@ describe("the job task", () => {
       });
       return tx.createTask(
         JobTask,
-        { number: row.number },
+        { number: row.number, attempt: 0 },
         {
           ownership: { kind: "conversation" },
           conversationId: ROOT_CONVERSATION_ID,

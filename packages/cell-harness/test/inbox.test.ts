@@ -83,7 +83,7 @@ async function startJob(
     if (stored !== undefined) await storeResult(tx, row.number, stored.kind, stored.text, 1);
     const taskId = await tx.createTask(
       JobTask,
-      { number: row.number },
+      { number: row.number, attempt: 0 },
       {
         ownership: { kind: "conversation" },
         conversationId: ROOT_CONVERSATION_ID,

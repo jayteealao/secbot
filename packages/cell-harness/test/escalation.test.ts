@@ -5,17 +5,13 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobBoardDoc } from "../src/docs.ts";
 import {
-  createFauxGateway,
-  type FauxRequest,
-  fauxAssistantMessage,
-  fauxToolCall,
-  openTestCell,
-  type Responder,
-  type TestCell,
-  until,
-} from "./fixtures.ts";
-import { toolResultsOf } from "./job-helpers.ts";
-import { jobResponder, startJobLine } from "./responders.ts";
+  failingResearch,
+  job,
+  leadCalls,
+  researchRequests,
+  startPausedJob,
+} from "./escalation-helpers.ts";
+import { createFauxGateway, openTestCell, type TestCell, until } from "./fixtures.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -23,45 +19,6 @@ afterEach(async () => {
   test = undefined;
   vi.restoreAllMocks();
 });
-
-export const job = async (t: TestCell, n = 1) => (await t.cell.board()).jobs[String(n)];
-
-/** A research job that always makes the same failing call: it pauses after three. */
-export const failingResearch: Responder = (request: FauxRequest) =>
-  request.role === "research"
-    ? fauxAssistantMessage([fauxToolCall("household_read", { document: "no such list!" })], {
-        stopReason: "toolUse",
-      })
-    : jobResponder(request);
-
-export const researchRequests = (t: TestCell) =>
-  t.gateway.requests.filter((request) => request.role === "research").length;
-
-let lines = 0;
-/** The lead calls one tool from a scripted line and returns its result text. */
-export async function leadCalls(
-  t: TestCell,
-  tool: string,
-  args: Record<string, unknown>,
-): Promise<string> {
-  const before = (await toolResultsOf(t.cell.root)).length;
-  await (await t.cell.submit(`CALL ${tool} ${JSON.stringify(args)}`, `lead-${++lines}`)).wait(
-    BACKGROUND_CONTEXT,
-  );
-  const results = await toolResultsOf(t.cell.root);
-  expect(results.length).toBe(before + 1);
-  return results.at(-1) ?? "";
-}
-
-export async function startPausedJob(t: TestCell): Promise<void> {
-  await (
-    await t.cell.submit(
-      startJobLine({ title: "flights", brief: "find flights", template: "research" }),
-      "start",
-    )
-  ).wait(BACKGROUND_CONTEXT);
-  await until(async () => (await job(t))?.status === "paused");
-}
 
 describe("bounded raises in set_job", () => {
   it("resumes a paused job on a raise, counts it, and the job's new steps run", async () => {

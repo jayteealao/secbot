@@ -25,10 +25,10 @@ import { appendRecord } from "./activity.ts";
 import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
 import { JobBoardDoc, type JobRow, type ResultKind, RoleModelsDoc, TemplatesDoc } from "./docs.ts";
-import { ENDED, endRow, recordCost, storeResult } from "./job-board.ts";
+import { ENDED, endRow, jobCost, recordCost, storeResult } from "./job-board.ts";
 import { doneRecord, jobRowLabel } from "./jobs.ts";
 import { modelRef } from "./model-map.ts";
-import { budgetOf, conversationTotal } from "./month-ledger.ts";
+import { budgetOf } from "./month-ledger.ts";
 import { RESULT_WAKE_MS } from "./release-defaults.ts";
 import { templatesOf, tierModelOf } from "./templates.ts";
 
@@ -38,7 +38,19 @@ export const JOB_KIND = "secbot.job";
 /** How long a job may wait to start before it logs `job.queued_long`. */
 export const QUEUED_LONG_MS = 10 * 60_000;
 
-export type JobInput = { number: number };
+/** A job's number and its attempt: 0 for the first run, then one more per restart. */
+export type JobInput = { number: number; attempt: number };
+
+/** The first input of a restarted run: the lead's failure note, then the brief. */
+export const restartInput = (note: string, brief: string): string =>
+  `Failure note from the earlier attempt:\n${note}\n\nBrief:\n${brief}`;
+
+/**
+ * True when job task `taskId` owns the row: the row names it, or names no task yet. A run the
+ * lead restarted no longer owns its row, so its end and its abort leave the new run's row alone.
+ */
+export const ownsRow = (row: Pick<JobRow, "taskId">, taskId: string): boolean =>
+  row.taskId === null || String(row.taskId) === taskId;
 export type JobState =
   | { phase: "open" }
   | { phase: "run" }
@@ -98,9 +110,8 @@ async function finish(
   at: number,
 ): Promise<JobRow> {
   const row = await rowOf(tx, n);
-  if (row.conversationId !== null) {
-    await recordCost(tx, n, conversationTotal(await tx.doc(UsageDoc, row.conversationId)));
-  }
+  // Every conversation the job used counts: earlier runs and a review too (D-051).
+  await recordCost(tx, n, await jobCost(tx, row));
   if (outcome.kind !== undefined) await storeResult(tx, n, outcome.kind, outcome.text ?? "", at);
   await endRow(tx, n, outcome.status, at);
   await appendRecord(
@@ -172,14 +183,22 @@ export function createJobTask(deps: JobTaskDeps) {
   };
   return defineTask<JobInput, JobState, null>({
     name: JOB_KIND,
-    version: 1,
+    version: 2,
     initial: () => ({ phase: "open" }),
+    // A job running at the upgrade is its first attempt.
+    migrate: (input, checkpoint) => ({
+      input: { attempt: 0, ...(input as { number: number }) },
+      checkpoint: checkpoint as JobState,
+    }),
     phases: {
       open: async (job, runtime, context) => {
         const n = job.input.number;
         let started: JobRow | undefined;
         await runtime.commit(async (tx) => {
           const row = await rowOf(tx, n);
+          if (!ownsRow(row, String(job.id))) {
+            return { status: "terminal", outcome: { status: "completed", result: null } };
+          }
           const child = await tx.createConversation({
             ownership: { kind: "task", taskId: job.id },
           });
@@ -210,6 +229,13 @@ export function createJobTask(deps: JobTaskDeps) {
       run: async (job, runtime, context) => {
         const n = job.input.number;
         const row = (await runtime.snapshot(JobBoardDoc, context))?.jobs[String(n)];
+        if (row !== undefined && !ownsRow(row, String(job.id))) {
+          await runtime.commit(
+            () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
+            context,
+          );
+          return;
+        }
         if (row === undefined || row.conversationId === null) {
           await runtime.commit(async (tx) => {
             await finish(
@@ -253,13 +279,24 @@ export function createJobTask(deps: JobTaskDeps) {
         if (runtime.now() - row.createdAt >= QUEUED_LONG_MS) queuedLong();
         const conversation = await runtime.conversation(row.conversationId, context);
         if (conversation === undefined) throw new Error(`job ${n}: its conversation is missing`);
+        const { attempt } = job.input;
+        const note = row.runs.at(-1)?.note;
         const submission = await conversation.submit(
-          { type: "input", content: row.brief, whenBusy: "followUp", requestId: `job:${n}` },
+          {
+            type: "input",
+            content: attempt > 0 && note !== undefined ? restartInput(note, row.brief) : row.brief,
+            whenBusy: "followUp",
+            requestId: attempt > 0 ? `job:${n}:${attempt}` : `job:${n}`,
+          },
           context,
         );
         const settled = await submission.wait(context);
         let ended: { row: JobRow; kind: ResultKind; chars: number; outcome: string } | undefined;
         await runtime.commit(async (tx) => {
+          // A run the lead restarted while it answered leaves the new run's row alone.
+          if (!ownsRow(await rowOf(tx, n), String(job.id))) {
+            return { status: "terminal", outcome: { status: "completed", result: null } };
+          }
           let kind: ResultKind = "routine";
           let text: string;
           if (settled.status === "unanswered") {
@@ -344,7 +381,11 @@ export function createJobTask(deps: JobTaskDeps) {
       let row: JobRow | undefined;
       await runtime.commit(async (tx) => {
         const current = (await tx.doc(JobBoardDoc)).jobs[String(n)];
-        if (current !== undefined && !ENDED.has(current.status)) {
+        if (
+          current !== undefined &&
+          !ENDED.has(current.status) &&
+          ownsRow(current, String(job.id))
+        ) {
           row = {
             ...(await finish(tx, deps, String(job.id), n, { status: "stopped" }, runtime.now())),
           };

@@ -9,6 +9,7 @@ import { type Models, Type } from "@earendil-works/pi-ai";
 import {
   defineExtension,
   defineTool,
+  type EntryRecord,
   type Extension,
   type Harness,
   LiveDoc,
@@ -114,6 +115,56 @@ export function jobSummary(row: JobRow): string {
   return `job ${row.number} "${row.title}": ${row.status}, ${row.template} on ${row.tier}, ${effort}, $${row.cost.toFixed(2)} of $${row.cap}, priority ${row.priority}${due}, ${row.attempts.raises} raises and ${row.attempts.restarts} restarts; ${result}.`;
 }
 
+/** The most a job transcript gives the lead, in characters. */
+export const TRANSCRIPT_MAX_CHARS = 4_000;
+
+const partsText = (content: unknown): string =>
+  typeof content === "string"
+    ? content
+    : (content as readonly { type: string; text?: string; name?: string; arguments?: unknown }[])
+        .flatMap((part) =>
+          part.type === "text" && part.text !== undefined
+            ? [part.text]
+            : part.type === "toolCall"
+              ? [`[calls ${part.name} ${JSON.stringify(part.arguments)}]`]
+              : [],
+        )
+        .join(" ");
+
+/**
+ * A transcript as role-labelled lines, oldest first, tool errors marked: the newest lines that fit
+ * `max` characters.
+ */
+export function transcriptText(entries: readonly EntryRecord[], max: number): string {
+  const lines: string[] = [];
+  for (const entry of entries) {
+    const message = entry.model?.[0] as
+      | { role: string; content: unknown; toolName?: string; isError?: boolean }
+      | undefined;
+    if (message === undefined || message.role === "system") continue;
+    const said = partsText(message.content).replace(/\s+/g, " ").trim();
+    if (message.role === "toolResult") {
+      lines.push(
+        `tool ${message.toolName ?? "?"}${message.isError === true ? " error" : ""}: ${said}`,
+      );
+    } else {
+      lines.push(`${message.role === "assistant" ? "job" : message.role}: ${said}`);
+    }
+  }
+  const kept: string[] = [];
+  let size = 0;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i] as string;
+    if (size + line.length + 1 > max) {
+      if (kept.length === 0) kept.push(line.slice(0, max));
+      break;
+    }
+    kept.push(line);
+    size += line.length + 1;
+  }
+  return kept.reverse().join("\n");
+}
+
 /** The lead's refusal when a job has used both escalations: the job has stopped. */
 export const exhaustedText = (n: number) =>
   `Refused: job ${n} has used its raise and its restart. It has stopped; ask the person in your own words what to do — the chat adds the /answer line.`;
@@ -198,7 +249,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         });
         await tx.createTask(
           JobTask,
-          { number: row.number },
+          { number: row.number, attempt: 0 },
           { ownership: { kind: "conversation" }, background: true },
         );
         return { ...row, effort: { ...row.effort } };
@@ -355,13 +406,133 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     },
   });
 
+  const jobTranscript = defineTool({
+    name: "job_transcript",
+    description:
+      "Read the newest steps of a job's current conversation (or its last run's), tool errors included, before you write a failure note for restart_job.",
+    parameters: Type.Object({
+      job: jobParameter,
+      limit: Type.Optional(
+        Type.Integer({ minimum: 1, maximum: 100, description: "How many entries, default 20." }),
+      ),
+    }),
+    replay: "safe",
+    execute: async (args, api, context) => {
+      const found = await api.commit(async (tx) => {
+        const row = await rowOrError(tx, args.job);
+        if ("error" in row) return row;
+        return { conversationId: row.conversationId ?? row.runs.at(-1)?.conversationId ?? null };
+      }, context);
+      if ("error" in found) return refusal(found.error);
+      if (found.conversationId === null) {
+        return { ...text(`job ${args.job} has no transcript yet.`), details: { job: args.job } };
+      }
+      const conversation = await deps.harness().conversation(found.conversationId, context);
+      const page = await conversation?.entries({}, args.limit ?? 20, undefined, context);
+      const said = transcriptText([...(page?.items ?? [])].reverse(), TRANSCRIPT_MAX_CHARS);
+      return {
+        ...text(said === "" ? `job ${args.job}'s transcript is empty.` : said),
+        details: { job: args.job },
+      };
+    },
+  });
+
+  const restartJob = defineTool({
+    name: "restart_job",
+    description:
+      "Restart a job with a fresh subagent, once per job: write a failure note (what was tried, why it failed, partial results) from its transcript. The new subagent gets the note and the brief and can search the old transcript. Keeps the job's number, board row, and cost.",
+    parameters: Type.Object({
+      job: jobParameter,
+      note: Type.String({ minLength: 1, maxLength: 2_000, description: "The failure note." }),
+    }),
+    // A crash mid-call gives the model an interrupted result instead of a second restart.
+    replay: "unsafe",
+    execute: async (args, api, context) => {
+      const at = deps.now();
+      const changed = await api.commit(async (tx) => {
+        const found = await rowOrError(tx, args.job);
+        if ("error" in found) return found;
+        if (found.status === "done" || found.status === "stopped" || found.status === "queued") {
+          return {
+            error: `job ${args.job} is ${found.status}; only a started, unfinished job restarts.`,
+          };
+        }
+        const counted = await escalate(tx, args.job, "restart");
+        if ("refused" in counted) {
+          if (escalationsUsed(found)) {
+            const ended = await exhaust(tx, args.job, at);
+            return { exhausted: { number: ended.number, taskId: ended.taskId } };
+          }
+          return {
+            error: `Refused: job ${args.job} has used its restart; a raise with set_job is left.`,
+          };
+        }
+        const oldTaskId = found.taskId;
+        found.cost = Math.max(found.cost, await jobCost(tx, found));
+        found.runs.push({
+          conversationId: found.conversationId,
+          taskId: found.taskId,
+          startedAt: found.runs.at(-1)?.endedAt ?? found.createdAt,
+          endedAt: at,
+          note: args.note,
+        });
+        found.conversationId = null;
+        found.pause = null;
+        found.result = null;
+        found.toolsUsed = [];
+        if (found.question?.answer === null) found.question = null;
+        found.status = "queued";
+        found.endedAt = null;
+        found.resumedAt = null;
+        found.taskId = await tx.createTask(
+          JobTask,
+          { number: found.number, attempt: found.attempts.restarts },
+          { ownership: { kind: "conversation" }, background: true },
+        );
+        return {
+          oldTaskId,
+          row: { number: found.number, attempts: { ...found.attempts } },
+        };
+      }, context);
+      if ("exhausted" in changed) {
+        await endExhausted(changed.exhausted, context);
+        return refusal(exhaustedText(args.job));
+      }
+      if ("error" in changed) return refusal(changed.error);
+      if (changed.oldTaskId !== null) {
+        await deps.harness().abortTask(changed.oldTaskId, withoutAbortSignal(context));
+      }
+      deps.holds.wake(changed.row.number);
+      logEvent("job.restarted", {
+        cell: person,
+        job: changed.row.number,
+        attempts: changed.row.attempts.raises + changed.row.attempts.restarts,
+        note_chars: args.note.length,
+      });
+      return {
+        ...text(
+          `job ${changed.row.number} restarts with a fresh subagent and your note; this was its one restart.`,
+        ),
+        details: { job: changed.row.number },
+      };
+    },
+  });
+
   const ReceiptTask = createReceiptTask(deps.remote ?? { person, household: () => undefined });
   return {
     JobTask,
     ReceiptTask,
     extension: defineExtension({
       name: "secbot-jobs",
-      tools: [startJob, readJob, jobResult, setJob, createReadResultTool(deps.now)],
+      tools: [
+        startJob,
+        readJob,
+        jobResult,
+        setJob,
+        restartJob,
+        jobTranscript,
+        createReadResultTool(deps.now),
+      ],
       wraps: remoteWraps(person, ReceiptTask, turnOf, deps.now),
       tasks: [JobTask, ReceiptTask],
     }),

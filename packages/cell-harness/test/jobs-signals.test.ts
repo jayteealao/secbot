@@ -212,7 +212,7 @@ describe("the job signals", () => {
         });
         await tx.createTask(
           JobTask,
-          { number: row.number },
+          { number: row.number, attempt: 0 },
           {
             ownership: { kind: "conversation" },
             conversationId: ROOT_CONVERSATION_ID,
