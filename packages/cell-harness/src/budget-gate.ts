@@ -30,7 +30,7 @@ import { type BudgetName, BudgetWaitsDoc } from "./docs.ts";
 import type { BudgetState } from "./limits.ts";
 import { budgetOf } from "./month-ledger.ts";
 import { redactText } from "./redact.ts";
-import { roleOf } from "./telemetry.ts";
+import { jobOf, roleOf } from "./telemetry.ts";
 
 /** One piece of work that waits above a limit. */
 export interface WaitRequest {
@@ -173,8 +173,13 @@ export function createBudgetExtension(gate: () => BudgetWaiter | undefined): Ext
           const waiter = gate();
           if (waiter === undefined) return undefined;
           const role = await roleOf(api, api.conversationId, context);
+          const job = await jobOf(api, api.conversationId, context);
           await waiter.waitUntilUnder(
-            { budget: budgetOf(role), taskId: String(api.taskId), what: `job ${role}` },
+            {
+              budget: budgetOf(role),
+              taskId: String(api.taskId),
+              what: job === null ? `job ${role}` : `job ${job} ${role}`,
+            },
             context,
           );
           return undefined;

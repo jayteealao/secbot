@@ -74,14 +74,14 @@ import {
 } from "./approvals.ts";
 import { errorFields, logEvent } from "./cell-parts.ts";
 import { buildDecisionState, DecisionFailure, type DecisionModels } from "./decision-model.ts";
-import { RosterDoc, RulesDoc } from "./docs.ts";
+import { RulesDoc } from "./docs.ts";
 import { readDecisionAdapter, readGuardMode } from "./guard-settings.ts";
 import { addGuardUsage, costOnlyUsage } from "./month-ledger.ts";
 import { redactText } from "./redact.ts";
-import { HOLD_MS, LEAD_ROLE } from "./release-defaults.ts";
+import { HOLD_MS } from "./release-defaults.ts";
 import { type Reviewer, ReviewerFailure, type ReviewVerdict } from "./reviewer.ts";
 import { decide, ruleText } from "./rules.ts";
-import { roleOf } from "./telemetry.ts";
+import { agentNames, roleOf } from "./telemetry.ts";
 
 /** One tool call as every stage sees it. */
 export interface GuardCall {
@@ -531,8 +531,7 @@ export function createGuardExtension(
     context: Context,
   ): Promise<AlwaysOffer> {
     const rules = await api.snapshot(RulesDoc, context);
-    const roster = await api.snapshot(RosterDoc, context);
-    const agents = new Set([LEAD_ROLE, ...Object.keys(roster?.specialists ?? {})]);
+    const agents = await agentNames(api, context);
     return alwaysOffer(
       { owner: rules?.owner ?? [], person: rules?.person ?? [] },
       call,
