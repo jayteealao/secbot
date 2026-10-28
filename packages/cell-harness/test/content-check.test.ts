@@ -282,7 +282,7 @@ describe("the reading-tool wrap", () => {
       defineExtension({ name: "test-secret-reader", tools: [tool] }),
       defineExtension({
         name: "test-secret-wrap",
-        wraps: contentCheckWraps({ read_secret_page: "page" }, () => 4_242),
+        wraps: contentCheckWraps("owner", { read_secret_page: "page" }, () => 4_242),
       }),
     ];
   }

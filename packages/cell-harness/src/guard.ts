@@ -542,6 +542,7 @@ export function createGuardExtension(
       cost_usd: model?.costUsd ?? 0,
       rule_ms: fields.ruleMs ?? null,
       duration_ms: Date.now() - started,
+      ...(model?.outside === true ? { outside_content: true } : {}),
     });
     return fields.verdict === "allowed" ? undefined : { block: fields.reason };
   }

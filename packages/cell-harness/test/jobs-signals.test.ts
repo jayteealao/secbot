@@ -5,10 +5,13 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { DecisionModels } from "../src/decision-model.ts";
 import { JobBoardDoc } from "../src/docs.ts";
 import { createJobRow } from "../src/job-board.ts";
 import { QUEUED_LONG_MS } from "../src/job-task.ts";
+import { failingResearch, job, leadCalls } from "./escalation-helpers.ts";
 import {
+  cleanContent,
   createFauxGateway,
   createHouseholdStub,
   fauxAssistantMessage,
@@ -16,13 +19,16 @@ import {
   fauxToolCall,
   loggedEvents,
   openTestCell,
+  passingDecision,
   type Responder,
   resultReviewer,
+  reviewerResponder,
   type TestCell,
   until,
+  verdictJson,
 } from "./fixtures.ts";
-import { failingResearch, job, leadCalls } from "./escalation-helpers.ts";
-import { createHold, jobResponder, startJobLine } from "./responders.ts";
+import { FIXTURE_ORDER, FIXTURE_PAGES } from "./injection-fixtures.ts";
+import { createHold, jobResponder, RESEARCH_JOB, startJobLine } from "./responders.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -357,5 +363,158 @@ describe("the escalation, review, and question signals", () => {
       expect.objectContaining({ job: 1, reviewer_model: expect.any(String) }),
     ]);
     expect(JSON.stringify(events)).not.toMatch(SECRET_WORDS);
+  });
+});
+
+describe("the content check signals", () => {
+  const ORDER_FREE_LINES = FIXTURE_PAGES.clean.split("\n");
+  const pricedCheck: DecisionModels = (adapter) => ({
+    ...passingDecision(adapter),
+    checkContent: async (state) => ({
+      ...(await cleanContent()),
+      ...(String(state.content).includes(FIXTURE_ORDER)
+        ? { outcome: "hit" as const, choice: "injection" as const, score: 0.9 }
+        : {}),
+      costUsd: 0.001,
+    }),
+  });
+  /** A research job that reads `page` twice (the second time beside `then`), then answers. */
+  const reads = (page: keyof typeof FIXTURE_PAGES, then?: string): Responder => {
+    let step = 0;
+    return (request) => {
+      if (request.role !== "research") return jobResponder(request);
+      step++;
+      if (step === 1) {
+        return fauxAssistantMessage([fauxToolCall("read_fixture_page", { page })], {
+          stopReason: "toolUse",
+        });
+      }
+      if (step === 2) {
+        return fauxAssistantMessage(
+          [
+            fauxToolCall("read_fixture_page", { page }),
+            ...(then === undefined ? [] : [fauxToolCall(then, BROKER)]),
+          ],
+          { stopReason: "toolUse" },
+        );
+      }
+      return fauxAssistantMessage([fauxText("Read it.")]);
+    };
+  };
+  const BROKER = { secret: "health-test", method: "GET", path: "/v1/steps" };
+
+  it("logs a checked read and one outside mark per kind, with no page text", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({
+      gateway: createFauxGateway(reads("clean")),
+      fixturePages: FIXTURE_PAGES,
+      guard: { decision: pricedCheck },
+    });
+    const t = test;
+    await (await t.cell.submit(RESEARCH_JOB, "c-1")).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await job(t))?.status === "done");
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    const events = loggedEvents(log.mock.calls);
+    const of = (name: string) => events.filter((each) => each.event === name);
+    expect(of("content.checked").length).toBeGreaterThanOrEqual(1);
+    expect(of("content.checked")[0]).toEqual({
+      event: "content.checked",
+      level: "info",
+      cell: "owner",
+      job: 1,
+      tool: "read_fixture_page",
+      source: "page",
+      chunks: 1,
+      content_bytes: new TextEncoder().encode(FIXTURE_PAGES.clean).length,
+      cut: false,
+      cost_usd: 0.001,
+      duration_ms: expect.any(Number),
+    });
+    expect(of("job.outside_marked")).toEqual([
+      {
+        event: "job.outside_marked",
+        level: "info",
+        cell: "owner",
+        job: 1,
+        source: "page",
+        tool: "read_fixture_page",
+      },
+    ]);
+    for (const line of ORDER_FREE_LINES) expect(JSON.stringify(events)).not.toContain(line);
+  });
+
+  it("warns once when the check stops a job, with no page text", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    test = await openTestCell({
+      gateway: createFauxGateway(reads("injected")),
+      fixturePages: FIXTURE_PAGES,
+      guard: { decision: pricedCheck },
+    });
+    const t = test;
+    await (await t.cell.submit(RESEARCH_JOB, "c-2")).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await job(t))?.status === "blocked");
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    const events = loggedEvents(warn.mock.calls);
+    expect(events.filter((each) => each.event === "job.injection_stop")).toEqual([
+      {
+        event: "job.injection_stop",
+        level: "warn",
+        cell: "owner",
+        job: 1,
+        source: "page",
+        tool: "read_fixture_page",
+        outcome: "hit",
+        chunk: 0,
+        chunks: 1,
+        content_bytes: new TextEncoder().encode(FIXTURE_PAGES.injected).length,
+      },
+    ]);
+    expect(JSON.stringify(events)).not.toContain(FIXTURE_ORDER);
+    expect(JSON.stringify(events)).not.toContain("lentil");
+  });
+
+  it("marks the guard's verdict line of a reviewed outside action", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const refused = async (): Promise<never> => {
+      throw new Error("not in this test");
+    };
+    test = await openTestCell({
+      gateway: createFauxGateway(
+        reviewerResponder(
+          () => verdictJson("allow", "asked for"),
+          resultReviewer(reads("clean", "broker_call")),
+        ),
+      ),
+      fixturePages: FIXTURE_PAGES,
+      secrets: {
+        get: refused,
+        broker: async () => ({ status: 200, body: "ok" }),
+        list: async () => [],
+        grant: refused,
+        revoke: refused,
+        add: refused,
+        allowlist: refused,
+        rotate: refused,
+        redactionValues: async () => [],
+      },
+      guard: { decision: pricedCheck },
+    });
+    const t = test;
+    await (await t.cell.submit(RESEARCH_JOB, "c-3")).wait(BACKGROUND_CONTEXT);
+    await until(() =>
+      loggedEvents(log.mock.calls).some(
+        (each) => each.event === "guard.verdict" && each.tool === "broker_call",
+      ),
+    );
+    const verdicts = loggedEvents(log.mock.calls).filter((each) => each.event === "guard.verdict");
+    expect(verdicts.find((each) => each.tool === "broker_call")).toMatchObject({
+      outside_content: true,
+      layer: "reviewer",
+    });
+    expect(verdicts.find((each) => each.tool === "read_fixture_page")).not.toHaveProperty(
+      "outside_content",
+    );
   });
 });

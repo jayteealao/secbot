@@ -518,9 +518,15 @@ describe("outside content and blocks on the board", () => {
 
   it("marks the current run once per kind and tool, keeping the first time", async () => {
     await running();
-    await ops((tx) => markOutside(tx, 1, conversation(41), "read_fixture_page", "page", 100));
-    await ops((tx) => markOutside(tx, 1, conversation(41), "read_fixture_page", "page", 200));
-    await ops((tx) => markOutside(tx, 1, conversation(41), "read_mail", "mail", 300));
+    const first = await ops((tx) =>
+      markOutside(tx, 1, conversation(41), "read_fixture_page", "page", 100),
+    );
+    const again = await ops((tx) =>
+      markOutside(tx, 1, conversation(41), "read_fixture_page", "page", 200),
+    );
+    const mail = await ops((tx) => markOutside(tx, 1, conversation(41), "read_mail", "mail", 300));
+    // True only when the kind is new for the run.
+    expect([first, again, mail]).toEqual([true, false, true]);
     expect((await job())?.outside).toEqual({
       at: 100,
       kinds: ["page", "mail"],

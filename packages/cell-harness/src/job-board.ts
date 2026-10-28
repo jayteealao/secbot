@@ -330,8 +330,8 @@ export async function endRow(tx: Tx, n: number, status: JobStatus, at: number): 
 
 /**
  * Marks that the job's current run read outside content through `tool`: each kind and tool is added
- * once, and the first time is kept. A conversation of an earlier run marks nothing. True when the
- * row is this run's.
+ * once, and the first time is kept. A conversation of an earlier run marks nothing. True when this
+ * kind is new for the current run.
  */
 export async function markOutside(
   tx: Tx,
@@ -344,8 +344,9 @@ export async function markOutside(
   const row = await mustRow(tx, n);
   if (row.conversationId !== conversationId) return false;
   row.outside ??= { at, kinds: [], tools: [] };
-  if (!row.outside.kinds.includes(kind)) row.outside.kinds.push(kind);
   if (!row.outside.tools.includes(tool)) row.outside.tools.push(tool);
+  if (row.outside.kinds.includes(kind)) return false;
+  row.outside.kinds.push(kind);
   return true;
 }
 

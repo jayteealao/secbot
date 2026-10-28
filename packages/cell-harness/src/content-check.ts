@@ -21,6 +21,7 @@ import {
   type Wrap,
   wrapTool,
 } from "@earendil-works/pi-durable";
+import { logEvent } from "./cell-parts.ts";
 import {
   buildContentState,
   DecisionFailure,
@@ -257,6 +258,7 @@ export async function checkContent(
  * without the check. The result itself is checked after the tool returns.
  */
 export function contentCheckWraps(
+  person: string,
   readers: Readonly<Record<string, OutsideKind>>,
   now: () => number,
 ): Wrap[] {
@@ -267,9 +269,13 @@ export function contentCheckWraps(
       execute: async (args, api, context) => {
         const n = await jobOf(api, api.conversationId, context);
         if (n !== null) {
-          await api.commit(async (tx) => {
-            await markOutside(tx, n, api.conversationId, name, kind, now());
-          }, context);
+          const marked = await api.commit(
+            (tx) => markOutside(tx, n, api.conversationId, name, kind, now()),
+            context,
+          );
+          if (marked) {
+            logEvent("job.outside_marked", { cell: person, job: n, source: kind, tool: name });
+          }
         }
         const silent = {
           ...api,
@@ -295,6 +301,11 @@ const withheld = (): ToolExecutionResult => ({
   isError: true,
   diagnostics: [],
 });
+
+/** The size a stop logs when the check failed before it measured the content. */
+const UNKNOWN_SIZE = { chunks: 0, contentBytes: 0 };
+
+const utf8Bytes = (text: string) => new TextEncoder().encode(text).length;
 
 export interface ContentCheckDeps {
   readonly person: string;
@@ -331,7 +342,7 @@ function resultText(result: ToolExecutionResult): string | null {
  * the job's task, and keeps only a withheld line.
  */
 export function createContentCheckExtension(deps: ContentCheckDeps): Extension {
-  const { harness, now } = deps;
+  const { person, harness, now } = deps;
   const readers = { ...OUTSIDE_CONTENT_TOOLS, ...deps.readers };
 
   /**
@@ -345,6 +356,7 @@ export function createContentCheckExtension(deps: ContentCheckDeps): Extension {
     api: { readonly conversationId: ConversationId; readonly taskId: TaskId },
     stop: JobBlock,
     usages: readonly Usage[],
+    size: { readonly chunks: number; readonly contentBytes: number },
     context: Context,
   ) => {
     // The job may be stopping already: the block commits whatever happens to the call.
@@ -355,6 +367,20 @@ export function createContentCheckExtension(deps: ContentCheckDeps): Extension {
       return blocked === null ? null : { taskId: blocked.taskId };
     }, quiet);
     if (row === null) return;
+    logEvent(
+      "job.injection_stop",
+      {
+        cell: person,
+        job: n,
+        source: stop.kind,
+        tool: stop.tool,
+        outcome: stop.cause,
+        chunk: stop.chunk,
+        chunks: size.chunks,
+        content_bytes: size.contentBytes,
+      },
+      "warn",
+    );
     const lead = await harness().conversation(ROOT_CONVERSATION_ID, quiet);
     await lead?.submit(
       {
@@ -376,7 +402,7 @@ export function createContentCheckExtension(deps: ContentCheckDeps): Extension {
 
   return defineExtension({
     name: "secbot-content-check",
-    wraps: contentCheckWraps(readers, now),
+    wraps: contentCheckWraps(person, readers, now),
     hooks: [
       hook(ToolTask, {
         afterTool: async (call, result, api, context) => {
@@ -397,18 +423,31 @@ export function createContentCheckExtension(deps: ContentCheckDeps): Extension {
           try {
             const text = resultText(result);
             if (text === null) {
-              await block(n, api, failed("error", null), [], context);
+              await block(n, api, failed("error", null), [], UNKNOWN_SIZE, context);
               return withheld();
             }
+            const started = Date.now();
             const model = deps.decision(await readDecisionAdapter(api, context));
             const verdict = await checkContent(
               model,
               { kind, tool: call.name, text },
               context.abortSignal,
             );
+            const size = { chunks: verdict.chunks, contentBytes: utf8Bytes(text) };
+            logEvent("content.checked", {
+              cell: person,
+              job: n,
+              tool: call.name,
+              source: kind,
+              chunks: verdict.chunks,
+              content_bytes: size.contentBytes,
+              cut: verdict.cut,
+              cost_usd: verdict.costUsd,
+              duration_ms: Date.now() - started,
+            });
             if (verdict.outcome !== "clean") {
               const stop = failed(verdict.outcome, verdict.chunk);
-              await block(n, api, stop, verdict.usages, context);
+              await block(n, api, stop, verdict.usages, size, context);
               return withheld();
             }
             if (verdict.usages.length > 0) {
@@ -428,7 +467,7 @@ export function createContentCheckExtension(deps: ContentCheckDeps): Extension {
             };
           } catch (error) {
             if (context.abortSignal?.aborted) throw error;
-            await block(n, api, failed("error", null), [], context);
+            await block(n, api, failed("error", null), [], UNKNOWN_SIZE, context);
             return withheld();
           }
         },
