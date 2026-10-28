@@ -5,7 +5,9 @@
  * check fails closed, in every guard mode.
  */
 import type { Usage } from "@earendil-works/pi-ai";
+import { type ToolRegistration, type Wrap, wrapTool } from "@earendil-works/pi-durable";
 import { buildContentState, DecisionFailure, type DecisionModel } from "./decision-model.ts";
+import { markOutside } from "./job-board.ts";
 import {
   CONTENT_CHECK_MAX_BYTES,
   CONTENT_CHECK_PARALLEL,
@@ -13,6 +15,7 @@ import {
   CONTENT_CHUNK_OVERLAP_BYTES,
   type OutsideKind,
 } from "./release-defaults.ts";
+import { jobOf } from "./telemetry.ts";
 
 /** A chunk's size as written into the decision request: its JSON-escaped UTF-8 bytes. */
 export function requestBytes(text: string): number {
@@ -211,4 +214,38 @@ export async function checkContent(
   // The workers set `stop`; flow analysis does not follow closures.
   const found = stop as Stop | null;
   return found === null ? { outcome: "clean", ...checked } : { ...found, ...checked };
+}
+
+/**
+ * Decorates each reading tool. On a job's conversation, the tool's own commit marks the job as
+ * having read outside content before the tool runs (so a crash or a failed read still leaves the
+ * mark). In every conversation, the tool's progress output, details, and diagnostics are dropped:
+ * they would reach the conversation's live slot, which a crash or an abort turns into a result
+ * without the check. The result itself is checked after the tool returns.
+ */
+export function contentCheckWraps(
+  readers: Readonly<Record<string, OutsideKind>>,
+  now: () => number,
+): Wrap[] {
+  return Object.entries(readers).map(([name, kind]) =>
+    // Only the name of the first argument is read: the wrapper decorates whichever tool won.
+    wrapTool({ name } as ToolRegistration, (inner) => ({
+      ...inner,
+      execute: async (args, api, context) => {
+        const n = await jobOf(api, api.conversationId, context);
+        if (n !== null) {
+          await api.commit(async (tx) => {
+            await markOutside(tx, n, api.conversationId, name, kind, now());
+          }, context);
+        }
+        const silent = {
+          ...api,
+          output: () => {},
+          diagnostic: () => {},
+          details: async () => {},
+        };
+        return inner.execute(args, silent, context);
+      },
+    })),
+  );
 }

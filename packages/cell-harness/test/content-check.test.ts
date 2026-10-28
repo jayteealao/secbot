@@ -1,15 +1,17 @@
 // The content check of outside content: every chunk asked, a few at a time; the first answer that
 // is not clean ends the rest; a timeout or any other failure fails closed; an outer abort is thrown.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { JsonObject } from "@earendil-works/pi-durable";
-import { describe, expect, it } from "vitest";
-import { checkContent, chunkContent } from "../src/content-check.ts";
+import { Type } from "@earendil-works/pi-ai";
+import { defineExtension, defineTool, type JsonObject, LiveDoc } from "@earendil-works/pi-durable";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { checkContent, chunkContent, contentCheckWraps } from "../src/content-check.ts";
 import {
   type ContentAnswer,
   DecisionFailure,
   type DecisionFailureCause,
   type DecisionModel,
 } from "../src/decision-model.ts";
+import { JobBoardDoc } from "../src/docs.ts";
 import {
   createFixtureReaderExtension,
   isOutsideAction,
@@ -20,6 +22,17 @@ import {
   CONTENT_CHUNK_BYTES,
   CONTENT_CHUNK_OVERLAP_BYTES,
 } from "../src/release-defaults.ts";
+import {
+  createFauxGateway,
+  fauxAssistantMessage,
+  fauxText,
+  fauxToolCall,
+  openTestCell,
+  type Responder,
+  type TestCell,
+  until,
+} from "./fixtures.ts";
+import { jobResponder, RESEARCH_JOB } from "./responders.ts";
 
 const SIZES = {
   chunkBytes: CONTENT_CHUNK_BYTES,
@@ -225,4 +238,74 @@ describe("the reading-tool registry and the fixture tool", () => {
       isError: true,
     });
   });
+});
+
+describe("the reading-tool wrap", () => {
+  let test: TestCell | undefined;
+  afterEach(async () => {
+    await test?.cell.close();
+    test = undefined;
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * A reading tool that reports the page as progress output and details, waits for the progress
+   * commit, then notes what the live slot and the board held, and returns or throws.
+   */
+  function secretReader(seen: { slot?: unknown; outside?: unknown }, fail: boolean) {
+    const tool = defineTool({
+      name: "read_secret_page",
+      description: "test",
+      parameters: Type.Object({}),
+      replay: "safe",
+      execute: async (_args, api, context) => {
+        const row = Object.values((await api.snapshot(JobBoardDoc, context))?.jobs ?? {})[0];
+        seen.outside = row?.outside;
+        api.output("secret page");
+        await api.details({ page: "secret page" }, context);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const live = await api.snapshot(LiveDoc, api.conversationId, context);
+        seen.slot = live?.tools?.find((slot) => slot.status === "running");
+        if (fail) throw new Error("the page did not load");
+        return { content: [{ type: "text" as const, text: "a page" }] };
+      },
+    });
+    return [
+      defineExtension({ name: "test-secret-reader", tools: [tool] }),
+      defineExtension({
+        name: "test-secret-wrap",
+        wraps: contentCheckWraps({ read_secret_page: "page" }, () => 4_242),
+      }),
+    ];
+  }
+
+  const readsSecret: Responder = (request) => {
+    if (request.role === "research" && request.last?.role !== "toolResult") {
+      return fauxAssistantMessage([fauxToolCall("read_secret_page", {})], {
+        stopReason: "toolUse",
+      });
+    }
+    if (request.role === "research") return fauxAssistantMessage([fauxText("Read it.")]);
+    return jobResponder(request);
+  };
+
+  it.each([false, true])(
+    "marks the job before the read and keeps progress output out of the live slot (tool throws: %s)",
+    async (fail) => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      const seen: { slot?: unknown; outside?: unknown } = {};
+      test = await openTestCell({
+        gateway: createFauxGateway(readsSecret),
+        extensions: secretReader(seen, fail),
+      });
+      const t = test;
+      await (await t.cell.submit(RESEARCH_JOB, "secret-1")).wait(BACKGROUND_CONTEXT);
+      await until(async () => (await t.cell.board()).jobs["1"]?.result != null);
+      expect(seen.outside).toEqual({ at: 4_242, kinds: ["page"], tools: ["read_secret_page"] });
+      expect(seen.slot).toMatchObject({ status: "running" });
+      expect(seen.slot).not.toHaveProperty("output");
+      expect(seen.slot).not.toHaveProperty("details");
+      expect((await t.cell.board()).jobs["1"]?.outside?.kinds).toEqual(["page"]);
+    },
+  );
 });
