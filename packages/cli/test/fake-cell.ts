@@ -111,8 +111,36 @@ export interface FakeCell {
   secrets: { name: string; kind: string; grants: string[] }[];
   /** When set, the next secrets route answers [status, error] (a refusal, or 503 unavailable). */
   secretsFailure: [number, string] | undefined;
+  /** `GET /jobs`, and `GET /ops/jobs?cell=<c>` (with that person and `operator: true`). */
+  jobsView: Record<string, unknown>;
+  /** The priority route: job -> [status, body]; an unknown job answers 404 `no job #<n>`. */
+  priorityAnswers: Record<number, [number, unknown]>;
+  /** The restart route: job -> [status, body]; an unknown job answers 404. */
+  restartAnswers: Record<number, [number, unknown]>;
+  /** `POST /stop`. */
+  stopAnswer: { jobs: number; turn: boolean };
+  /** `POST /ops/stop`: the answer, or a refusal status. */
+  opsStop: Record<string, unknown> | number;
   close(): Promise<void>;
 }
+
+/** The board view of a person with no jobs. */
+export const emptyView = (person: string): Record<string, unknown> => ({
+  person,
+  mode: "shadow",
+  live: 0,
+  waiting: 0,
+  rows: [],
+  finished: [],
+  shown: 0,
+  capacity: null,
+  templates: [
+    { name: "household", tier: "cheap" },
+    { name: "research", tier: "mid" },
+    { name: "health", tier: "mid" },
+    { name: "developer", tier: "frontier" },
+  ],
+});
 
 export async function startFakeCell(key: string, person = "owner"): Promise<FakeCell> {
   const cell: FakeCell = {
@@ -144,6 +172,11 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     limitChanges: [],
     secrets: [],
     secretsFailure: undefined,
+    jobsView: emptyView(person),
+    priorityAnswers: {},
+    restartAnswers: {},
+    stopAnswer: { jobs: 0, turn: false },
+    opsStop: { cells: [], missing: [] },
     close: async () => {},
   };
   const seen = new Set<string>();
@@ -216,6 +249,15 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
         const given = (body ?? {}) as Record<string, unknown>;
         if (url.pathname === "/ops/secrets/rotate" && request.method === "POST") {
           return secretsReply(() => ({ from: "k1", keyId: "k2", rewrapped: 3, remaining: 0 }));
+        }
+        if (url.pathname === "/ops/stop" && request.method === "POST") {
+          return typeof cell.opsStop === "number"
+            ? reply(cell.opsStop, { error: "refused" })
+            : reply(200, cell.opsStop);
+        }
+        if (url.pathname === "/ops/jobs" && request.method === "GET") {
+          const named = url.searchParams.get("cell") ?? "";
+          return reply(200, { ...cell.jobsView, person: named, operator: true });
         }
         if (url.pathname === "/ops/cost" && url.searchParams.get("cell") === null) {
           return reply(200, cell.household);
@@ -312,6 +354,23 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       }
       if (route === "/approvals" && request.method === "GET")
         return reply(200, { held: cell.held });
+      if (route === "/jobs" && request.method === "GET") return reply(200, cell.jobsView);
+      if (route === "/stop" && request.method === "POST") return reply(200, cell.stopAnswer);
+      const jobPriority = /^[/]jobs[/](\d+)[/]priority$/.exec(route);
+      if (jobPriority !== null && request.method === "POST") {
+        const job = Number(jobPriority[1]);
+        const [status, value] = cell.priorityAnswers[job] ?? [404, { error: `no job #${job}` }];
+        return reply(status, value);
+      }
+      const jobRestart = /^[/]jobs[/](\d+)[/]restart$/.exec(route);
+      if (jobRestart !== null && request.method === "POST") {
+        const job = Number(jobRestart[1]);
+        const [status, value] = cell.restartAnswers[job] ?? [
+          404,
+          { error: `no stopped job #${job}`, reason: "no-job" },
+        ];
+        return reply(status, value);
+      }
       const jobAnswer = /^\/jobs\/(\d+)\/answer$/.exec(route);
       if (jobAnswer !== null && request.method === "POST") {
         const job = Number(jobAnswer[1]);
