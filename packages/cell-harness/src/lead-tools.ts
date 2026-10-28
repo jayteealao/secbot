@@ -21,13 +21,14 @@ import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
 import { JobBoardDoc, type JobRow, RoleModelsDoc, TemplatesDoc, TierSettingsDoc } from "./docs.ts";
 import {
+  answerQuestion,
+  blockReason,
   createJobRow,
   ENDED,
   escalate,
   escalationsUsed,
   exhaust,
   jobCost,
-  answerQuestion,
   markRisky,
   openQuestion,
   pullResult,
@@ -35,7 +36,6 @@ import {
   setTierEffort,
 } from "./job-board.ts";
 import type { JobHolds } from "./job-holds.ts";
-import { createReviewTask, type ReviewTask, reviewHold, startReview } from "./result-review.ts";
 import { configureJob, createJobTask, type JobTask } from "./job-task.ts";
 import { budgetOf } from "./month-ledger.ts";
 import {
@@ -46,6 +46,7 @@ import {
   remoteWraps,
 } from "./receipts.ts";
 import { DEFAULT_JOB_EFFORT, JOB_EFFORTS, TIERS } from "./release-defaults.ts";
+import { createReviewTask, type ReviewTask, reviewHold, startReview } from "./result-review.ts";
 import { appliedEffort, capOf, templateNamed, templatesOf, tierModelOf } from "./templates.ts";
 
 export interface JobsExtensionDeps {
@@ -123,7 +124,9 @@ export function jobSummary(row: JobRow): string {
     open === null
       ? ""
       : ` Its question waits: "${open.text}"${open.toPerson ? " (asked the person)" : ""}; answer with answer_job.`;
-  return `job ${row.number} "${row.title}": ${row.status}, ${row.template} on ${row.tier}, ${effort}, $${row.cost.toFixed(2)} of $${row.cap}, priority ${row.priority}${due}, ${row.attempts.raises} raises and ${row.attempts.restarts} restarts; ${result}.${question}`;
+  const blocked =
+    row.status === "blocked" && row.block !== null ? ` blocked: ${blockReason(row.block)}.` : "";
+  return `job ${row.number} "${row.title}": ${row.status}, ${row.template} on ${row.tier}, ${effort}, $${row.cost.toFixed(2)} of $${row.cap}, priority ${row.priority}${due}, ${row.attempts.raises} raises and ${row.attempts.restarts} restarts; ${result}.${question}${blocked}`;
 }
 
 /** The longest answer to a job's question, from the lead or the person. */
@@ -348,9 +351,12 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     parameters: Type.Object({ job: jobParameter }),
     replay: "safe",
     execute: async (args, api, context) => {
-      const found = await api.commit((tx) => rowOrError(tx, args.job), context);
+      const found = await api.commit(async (tx) => {
+        const row = await rowOrError(tx, args.job);
+        return "error" in row ? row : { summary: jobSummary(row) };
+      }, context);
       if ("error" in found) return refusal(found.error);
-      return { ...text(jobSummary(found)), details: { job: args.job } };
+      return { ...text(found.summary), details: { job: args.job } };
     },
   });
 
@@ -574,6 +580,9 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         });
         found.conversationId = null;
         found.pause = null;
+        // A blocked job reads its content again in the new run, and is checked again; it keeps
+        // its outside-content mark, so its outside actions still need the reviewer.
+        found.block = null;
         found.result = null;
         found.toolsUsed = [];
         if (found.question?.answer === null) found.question = null;
