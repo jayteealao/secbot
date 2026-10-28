@@ -17,6 +17,8 @@ import {
   configure,
   defineTask,
   type Extension,
+  ROOT_CONVERSATION_ID,
+  type TaskId,
   type TaskRuntime,
   type Tx,
   UsageDoc,
@@ -31,13 +33,15 @@ import {
   isRisky,
   jobCost,
   markRisky,
+  type ResumeRefusal,
   recordCost,
+  resumeStoppedRow,
   storeResult,
 } from "./job-board.ts";
 import { doneRecord, jobRowLabel } from "./jobs.ts";
 import { modelRef } from "./model-map.ts";
 import { budgetOf } from "./month-ledger.ts";
-import { RESULT_WAKE_MS, RISKY_TEMPLATES, RISKY_TOOLS } from "./release-defaults.ts";
+import { RESULT_WAKE_MS, RISKY_TEMPLATES, RISKY_TOOLS, resumeInput } from "./release-defaults.ts";
 import { type ReviewTask, startReview } from "./result-review.ts";
 import { templatesOf, tierModelOf } from "./templates.ts";
 
@@ -47,8 +51,11 @@ export const JOB_KIND = "secbot.job";
 /** How long a job may wait to start before it logs `job.queued_long`. */
 export const QUEUED_LONG_MS = 10 * 60_000;
 
-/** A job's number and its attempt: 0 for the first run, then one more per restart. */
-export type JobInput = { number: number; attempt: number };
+/**
+ * A job's number and its attempt: 0 for the first run, then one more per restart. A run the person
+ * resumed after a stop or a block names its resume count: it continues the last run's transcript.
+ */
+export type JobInput = { number: number; attempt: number; resume?: number };
 
 /** Code's reasons a job's result is risky: each risky tool it used, and a risky template. */
 export function riskyReasons(row: Pick<JobRow, "toolsUsed" | "template">): string[] {
@@ -150,6 +157,43 @@ async function finish(
   return row;
 }
 
+/**
+ * The person (or the lead, on the person's ask) resumes stopped or blocked job `n` in the caller's
+ * commit: the row is queued again (`resumeStoppedRow`) and a new job task continues the last run's
+ * transcript. Not one of the lead's escalations: attempts stay as they are.
+ */
+export async function resumeJobTask(
+  tx: Tx,
+  task: JobTask,
+  n: number,
+  at: number,
+  by: "person" | "lead",
+): Promise<{ readonly ok: JobRow; readonly taskId: TaskId } | { readonly refused: ResumeRefusal }> {
+  const answer = await resumeStoppedRow(tx, n, at, by);
+  if ("refused" in answer) return answer;
+  const row = answer.ok;
+  const taskId = await tx.createTask(
+    task,
+    { number: n, attempt: row.attempts.restarts, resume: row.resumes },
+    { ownership: { kind: "conversation" }, conversationId: ROOT_CONVERSATION_ID, background: true },
+  );
+  row.taskId = taskId;
+  return { ok: row, taskId };
+}
+
+/**
+ * A resumed run's conversation: a fork of the last run's at its newest entry, owned by the new
+ * task, so the run continues with its whole transcript and a later stop reaches it. The fork's
+ * spend starts at zero; the job's cost still counts every run. Null when there is nothing to fork.
+ */
+async function forkLastRun(tx: Tx, row: JobRow, taskId: TaskId) {
+  const parent = row.runs.at(-1)?.conversationId ?? null;
+  if (parent === null) return null;
+  const newest = (await tx.scanEntries({ conversationId: parent }, 1)).items[0];
+  if (newest === undefined) return null;
+  return tx.forkConversation(parent, newest.id, { ownership: { kind: "task", taskId } });
+}
+
 export function createJobTask(deps: JobTaskDeps) {
   const { person } = deps;
   /**
@@ -204,9 +248,9 @@ export function createJobTask(deps: JobTaskDeps) {
   };
   return defineTask<JobInput, JobState, null>({
     name: JOB_KIND,
-    version: 2,
+    version: 3,
     initial: () => ({ phase: "open" }),
-    // A job running at the upgrade is its first attempt.
+    // A job running at the upgrade is its first attempt; an earlier run is never a resume.
     migrate: (input, checkpoint) => ({
       input: { attempt: 0, ...(input as { number: number }) },
       checkpoint: checkpoint as JobState,
@@ -220,9 +264,9 @@ export function createJobTask(deps: JobTaskDeps) {
           if (!ownsRow(row, String(job.id))) {
             return { status: "terminal", outcome: { status: "completed", result: null } };
           }
-          const child = await tx.createConversation({
-            ownership: { kind: "task", taskId: job.id },
-          });
+          const child =
+            (job.input.resume === undefined ? null : await forkLastRun(tx, row, job.id)) ??
+            (await tx.createConversation({ ownership: { kind: "task", taskId: job.id } }));
           row.conversationId = child.id;
           row.taskId = job.id;
           row.status = "running";
@@ -300,14 +344,27 @@ export function createJobTask(deps: JobTaskDeps) {
         if (runtime.now() - row.createdAt >= QUEUED_LONG_MS) queuedLong();
         const conversation = await runtime.conversation(row.conversationId, context);
         if (conversation === undefined) throw new Error(`job ${n}: its conversation is missing`);
-        const { attempt } = job.input;
-        const note = row.runs.at(-1)?.note;
+        const { attempt, resume } = job.input;
+        const last = row.runs.at(-1);
+        // A resumed run continues its transcript; the restart's note is the first input of a
+        // restarted run only.
+        const resumed = resume !== undefined && last !== undefined && last.conversationId !== null;
+        const content = resumed
+          ? resumeInput(last.endedAt, deps.timeZone)
+          : attempt > 0 && last !== undefined && resume === undefined
+            ? restartInput(last.note, row.brief)
+            : row.brief;
         const submission = await conversation.submit(
           {
             type: "input",
-            content: attempt > 0 && note !== undefined ? restartInput(note, row.brief) : row.brief,
+            content,
             whenBusy: "followUp",
-            requestId: attempt > 0 ? `job:${n}:${attempt}` : `job:${n}`,
+            requestId:
+              resume !== undefined
+                ? `job:${n}:resume:${resume}`
+                : attempt > 0
+                  ? `job:${n}:${attempt}`
+                  : `job:${n}`,
           },
           context,
         );
