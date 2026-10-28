@@ -20,13 +20,13 @@ import { logEvent, safeErrorText } from "./cell-parts.ts";
 import { isCreditError } from "./credit-pause.ts";
 import { JobBoardDoc, RosterDoc, TemplatesDoc } from "./docs.ts";
 import type { ModelHealthMonitor } from "./model-health.ts";
-import { LEAD_ROLE } from "./release-defaults.ts";
+import { LEAD_ROLE, REVIEWER_ROLE } from "./release-defaults.ts";
 import { templatesOf } from "./templates.ts";
 
 /**
  * A conversation's role: the lead, a (frozen) specialist by name, a job by its template's name
  * (so person and owner rules on an agent name, and the developer budget, apply inside its jobs),
- * or "other".
+ * the reviewer for a job's result review, or "other".
  */
 export async function roleOf(
   api: Pick<HookApi, "snapshot">,
@@ -41,7 +41,24 @@ export async function roleOf(
   const board = await api.snapshot(JobBoardDoc, context);
   const n = board?.byConversation[String(conversationId)];
   const row = n === undefined ? undefined : board?.jobs[String(n)];
+  if (row?.review?.conversationId === conversationId) return REVIEWER_ROLE;
   return row?.template ?? "other";
+}
+
+/**
+ * The role whose budget a conversation spends: its role, except that a job's result review spends
+ * the budget of the job's template.
+ */
+export async function budgetRoleOf(
+  api: Pick<HookApi, "snapshot">,
+  conversationId: ConversationId,
+  context: Context,
+): Promise<string> {
+  const role = await roleOf(api, conversationId, context);
+  if (role !== REVIEWER_ROLE) return role;
+  const board = await api.snapshot(JobBoardDoc, context);
+  const n = board?.byConversation[String(conversationId)];
+  return (n === undefined ? undefined : board?.jobs[String(n)]?.template) ?? role;
 }
 
 /** The job a conversation belongs to, by number, or null for any other conversation. */

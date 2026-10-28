@@ -24,7 +24,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { monthOf } from "./activity.ts";
 import { type BudgetName, JobBoardDoc, MonthLedgerDoc, RosterDoc } from "./docs.ts";
-import { DEVELOPER_ROLE, GUARD_USAGE_KEYS, LEAD_ROLE } from "./release-defaults.ts";
+import { DEVELOPER_ROLE, GUARD_USAGE_KEYS, LEAD_ROLE, REVIEWER_ROLE } from "./release-defaults.ts";
 
 /** The zone's offset from UTC at `at`, in milliseconds (positive east of Greenwich). */
 export function zoneOffsetMs(at: number, zone: string): number {
@@ -84,12 +84,21 @@ export interface LedgerConversation {
   readonly role: string;
   /** The job the conversation runs, for a job conversation. */
   readonly job?: number;
+  /** The budget it spends when not its role's (a job's result review spends its template's). */
+  readonly budget?: BudgetName;
+  /** The layer all its spend counts in when not by bucket (a result review: reviewer). */
+  readonly layer?: Layer;
 }
 
+/** The budget a ledger conversation spends. */
+const budgetOfConversation = (conversation: LedgerConversation): BudgetName =>
+  conversation.budget ?? budgetOf(conversation.role);
+
 /**
- * The lead's conversation, each specialist's from the roster, and each job's from the board (role:
- * its template). A job that ended before the current month began is left out: its spend is all in
- * earlier months.
+ * The lead's conversation, each specialist's from the roster, and every conversation of each job
+ * from the board: its current and earlier runs (role: its template) and its result review (role
+ * and layer reviewer, on the template's budget). A job that ended before the current month began
+ * is left out: its spend is all in earlier months.
  */
 export async function ledgerConversations(
   reader: Pick<DocumentReader, "snapshot">,
@@ -99,15 +108,33 @@ export async function ledgerConversations(
   const board = await reader.snapshot(JobBoardDoc, context);
   const startsAt = (await reader.snapshot(MonthLedgerDoc, context))?.startsAt ?? 0;
   const jobs: LedgerConversation[] = [];
+  const listed = new Set<string>();
+  const add = (conversation: LedgerConversation) => {
+    if (listed.has(conversation.conversationId)) return;
+    listed.add(conversation.conversationId);
+    jobs.push(conversation);
+  };
   for (const row of Object.values(board?.jobs ?? {})) {
-    if (row.conversationId === null) continue;
     if (row.endedAt !== null && row.endedAt < startsAt) continue;
-    jobs.push({
-      id: row.conversationId,
-      conversationId: String(row.conversationId),
-      role: row.template,
-      job: row.number,
-    });
+    const job = { role: row.template, job: row.number };
+    for (const run of row.runs) {
+      if (run.conversationId !== null) {
+        add({ id: run.conversationId, conversationId: String(run.conversationId), ...job });
+      }
+    }
+    if (row.conversationId !== null) {
+      add({ id: row.conversationId, conversationId: String(row.conversationId), ...job });
+    }
+    if (row.review !== null && row.review.conversationId !== null) {
+      add({
+        id: row.review.conversationId,
+        conversationId: String(row.review.conversationId),
+        role: REVIEWER_ROLE,
+        job: row.number,
+        budget: budgetOf(row.template),
+        layer: "reviewer",
+      });
+    }
   }
   return [
     { id: ROOT_CONVERSATION_ID, conversationId: String(ROOT_CONVERSATION_ID), role: LEAD_ROLE },
@@ -169,6 +196,17 @@ export function spendSince(
 }
 
 const total = (spend: LayerSpend) => spend.agent + spend.decision + spend.reviewer;
+
+/** One ledger conversation's spend since the baseline, all in its own layer when it has one. */
+function conversationSpend(
+  conversation: LedgerConversation,
+  costs: Readonly<Record<string, number>>,
+  baseline: Readonly<Record<string, number>> | undefined,
+): LayerSpend {
+  const spend = spendSince(costs, baseline);
+  if (conversation.layer === undefined) return spend;
+  return { agent: 0, decision: 0, reviewer: 0, [conversation.layer]: total(spend) };
+}
 
 /** The month-to-date spend of one cell, split by budget, layer, and role. */
 export interface MonthSpend {
@@ -235,9 +273,10 @@ export async function ensureMonth(
     const baseline: Record<string, Record<string, number>> = {};
     const seen: Record<string, number> = {};
     let closing = 0;
-    for (const { id, conversationId, role } of conversations) {
+    for (const conversation of conversations) {
+      const { id, conversationId } = conversation;
       const costs = costsOf(await tx.doc(UsageDoc, id));
-      if (!first && budgetOf(role) === "person") {
+      if (!first && budgetOfConversation(conversation) === "person") {
         closing += total(spendSince(costs, doc.baseline[conversationId]));
       }
       if (!first) baseline[conversationId] = costs;
@@ -270,14 +309,16 @@ export async function readMonth(
   const person: LayerSpend = { agent: 0, decision: 0, reviewer: 0 };
   const developer: LayerSpend = { agent: 0, decision: 0, reviewer: 0 };
   const byRole: Record<string, number> = {};
-  for (const { id, conversationId, role } of conversations) {
+  for (const conversation of conversations) {
+    const { id, conversationId, role } = conversation;
     const state = await harness.snapshot(UsageDoc, id, context);
-    const spend = spendSince(costsOf(state), ledger.baseline[conversationId]);
-    const into = budgetOf(role) === "developer" ? developer : person;
+    const spend = conversationSpend(conversation, costsOf(state), ledger.baseline[conversationId]);
+    const budget = budgetOfConversation(conversation);
+    const into = budget === "developer" ? developer : person;
     into.agent += spend.agent;
     into.decision += spend.decision;
     into.reviewer += spend.reviewer;
-    if (budgetOf(role) === "person") byRole[role] = (byRole[role] ?? 0) + total(spend);
+    if (budget === "person") byRole[role] = (byRole[role] ?? 0) + total(spend);
   }
   return {
     month: ledger.month,

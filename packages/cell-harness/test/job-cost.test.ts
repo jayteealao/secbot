@@ -3,7 +3,9 @@
 // the job, the month ledger counts their spend, and the usage watch stops when the job ends.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ledgerConversations, readMonth } from "../src/month-ledger.ts";
+import { UsageDoc } from "@earendil-works/pi-durable";
+import { jobConversations } from "../src/job-board.ts";
+import { conversationTotal, ledgerConversations, readMonth } from "../src/month-ledger.ts";
 import { roleOf } from "../src/telemetry.ts";
 import {
   addJobSpend,
@@ -15,9 +17,11 @@ import {
   loggedEvents,
   openTestCell,
   type Responder,
+  resultReviewer,
   type TestCell,
   until,
 } from "./fixtures.ts";
+import { job, leadCalls } from "./escalation-helpers.ts";
 import { createHold, jobResponder, startJobLine } from "./responders.ts";
 
 let test: TestCell | undefined;
@@ -160,5 +164,70 @@ describe("usage watches per job", () => {
       job: 1,
       open_watches: base,
     });
+  });
+});
+
+describe("every conversation of a job is counted (D-051)", () => {
+  it("adds a restarted, reviewed job's three conversations to its cost and the month, and closes each watch", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    // A health job (risky by its template) fails the same step three times, is restarted with a
+    // note, answers, and its result passes review.
+    const health: Responder = (request) => {
+      if (request.role !== "health") return jobResponder(request);
+      if (/Failure note from the earlier attempt/.test(request.lastText)) {
+        return fauxAssistantMessage([fauxText("Keep a steady bedtime.")]);
+      }
+      return fauxAssistantMessage([fauxToolCall("household_read", { document: "no such list!" })], {
+        stopReason: "toolUse",
+      });
+    };
+    test = await openTestCell({
+      gateway: createFauxGateway(resultReviewer(health), { stepCostUsd: () => 0.01 }),
+    });
+    const t = test;
+    const base = t.cell.budget.watching();
+    await (
+      await t.cell.submit(
+        startJobLine({ title: "sleep", brief: "sleep advice", template: "health" }),
+        "c-1",
+      )
+    ).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await job(t))?.status === "paused");
+    await leadCalls(t, "restart_job", {
+      job: 1,
+      note: "household_read failed; answer from memory.",
+    });
+    await until(async () => (await job(t))?.review?.status === "passed");
+
+    const row = await job(t);
+    if (row === undefined) throw new Error("no row");
+    const ids = jobConversations(row);
+    expect(ids).toHaveLength(3);
+    const totals: number[] = [];
+    for (const id of ids) {
+      totals.push(
+        conversationTotal(await t.cell.harness.snapshot(UsageDoc, id, BACKGROUND_CONTEXT)),
+      );
+    }
+    for (const each of totals) expect(each).toBeGreaterThan(0);
+    const sum = totals.reduce((all, each) => all + each, 0);
+    expect(row.cost).toBeCloseTo(sum, 10);
+
+    const listed = await ledgerConversations(t.cell.harness, BACKGROUND_CONTEXT);
+    expect(
+      ids.map((id) => listed.find((each) => each.conversationId === String(id))?.role),
+    ).toEqual(["health", "health", "reviewer"]);
+    const month = await readMonth(t.cell.harness, Date.now(), "UTC", BACKGROUND_CONTEXT);
+    expect((month.person.byRole.health ?? 0) + (month.person.byRole.reviewer ?? 0)).toBeCloseTo(
+      sum,
+      10,
+    );
+    expect(month.person.byLayer.reviewer).toBeCloseTo(totals[2] ?? 0, 10);
+
+    await until(() => t.cell.budget.watching() === base);
+    const closed = loggedEvents(log.mock.calls).filter(
+      (each) => each.event === "job.watch_closed" && each.job === 1,
+    );
+    expect(closed.map((each) => each.conversation_id).sort()).toEqual(ids.map(String).sort());
   });
 });

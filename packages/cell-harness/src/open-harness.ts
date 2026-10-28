@@ -980,9 +980,11 @@ interface SpendWatch {
 
 /**
  * Calls `trigger` after every committed change of any conversation's `pi.usage`: the lead's, each
- * specialist's (one added later included, through a watch of the roster), and each live job's
- * (through a watch of the board). A job's watch stops in the pass that sees its row ended, after
- * one last trigger, so the watches of a busy cell do not grow with every job it ever ran.
+ * specialist's (one added later included, through a watch of the roster), and each live
+ * conversation of a job (through a watch of the board): its current run, an earlier run, and its
+ * result review. A watch stops in the pass that sees its conversation done (a run when its row
+ * ended or a restart replaced it, a review when its verdict is in), after one last trigger, so the
+ * watches of a busy cell do not grow with every job it ever ran.
  */
 async function watchSpend(
   person: string,
@@ -996,19 +998,26 @@ async function watchSpend(
   const ensure = async () => {
     const board = await harness.snapshot(JobBoardDoc, context);
     for (const row of Object.values(board?.jobs ?? {})) {
-      if (row.conversationId === null || !ENDED.has(row.status)) continue;
-      const key = String(row.conversationId);
-      ended.add(key);
-      const watch = watches.get(key);
-      if (watch === undefined) continue;
-      watches.delete(key);
-      await watch.stop();
-      logEvent("job.watch_closed", {
-        cell: person,
-        job: row.number,
-        conversation_id: key,
-        open_watches: watches.size,
-      });
+      const done = row.runs.map((run) => run.conversationId);
+      if (ENDED.has(row.status)) done.push(row.conversationId);
+      if (row.review !== null && row.review.status !== "running") {
+        done.push(row.review.conversationId);
+      }
+      for (const id of done) {
+        if (id === null) continue;
+        const key = String(id);
+        ended.add(key);
+        const watch = watches.get(key);
+        if (watch === undefined) continue;
+        watches.delete(key);
+        await watch.stop();
+        logEvent("job.watch_closed", {
+          cell: person,
+          job: row.number,
+          conversation_id: key,
+          open_watches: watches.size,
+        });
+      }
     }
     for (const { id, conversationId } of await ledgerConversations(harness, context)) {
       if (watches.has(conversationId) || ended.has(conversationId)) continue;
