@@ -11,6 +11,9 @@
  * hold (job-holds.ts) with no request and no spend until the lead raises or restarts the job. After
  * a restart of the cell the hook runs again, reads the paused row, and waits again.
  *
+ * A job the content check blocked takes no step: its task is stopped here when the cell went
+ * down between the block and the stop.
+ *
  * An empty or cut-off final answer is continued with a fixed nudge (`onYield`), so the next
  * request's messages show it and the third pauses the job instead of ending it.
  */
@@ -80,6 +83,8 @@ export const emptyOrCut = (answer: AssistantMessage): boolean =>
 
 export function createJobGate(deps: JobGateDeps): Extension {
   const { person, harness, holds, now } = deps;
+  /** Job tasks this process already asked to stop for a block. */
+  const stopped = new Set<string>();
   const rowOf = async (n: number, context: Context) =>
     (await harness().snapshot(JobBoardDoc, context))?.jobs[String(n)];
 
@@ -148,6 +153,18 @@ export function createJobGate(deps: JobGateDeps): Extension {
           const n = await jobOf(api, api.conversationId, context);
           if (n === null) return undefined;
           const self = String(api.conversationId);
+          // The content check blocked this run and the cell went down before the job's task was
+          // stopped: stop it now, before any further step.
+          const first = await rowOf(n, context);
+          if (
+            first?.status === "blocked" &&
+            String(first.conversationId) === self &&
+            first.taskId !== null &&
+            !stopped.has(String(first.taskId))
+          ) {
+            stopped.add(String(first.taskId));
+            await harness().abortTask(first.taskId, withoutAbortSignal(context));
+          }
           for (;;) {
             if ((await check(n, self, request.messages, context)) === "go") return undefined;
             const row = await rowOf(n, context);

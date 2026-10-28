@@ -451,3 +451,44 @@ describe("the afterTool check", () => {
     );
   });
 });
+
+describe("the job gate after a crash", () => {
+  let test: TestCell | undefined;
+  afterEach(async () => {
+    await test?.cell.close();
+    test = undefined;
+    vi.restoreAllMocks();
+  });
+
+  it("stops a job whose row was blocked before its task was stopped, with no further request", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    // Three empty answers pause the job before its fourth step: a step held at the gate.
+    test = await openTestCell({
+      gateway: createFauxGateway((request) =>
+        request.role === "research" ? fauxAssistantMessage([fauxText("")]) : jobResponder(request),
+      ),
+    });
+    const t = test;
+    await (await t.cell.submit(RESEARCH_JOB, "crash-1")).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await t.cell.board()).jobs["1"]?.status === "paused");
+    // The block committed, and the cell went down before the job's task was stopped.
+    await t.cell.harness.commit(async (tx) => {
+      const row = (await tx.doc(JobBoardDoc)).jobs["1"];
+      if (row === undefined) throw new Error("no job");
+      row.status = "blocked";
+      row.pause = null;
+      row.endedAt = 9_000;
+      row.block = { cause: "hit", kind: "page", tool: "read_fixture_page", chunk: 0, at: 9_000 };
+    }, BACKGROUND_CONTEXT);
+    const research = () => t.gateway.requests.filter((request) => request.role === "research");
+    const before = research().length;
+    await t.reopen();
+    const taskId = (await t.cell.board()).jobs["1"]?.taskId;
+    if (taskId == null) throw new Error("no job task");
+    const settled = await t.cell.harness.waitForTask(taskId, BACKGROUND_CONTEXT);
+    expect(settled.state.outcome.status).toBe("aborted");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(research()).toHaveLength(before);
+    expect((await t.cell.board()).jobs["1"]?.status).toBe("blocked");
+  });
+});
