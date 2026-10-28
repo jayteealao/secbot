@@ -19,6 +19,7 @@ import {
   priorityKey,
   type Receipt,
   type ResultKind,
+  StopDoc,
   TierSettingsDoc,
 } from "./docs.ts";
 import { conversationTotal } from "./month-ledger.ts";
@@ -281,6 +282,56 @@ export async function resumeRow(tx: Tx, n: number, at: number = Date.now()): Pro
   row.pause = null;
   row.resumedAt = at;
   return true;
+}
+
+export type ResumeRefusal = "no-job" | "paused" | "not-stopped" | "locked";
+
+/**
+ * The person resumes a stopped or blocked job (from the command line, or by asking the lead): the
+ * run ends in `runs` with its conversation, so the next run continues from its transcript; the row
+ * waits `queued` for its new task, in its place in the queue. Cost, cap, attempts, and the
+ * outside-content mark stay: a resume is not one of the lead's escalations. Refused while a stop
+ * runs, for a paused job (the lead moves it on), and for any other status.
+ */
+export async function resumeStoppedRow(
+  tx: Tx,
+  n: number,
+  at: number,
+  by: "person" | "lead" = "person",
+): Promise<{ readonly ok: JobRow } | { readonly refused: ResumeRefusal }> {
+  const board = await tx.doc(JobBoardDoc);
+  const row = Object.hasOwn(board.jobs, String(n)) ? board.jobs[String(n)] : undefined;
+  if (row === undefined) return { refused: "no-job" };
+  if ((await tx.doc(StopDoc)).active !== null) return { refused: "locked" };
+  if (row.status === "paused") return { refused: "paused" };
+  if (row.status !== "stopped" && row.status !== "blocked") return { refused: "not-stopped" };
+  const stopped =
+    row.status === "blocked"
+      ? "blocked"
+      : `stopped by the ${row.stop?.by === "owner" ? "owner" : "person"}`;
+  row.runs.push({
+    conversationId: row.conversationId,
+    taskId: row.taskId,
+    startedAt: row.runs.at(-1)?.endedAt ?? row.createdAt,
+    endedAt: row.endedAt ?? at,
+    note: `${stopped}; resumed by the ${by}`,
+  });
+  row.conversationId = null;
+  row.taskId = null;
+  row.stop = null;
+  row.block = null;
+  row.pause = null;
+  // The resumed run stores its own result; one the lead never pulled was the stop's or the block's.
+  row.result = null;
+  row.toolsUsed = [];
+  if (row.question?.answer === null) row.question = null;
+  row.status = "queued";
+  row.endedAt = null;
+  // The loop guard counts only the resumed run's failing steps.
+  row.resumedAt = at;
+  row.resumes++;
+  placeInQueue(board, n);
+  return { ok: row };
 }
 
 export type EscalationMove = "raise" | "restart";

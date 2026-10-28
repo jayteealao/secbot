@@ -41,6 +41,7 @@ import {
   recordCost,
   restCount,
   resumeRow,
+  resumeStoppedRow,
   setDeadline,
   setTierEffort,
   storeResult,
@@ -785,5 +786,103 @@ describe("the queue order and the person's reorder", () => {
     expect(
       queueOf({ nextNumber: 4, jobs, byConversation: {}, queue: [1, 3] }).map((job) => job.number),
     ).toEqual([2, 1]);
+  });
+});
+
+describe("the person's resume of a stopped or blocked job", () => {
+  const ops = async <T>(change: (tx: Tx) => T | Promise<T>): Promise<T> => {
+    if (test === undefined) throw new Error("no cell");
+    return test.cell.harness.commit(change, BACKGROUND_CONTEXT);
+  };
+  const job = async (n: number) =>
+    (await test?.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs[String(n)];
+  const seed = async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    await ops(async (tx) => {
+      for (const title of ["stopped", "blocked", "paused", "done", "running"]) {
+        await createJobRow(tx, fields(title));
+      }
+      const board = await tx.doc(JobBoardDoc);
+      for (const n of [1, 2, 3, 4, 5]) {
+        const each = board.jobs[String(n)] as JobRow;
+        each.conversationId = (100 + n) as unknown as ConversationId;
+        each.taskId = (200 + n) as unknown as TaskId;
+        each.status = "running";
+        each.cost = 0.4;
+        each.attempts = { raises: 1, restarts: 0 };
+        each.outside = { at: 5_500, kinds: ["page"], tools: ["read_fixture_page"] };
+      }
+      await endRow(tx, 1, "stopped", 6_000);
+      (board.jobs["1"] as JobRow).stop = { at: 6_000, by: "owner" };
+      await blockRow(tx, 2, 102 as unknown as ConversationId, {
+        cause: "hit",
+        kind: "page",
+        tool: "read_fixture_page",
+        chunk: 1,
+        at: 6_100,
+      });
+      await pauseRow(tx, 3, "cap", "$1.00 of $1", 6_200);
+      await endRow(tx, 4, "done", 6_300);
+    });
+  };
+
+  it("resumes a stopped job: one more run, queued, cost and attempts unchanged", async () => {
+    await seed();
+    const answer = await ops((tx) => resumeStoppedRow(tx, 1, 7_000));
+    expect("ok" in answer).toBe(true);
+    const resumed = await job(1);
+    expect(resumed).toMatchObject({
+      status: "queued",
+      endedAt: null,
+      stop: null,
+      conversationId: null,
+      taskId: null,
+      resumes: 1,
+      resumedAt: 7_000,
+      cost: 0.4,
+      attempts: { raises: 1, restarts: 0 },
+      outside: { kinds: ["page"] },
+      result: null,
+    });
+    expect(resumed?.runs).toEqual([
+      {
+        conversationId: 101,
+        taskId: 201,
+        startedAt: 5_000,
+        endedAt: 6_000,
+        note: "stopped by the owner; resumed by the person",
+      },
+    ]);
+    const board = await test?.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT);
+    expect(board?.queue).toContain(1);
+  });
+
+  it("resumes a blocked job: its block and its failure result are cleared", async () => {
+    await seed();
+    await ops((tx) => resumeStoppedRow(tx, 2, 7_000, "lead"));
+    expect(await job(2)).toMatchObject({
+      status: "queued",
+      block: null,
+      result: null,
+      resumes: 1,
+      cost: 0.4,
+      attempts: { raises: 1, restarts: 0 },
+    });
+    expect((await job(2))?.runs.at(-1)?.note).toBe("blocked; resumed by the lead");
+  });
+
+  it("refuses a missing, paused, running, or finished job, and any job while a stop runs", async () => {
+    await seed();
+    expect(await ops((tx) => resumeStoppedRow(tx, 22, 7_000))).toEqual({ refused: "no-job" });
+    expect(await ops((tx) => resumeStoppedRow(tx, 3, 7_000))).toEqual({ refused: "paused" });
+    expect(await ops((tx) => resumeStoppedRow(tx, 4, 7_000))).toEqual({ refused: "not-stopped" });
+    expect(await ops((tx) => resumeStoppedRow(tx, 5, 7_000))).toEqual({ refused: "not-stopped" });
+    await ops(async (tx) => {
+      (await tx.doc(StopDoc)).active = { at: 6_900, by: "person" };
+    });
+    expect(await ops((tx) => resumeStoppedRow(tx, 1, 7_000))).toEqual({ refused: "locked" });
+    expect((await job(1))?.status).toBe("stopped");
+    expect((await job(1))?.resumes).toBe(0);
   });
 });
