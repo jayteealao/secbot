@@ -11,7 +11,12 @@ import {
 } from "@earendil-works/pi-durable";
 import type { ActivityRecord } from "./activity.ts";
 import type { HeldCall } from "./approvals.ts";
-import { DEFAULT_DECISION_ADAPTER, type DecisionAdapter } from "./release-defaults.ts";
+import {
+  DEFAULT_DECISION_ADAPTER,
+  type DecisionAdapter,
+  type JobEffort,
+  type Tier,
+} from "./release-defaults.ts";
 import type { Rule } from "./rules.ts";
 
 export type SpecialistRecord = {
@@ -241,7 +246,8 @@ export const BudgetWaitsDoc = defineDoc<{
 });
 
 /**
- * `secbot.jobs`: the cost marks of hand-off jobs. `starts` is the specialist conversation's ledger
+ * `secbot.jobs`: kept for hand-offs in flight when a cell upgrades to the job board, so a reporter
+ * started by the retired hand-off tool still finishes once with its cost. The cost marks of hand-off jobs. `starts` is the specialist conversation's ledger
  * total when a job's brief was delivered, `ends` a finished job's cost until its done record is
  * written (both by reporter task id), and `high` each specialist's total when its last job ended.
  */
@@ -306,4 +312,135 @@ export const HouseholdBudgetDoc = defineDoc<{
     month: "",
     readAt: null,
   }),
+});
+
+export type JobPriority = "urgent" | "deadline" | "routine" | "research";
+export type JobStatus = "queued" | "running" | "waiting" | "done" | "failed" | "stopped";
+/** What a waiting result is: the inbox wakes the lead at once for every kind but `routine`. */
+export type ResultKind = "failure" | "question" | "risky" | "routine";
+
+/** A job's result on the board, until and after the lead pulls it. */
+export type JobResult = {
+  kind: ResultKind;
+  text: string;
+  at: number;
+  /** When the lead pulled it with `job_result`; null while it waits. */
+  pulledAt: number | null;
+  /** When a wake notice for it went to the lead; null when none did. */
+  wokeAt: number | null;
+};
+
+/** One job on the board. Numbers grow per cell and are never reused. */
+export type JobRow = {
+  number: number;
+  title: string;
+  brief: string;
+  priority: JobPriority;
+  /** An ISO date (`YYYY-MM-DD`) the lead read from the request, or null. */
+  deadline: string | null;
+  template: string;
+  tier: Tier;
+  /** The effort the lead asked for, and the one the tier's model applies after clamping. */
+  effort: { requested: JobEffort; applied: string };
+  attempts: { raises: number; restarts: number };
+  /** The job conversation's spend so far, in USD. */
+  cost: number;
+  /** The per-job cap of the job's current tier, in USD. */
+  cap: number;
+  status: JobStatus;
+  /** The person the job works for. */
+  owner: string;
+  conversationId: ConversationId | null;
+  taskId: TaskId | null;
+  /** The lead run's first input when the job started, or null when the lead was not busy. */
+  turn: number | null;
+  createdAt: number;
+  endedAt: number | null;
+  result: JobResult | null;
+};
+
+/**
+ * `secbot.job-board`: every job of this person, keyed by its number as text, and each job
+ * conversation's number (`roleOf` and the ledger find a job from its conversation in one read).
+ */
+export const JobBoardDoc = defineDoc<{
+  nextNumber: number;
+  jobs: Record<string, JobRow>;
+  byConversation: Record<string, number>;
+}>({
+  kind: "secbot.job-board",
+  version: 1,
+  scope: "session",
+  initial: () => ({ nextNumber: 1, jobs: {}, byConversation: {} }),
+});
+
+/** A lead tool call that runs in the background, and what it stored. */
+export type Receipt = {
+  number: number;
+  tool: string;
+  turn: number | null;
+  status: "running" | "done" | "interrupted";
+  /** The tool's answer once done; empty while running. */
+  text: string;
+  isError: boolean;
+  /** A secret's value: never listed by any view. */
+  sensitive: boolean;
+  at: number;
+  /** When the lead read it with `read_result`; null while unread. */
+  readAt: number | null;
+};
+
+/** `secbot.receipt`: one background call of the lead, keyed `r<n>`. */
+export const ReceiptDoc = defineDocFamily<{ receipt: Receipt | null }, null>({
+  kind: "secbot.receipt",
+  version: 1,
+  scope: "session",
+  family: true,
+  initial: () => ({ receipt: null }),
+});
+
+/** `secbot.receipts`: the next receipt number and the receipts not read yet, oldest first. */
+export const ReceiptsDoc = defineDoc<{ nextNumber: number; open: string[] }>({
+  kind: "secbot.receipts",
+  version: 1,
+  scope: "session",
+  initial: () => ({ nextNumber: 1, open: [] }),
+});
+
+/** Where the lead was when the person interrupted it. */
+export type Bookmark = {
+  turn: number;
+  at: number;
+  /** Receipts of that turn still running or unread. */
+  receipts: string[];
+  /** Jobs started in that turn whose results were not pulled. */
+  jobIds: number[];
+  /** The lead's one sentence on what it was doing; null until it adds one. */
+  note: string | null;
+};
+
+/** `secbot.bookmark`: the interrupt bookmark, until the lead resumes with `resume_work`. */
+export const BookmarkDoc = defineDoc<{ bookmark: Bookmark | null }>({
+  kind: "secbot.bookmark",
+  version: 1,
+  scope: "session",
+  initial: () => ({ bookmark: null }),
+});
+
+/** `secbot.templates`: the owner's custom job templates, by name. */
+export const TemplatesDoc = defineDoc<{
+  custom: Record<string, { instruction: string; tier: Tier }>;
+}>({
+  kind: "secbot.templates",
+  version: 1,
+  scope: "session",
+  initial: () => ({ custom: {} }),
+});
+
+/** `secbot.tier-settings`: the owner's per-job cap of each tier, in USD (release caps elsewhere). */
+export const TierSettingsDoc = defineDoc<{ caps: Record<string, number> }>({
+  kind: "secbot.tier-settings",
+  version: 1,
+  scope: "session",
+  initial: () => ({ caps: {} }),
 });
