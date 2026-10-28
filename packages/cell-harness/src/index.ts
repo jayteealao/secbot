@@ -42,6 +42,7 @@ export {
   type SetTimer,
   USED_TEXT,
 } from "./approvals.ts";
+export { bookmarkText, recordInterruption } from "./bookmark.ts";
 export {
   BudgetGate,
   type BudgetWaiter,
@@ -88,7 +89,17 @@ export {
   UNTRUSTED_NOTE,
 } from "./decision-model.ts";
 export type { LeadMessage, MissedPage } from "./delivery.ts";
-export type { BudgetName, GuardMode, LimitNotice } from "./docs.ts";
+export type {
+  Bookmark,
+  BudgetName,
+  GuardMode,
+  JobResult,
+  JobRow,
+  JobStatus,
+  LimitNotice,
+  Receipt,
+  ResultKind,
+} from "./docs.ts";
 export { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 export {
   createGuardExtension,
@@ -145,7 +156,17 @@ export {
   householdCostView,
   rowOf,
 } from "./household-cost.ts";
-export { doneRecord, jobLabel, liveJobs } from "./jobs.ts";
+export {
+  type BoardState,
+  ENDED,
+  liveRows,
+  restCount,
+  type WaitingCounts,
+  waitingCounts,
+} from "./job-board.ts";
+export { JOB_KIND } from "./job-task.ts";
+export { doneRecord, jobLabel, jobRowLabel, liveJobs } from "./jobs.ts";
+export { createJobsExtension, jobSummary } from "./lead-tools.ts";
 export {
   type BudgetLine,
   type BudgetState,
@@ -183,6 +204,7 @@ export {
   type ReportGate,
   reportFields,
 } from "./open-harness.ts";
+export { RECEIPT_KIND, REMOTE_TOOLS } from "./receipts.ts";
 export {
   ARGUMENTS_LIMIT,
   addKnownSecretValues,
@@ -278,6 +300,7 @@ export {
   secretsReason,
 } from "./secret-tools.ts";
 export { FRAME_TYPES, type Frame, type SessionStream } from "./session-stream.ts";
+export { capOf, isEffort, isTier, templatesOf, tierModelOf } from "./templates.ts";
 export {
   earliestTimer,
   LIVENESS_WAKE_MS,

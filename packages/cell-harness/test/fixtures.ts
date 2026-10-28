@@ -303,3 +303,15 @@ export function loggedEvents(calls: readonly unknown[][]): Record<string, unknow
     }
   });
 }
+
+/** Adds `usd` of model spend to job `n`'s own conversation ledger in one commit. */
+export async function addJobSpend(cell: CellHarness, n: number, usd: number): Promise<void> {
+  const id = (await cell.board()).jobs[String(n)]?.conversationId;
+  if (id === null || id === undefined) throw new Error(`job ${n} has no conversation yet`);
+  await cell.harness.commit(async (tx) => {
+    const models = (await tx.doc(UsageDoc, id)).models as Record<string, Usage>;
+    const known = models["test/spend"];
+    if (known === undefined) models["test/spend"] = costOnlyUsage(usd);
+    else known.cost.total += usd;
+  }, BACKGROUND_CONTEXT);
+}
