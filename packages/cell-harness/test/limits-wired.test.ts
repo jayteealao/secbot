@@ -18,6 +18,7 @@ import { costOnlyUsage } from "../src/month-ledger.ts";
 import { defineRoutine } from "../src/routines.ts";
 import {
   addSpend,
+  cleanContent,
   createFauxGateway,
   describeRequest,
   type FauxGateway,
@@ -139,6 +140,7 @@ describe("the month's spend from the ledger", () => {
           durationMs: 1,
         };
       },
+      checkContent: cleanContent,
     });
     let failedOnce = false;
     const lead = (request: FauxRequest): AssistantMessage => {

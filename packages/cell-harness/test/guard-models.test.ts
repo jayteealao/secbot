@@ -375,6 +375,7 @@ describe("guard events (model part)", () => {
         if (failNext) throw new Error("decision stage broke");
         return fromStub(adapter).ask(state, tool, signal);
       },
+      checkContent: (state, signal) => fromStub(adapter).checkContent(state, signal),
     });
     const t = await open({ decision });
     // A mode switch, then back: two events, two records; a switch to the same mode, none.

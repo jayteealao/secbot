@@ -27,7 +27,7 @@ import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts"
 import { BudgetBoardStore } from "../../household-cell/src/budget-board.ts";
 import { ChangeLog } from "../../household-cell/src/change-log.ts";
 import { withCreditPause } from "../src/credit-pause.ts";
-import type { DecisionModels } from "../src/decision-model.ts";
+import type { ContentAnswer, DecisionModels } from "../src/decision-model.ts";
 import { RosterDoc } from "../src/docs.ts";
 import { Anchor } from "../src/handoff.ts";
 import type { HouseholdChange, HouseholdClient } from "../src/household-tools.ts";
@@ -205,7 +205,20 @@ export const passingDecision: DecisionModels = (adapter) => ({
     costUsd: 0,
     durationMs: 0,
   }),
+  checkContent: cleanContent,
 });
+
+/** A content check that finds every chunk clean (score 0, model id "stand-in", no cost). */
+export async function cleanContent(): Promise<ContentAnswer> {
+  return {
+    outcome: "clean",
+    choice: "clean",
+    score: 0,
+    model: "stand-in",
+    costUsd: 0,
+    durationMs: 0,
+  };
+}
 
 /** True for a request from the guard's reviewer (its system prompt starts with the first line). */
 export const isReviewerRequest = (request: FauxRequest): boolean =>

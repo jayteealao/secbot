@@ -6,6 +6,7 @@ import { RefusedChange } from "../src/cell-parts.ts";
 import type { DecisionModels } from "../src/decision-model.ts";
 import {
   ALTERNATE_MODEL,
+  cleanContent,
   createFauxGateway,
   fauxAssistantMessage,
   fauxText,
@@ -30,6 +31,7 @@ const markingDecision: DecisionModels = (adapter) => ({
     costUsd: 0,
     durationMs: 0,
   }),
+  checkContent: cleanContent,
 });
 
 let test: TestCell | undefined;
