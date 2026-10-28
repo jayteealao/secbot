@@ -106,7 +106,7 @@ import {
 import { ModelHealthMonitor } from "./model-health.ts";
 import { listRoleModels, type RoleModel, setRoleModel, setTierCap } from "./model-map.ts";
 import { ledgerConversations } from "./month-ledger.ts";
-import { createFixtureReaderExtension } from "./outside-tools.ts";
+import { createFixtureReaderExtension, outsideReviewOf } from "./outside-tools.ts";
 import type { ReceiptTask } from "./receipts.ts";
 import type { DecisionAdapter, OutsideKind } from "./release-defaults.ts";
 import {
@@ -844,6 +844,8 @@ export async function openCellHarness(
         reader: current,
         ...(reviewerTimeoutMs === undefined ? {} : { timeoutMs: reviewerTimeoutMs }),
       }),
+    // An outside action of a job that read outside content always goes to the reviewer.
+    mustReview: outsideReviewOf,
     // A guard model call that answers 402 or 403 puts the cell in the credit pause, as an agent
     // call does; the call's own outcome stays the guard's (fail closed).
     onCredit: (status) =>

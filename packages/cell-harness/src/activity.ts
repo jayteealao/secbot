@@ -99,6 +99,8 @@ export type GuardModelFields = {
   readonly verdictWord?: "would block" | "would ask";
   /** Why the reviewer gave no verdict (for example `timeout`, `malformed`), for the log only. */
   readonly reviewerCause?: string;
+  /** The call was an outside action of a job that read outside content (log only). */
+  readonly outside?: boolean;
   /** Each layer's usage, added to the calling conversation's `pi.usage` with the record. */
   readonly usage?: { readonly decision?: Usage; readonly reviewer?: Usage };
 };
