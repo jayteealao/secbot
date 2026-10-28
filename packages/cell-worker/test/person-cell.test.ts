@@ -7,6 +7,9 @@ import {
   ALTERNATE_MODEL,
   createFauxGateway,
   FakeCelldStorage,
+  fauxAssistantMessage,
+  fauxText,
+  fauxToolCall,
   type FauxGateway,
   loggedEvents,
   type Responder,
@@ -19,6 +22,26 @@ import { PersonCell, type SocketLike } from "../src/person-cell.ts";
 import { route, type WorkerEnv } from "../src/routes.ts";
 
 const KEY = "owner-laptop-key-0123456789abcdef0123456789abcdef";
+
+/** A research job asks the lead; the lead puts the question to the person and asks in its words. */
+const asksPerson: Responder = (request) => {
+  if (request.role === "research") {
+    return request.last?.role === "toolResult"
+      ? fauxAssistantMessage([fauxText(`Filled in: ${request.lastText}`)])
+      : fauxAssistantMessage([fauxToolCall("ask_lead", { question: "Home or office address?" })], {
+          stopReason: "toolUse",
+        });
+  }
+  if (request.lastText.startsWith("[job 1 question:")) {
+    return fauxAssistantMessage([fauxToolCall("ask_person", { job: 1 })], {
+      stopReason: "toolUse",
+    });
+  }
+  if (request.lastText.startsWith("Ask the person")) {
+    return fauxAssistantMessage([fauxText("Which address goes on the form, home or the office?")]);
+  }
+  return jobResponder(request);
+};
 const HOST = "cells.example.test";
 
 class FakeSocket implements SocketLike {
@@ -229,9 +252,9 @@ describe("PersonCell", () => {
       readonly held: () => boolean;
     }
 
-    async function opening(): Promise<Opening> {
+    async function opening(respond?: Responder): Promise<Opening> {
       vi.spyOn(console, "log").mockImplementation(() => {});
-      const s = await setup();
+      const s = await setup(respond);
       s.sockets.splice(0);
       const server = new FakeSocket();
       vi.stubGlobal(
@@ -306,6 +329,43 @@ describe("PersonCell", () => {
         return page.messages.length === 0;
       });
       expect(texts(server)).toHaveLength(2);
+    });
+
+    it("sends each open job question after the missed messages, and answers it through the route", async () => {
+      const { s, harness, server } = await opening(asksPerson);
+      await (
+        await harness.submit(
+          startJobLine({ title: "renew passport form", brief: "fill it", template: "research" }),
+          "q-1",
+        )
+      ).wait(BACKGROUND_CONTEXT);
+      await until(async () => (await harness.board()).jobs["1"]?.question?.toPerson === true);
+      await harness.harness.waitForIdle(BACKGROUND_CONTEXT);
+      await open(s);
+      const kinds = server.sent.map((frame) => String(frame.type));
+      const question = kinds.indexOf("question");
+      expect(question).toBeGreaterThan(kinds.lastIndexOf("missed"));
+      expect(server.sent[question]).toEqual({
+        type: "question",
+        job: 1,
+        title: "renew passport form",
+      });
+      expect(kinds.filter((kind) => kind === "question")).toHaveLength(1);
+
+      const answer = (n: number, body: unknown) =>
+        call(s, "POST", `/v1/cells/owner/jobs/${n}/answer`, body);
+      const missing = await answer(9, { text: "home" });
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toEqual({ error: "no job #9" });
+      expect((await answer(1, { text: "  " })).status).toBe(400);
+      expect((await answer(1, { text: "x".repeat(2_001) })).status).toBe(400);
+      const answered = await answer(1, { text: "home address" });
+      expect(answered.status).toBe(200);
+      expect(await answered.json()).toEqual({ job: 1, title: "renew passport form" });
+      await until(async () => (await harness.board()).jobs["1"]?.status === "done");
+      const again = await answer(1, { text: "home address" });
+      expect(again.status).toBe(409);
+      expect(await again.json()).toEqual({ error: "job 1 has no question waiting" });
     });
 
     it("sends an answer once when both the missed page and the live watch carry it", async () => {

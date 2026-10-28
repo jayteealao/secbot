@@ -37,6 +37,7 @@ import {
   heartbeatState,
   isDecisionAdapter,
   isGuardMode,
+  JOB_ANSWER_MAX_CHARS,
   JOB_KIND,
   logEvent,
   logName,
@@ -615,6 +616,10 @@ export class PersonCell {
       if (request.method === "POST" && approvalRoute !== null) {
         return this.answerRoute(request, cell, Number(approvalRoute[1]), device);
       }
+      const jobAnswerRoute = /^\/jobs\/([1-9][0-9]{0,8})\/answer$/.exec(route);
+      if (request.method === "POST" && jobAnswerRoute !== null) {
+        return this.jobAnswerRoute(request, cell, Number(jobAnswerRoute[1]));
+      }
       if (route === "/secrets" || route === "/secrets/grants") {
         return this.secretsRoute(request, cell, person, route);
       }
@@ -752,6 +757,27 @@ export class PersonCell {
     }
   }
 
+  /**
+   * The person's answer to a job's question that the lead put to them: `{"text": "<1 to 2,000
+   * characters>"}`. A job waiting on it goes on in this activation.
+   */
+  private async jobAnswerRoute(request: Request, cell: CellHarness, n: number): Promise<Response> {
+    const body = await readJson(request);
+    if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (text.length === 0 || text.length > JOB_ANSWER_MAX_CHARS) {
+      return json({ error: `send {"text": "<1 to ${JOB_ANSWER_MAX_CHARS} characters>"}` }, 400);
+    }
+    const answered = await cell.answerJob(n, text);
+    if (!answered.ok) {
+      return json({ error: answered.message }, answered.reason === "no-job" ? 404 : 409);
+    }
+    // The job continues in this activation; keep the cell up while it runs.
+    this.keepBusy(cell);
+    this.rearmSoon(cell.person);
+    return json({ job: answered.job, title: answered.title });
+  }
+
   /** RPC (operator routes): both levels of a person's rules. */
   async ownerRules(
     person: string,
@@ -879,6 +905,8 @@ export class PersonCell {
         messages,
         remaining,
       } = await cell.missed(device);
+      // Job questions put to the person, read before the missed page goes out.
+      const questions = await cell.openQuestions();
       const shown = new Set(waiting.map((call) => call.number));
       for (const call of waiting) deliver({ type: "held", call, count: waiting.length });
       const noticed = new Set(notices.map((notice) => notice.seq));
@@ -893,6 +921,11 @@ export class PersonCell {
         });
       }
       delivered = messages.length;
+      // After the missed messages (the lead's words that ask come first), each open question.
+      const asked = new Set(questions.map((question) => question.job));
+      for (const question of questions) {
+        deliver({ type: "question", job: question.job, title: question.title });
+      }
       // Held frames follow, minus what the missed page carried. While older messages are still left
       // for `missed`, a held answer stays there too: sending it would move the cursor past them.
       // This runs without an await, so nothing is added to `held` meanwhile.
@@ -913,6 +946,8 @@ export class PersonCell {
           // Already sent above with the waiting calls.
         } else if (frame.type === "notice" && noticed.has(frame.notice.seq)) {
           // Already sent above with the unseen notices.
+        } else if (frame.type === "question" && asked.has(frame.job)) {
+          // Already sent above with the open questions.
         } else {
           deliver(frame);
         }

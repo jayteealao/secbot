@@ -167,7 +167,11 @@ export {
 } from "./job-board.ts";
 export { JOB_KIND } from "./job-task.ts";
 export { doneRecord, jobLabel, jobRowLabel, liveJobs } from "./jobs.ts";
-export { createJobsExtension, jobSummary } from "./lead-tools.ts";
+export {
+  ANSWER_MAX_CHARS as JOB_ANSWER_MAX_CHARS,
+  createJobsExtension,
+  jobSummary,
+} from "./lead-tools.ts";
 export {
   type BudgetLine,
   type BudgetState,

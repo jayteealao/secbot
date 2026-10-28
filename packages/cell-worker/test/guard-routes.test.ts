@@ -69,9 +69,17 @@ describe("the person's guard routes (device key)", () => {
       ["set_reminder", "release"],
       ["search_history", "release"],
     ]);
-    // The default person rules: job starts first; the retired hand-off's rule still reads.
+    // The default person rules: the job tools first; the retired hand-off's rule still reads.
     expect(listed.person.map((r) => r.tool)).toEqual([
       "start_job",
+      "restart_job",
+      "answer_job",
+      "ask_person",
+      "mark_risky",
+      "job_transcript",
+      "ask_lead",
+      "request_job",
+      "search_old_job",
       "handoff",
       "household_change",
       "set_reminder",

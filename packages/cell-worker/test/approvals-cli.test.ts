@@ -103,7 +103,7 @@ describe("the charter scenario, steps 1-6, against the cell routes", () => {
     });
     const listed = await secbot("rules", "list");
     expect(listed.out).toContain(
-      "YOUR RULES\n------------------------------------------------------------------------------\nAGENT      TOOL               MATCH                          VERDICT\nall        start_job          any                            permit\nall        handoff            any                            permit\n",
+      "YOUR RULES\n------------------------------------------------------------------------------\nAGENT      TOOL               MATCH                          VERDICT\nall        start_job          any                            permit\nall        restart_job        any                            permit\n",
     );
     expect(listed.out).toContain(
       "lead       start_job          any                            ask first\n",
