@@ -14,7 +14,7 @@ import {
   type TestCell,
   until,
 } from "./fixtures.ts";
-import { entriesOf, entryRole, entryText } from "./job-helpers.ts";
+import { entriesOf, entryRole, entryText, toolResultsOf } from "./job-helpers.ts";
 import { jobResponder } from "./responders.ts";
 import { job, leadCalls, startPausedJob } from "./escalation-helpers.ts";
 
@@ -30,11 +30,22 @@ const NOTE = "household_read refused the list name twice; try the shopping list 
 /** The first run fails the same way three times; a restarted run answers. */
 export const failsThenAnswers: Responder = (request) => {
   if (request.role !== "research") return jobResponder(request);
-  if (/Failure note from the earlier attempt/.test(request.lastText))
+  if (/Failure note from the earlier attempt/.test(request.lastText)) {
+    // The new subagent first looks at what the earlier attempt tried.
+    return fauxAssistantMessage([fauxToolCall("search_old_job", { query: "shopping list" })], {
+      stopReason: "toolUse",
+    });
+  }
+  if (request.last?.role === "toolResult" && request.lastText.startsWith("attempt 1 #")) {
     return fauxAssistantMessage([fauxText("Found three flights this time.")]);
-  return fauxAssistantMessage([fauxToolCall("household_read", { document: "no such list!" })], {
-    stopReason: "toolUse",
-  });
+  }
+  return fauxAssistantMessage(
+    [
+      fauxText("Checking the shopping list again."),
+      fauxToolCall("household_read", { document: "no such list!" }),
+    ],
+    { stopReason: "toolUse" },
+  );
 };
 
 describe("restart with a failure note", () => {
@@ -45,7 +56,9 @@ describe("restart with a failure note", () => {
     await startPausedJob(t);
     const transcript = await leadCalls(t, "job_transcript", { job: 1 });
     expect(transcript).toContain("user: find flights");
-    expect(transcript).toContain('job: [calls household_read {"document":"no such list!"}]');
+    expect(transcript).toContain(
+      'job: Checking the shopping list again. [calls household_read {"document":"no such list!"}]',
+    );
     expect(transcript).toContain("tool household_read error:");
     expect(transcript.length).toBeLessThanOrEqual(4_000);
   });
@@ -100,6 +113,44 @@ describe("restart with a failure note", () => {
     expect(first === undefined ? "" : entryText(first)).toBe(
       `Failure note from the earlier attempt:\n${NOTE}\n\nBrief:\nfind flights`,
     );
+  });
+
+  it("lets the new subagent search the failed run's transcript (AC-17)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(failsThenAnswers) });
+    const t = test;
+    await startPausedJob(t);
+    await leadCalls(t, "restart_job", { job: 1, note: NOTE });
+    await until(async () => (await job(t))?.status === "done");
+    const id = (await job(t))?.conversationId;
+    if (id === null || id === undefined) throw new Error("no conversation");
+    const conversation = await t.cell.harness.conversation(id, BACKGROUND_CONTEXT);
+    if (conversation === undefined) throw new Error("no conversation");
+    const results = await toolResultsOf(conversation);
+    expect(results[0]).toMatch(/^attempt 1 #\d+ assistant: Checking the shopping list again\.$/m);
+  });
+
+  it("answers a job with no earlier attempt plainly", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({
+      gateway: createFauxGateway((request) => {
+        if (request.role !== "research") return jobResponder(request);
+        if (request.last?.role === "toolResult") return fauxAssistantMessage([fauxText("done")]);
+        return fauxAssistantMessage([fauxToolCall("search_old_job", { query: "list" })], {
+          stopReason: "toolUse",
+        });
+      }),
+    });
+    const t = test;
+    await leadCalls(t, "start_job", { title: "a", brief: "look", template: "research" });
+    await until(async () => (await job(t))?.status === "done");
+    const id = (await job(t))?.conversationId;
+    const conversation =
+      id === null || id === undefined
+        ? undefined
+        : await t.cell.harness.conversation(id, BACKGROUND_CONTEXT);
+    if (conversation === undefined) throw new Error("no conversation");
+    expect(await toolResultsOf(conversation)).toEqual(["This job has no earlier attempt."]);
   });
 
   it("refuses a second restart while the raise is left", async () => {

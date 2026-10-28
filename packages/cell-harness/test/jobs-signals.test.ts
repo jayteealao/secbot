@@ -40,8 +40,11 @@ describe("the job signals", () => {
     hold.hold("research");
     const respond: Responder = (request) => {
       if (request.role === "research") return fauxAssistantMessage([fauxText(ANSWER)]);
-      // The health job answers with nothing: a failed job wakes the lead at once.
-      if (request.role === "health") return fauxAssistantMessage([fauxText("")]);
+      // The health job's request is refused for good (an empty reply now pauses a job instead):
+      // a failed job wakes the lead at once.
+      if (request.role === "health") {
+        return fauxAssistantMessage([], { stopReason: "error", errorMessage: "400 Bad request" });
+      }
       return jobResponder(request);
     };
     test = await openTestCell({

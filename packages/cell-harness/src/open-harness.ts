@@ -85,6 +85,7 @@ import { createHouseholdExtension, type HouseholdClient } from "./household-tool
 import { ENDED } from "./job-board.ts";
 import { createJobGate } from "./job-gate.ts";
 import { JobHolds } from "./job-holds.ts";
+import { createJobToolsExtension } from "./job-tools.ts";
 import type { JobTask } from "./job-task.ts";
 import { liveJobs } from "./jobs.ts";
 import { createJobsExtension } from "./lead-tools.ts";
@@ -683,6 +684,8 @@ export async function openCellHarness(
   // Paused and questioning jobs wait here; the job gate, the job tools, and the lead's tools share it.
   const holds = new JobHolds();
   const jobGate = createJobGate({ person, harness: current, holds, now });
+  // A job's own tools: search its earlier attempts (no tool that starts a subagent).
+  const jobTools = createJobToolsExtension({ person, harness: current, holds, now });
   let jobList: readonly Extension[] = [];
   const jobs = createJobsExtension({
     person,
@@ -748,7 +751,7 @@ export async function openCellHarness(
   const budget = createBudgetExtension(() => gate);
   // The job gate is after the budget: above a limit a job waits there first; then the gate pauses
   // a job at its cap or after three failing steps.
-  const job = [guard, budget, jobGate, history, household, secrets, telemetry, ...extra];
+  const job = [guard, budget, jobGate, jobTools, history, household, secrets, telemetry, ...extra];
   jobList = job;
   const extensions = {
     lead: [

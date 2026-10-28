@@ -7,6 +7,7 @@
 import type { Context } from "@earendil-works/chord";
 import { type Message, Type } from "@earendil-works/pi-ai";
 import {
+  type ConversationId,
   type Cursor,
   defineExtension,
   defineTool,
@@ -54,20 +55,26 @@ export interface HistorySearch {
 }
 
 /**
- * Entries of the lead's conversation whose text contains every term, newest first, starting
- * below `before` when it is given.
+ * Entries of a conversation (the lead's unless `conversationId` names another, such as an earlier
+ * attempt of a job) whose text contains every term, newest first, starting below `before` when
+ * it is given.
  */
 export async function searchHistoryWindow(
   harness: Harness,
   query: string,
-  options: { readonly limit: number; readonly before?: number; readonly scanLimit?: number },
+  options: {
+    readonly limit: number;
+    readonly before?: number;
+    readonly scanLimit?: number;
+    readonly conversationId?: ConversationId;
+  },
   context: Context,
 ): Promise<HistorySearch> {
   const scanLimit = options.scanLimit ?? SCAN_LIMIT;
   const empty: HistorySearch = { hits: [], scanned: 0, truncated: false, oldestEntryId: undefined };
   const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
   if (terms.length === 0) return empty;
-  const lead = await harness.conversation(ROOT_CONVERSATION_ID, context);
+  const lead = await harness.conversation(options.conversationId ?? ROOT_CONVERSATION_ID, context);
   if (lead === undefined) return empty;
   const hits: HistoryHit[] = [];
   let cursor: Cursor | undefined;
