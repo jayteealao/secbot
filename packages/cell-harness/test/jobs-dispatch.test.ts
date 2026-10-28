@@ -222,3 +222,59 @@ describe("the lead's job tools", () => {
     expect(row?.result?.pulledAt).not.toBeNull();
   });
 });
+
+describe("jobs run at once (AC-4)", () => {
+  it("starts five jobs in one turn: five job tasks, each owning one conversation, all generating together", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const hold = createHold();
+    hold.hold("research");
+    test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
+    const t = test;
+    const five = [1, 2, 3, 4, 5]
+      .map((n) =>
+        startJobLine({
+          title: `question ${n}`,
+          brief: `Look into question ${n}.`,
+          template: "research",
+        }),
+      )
+      .join("\n");
+    await (await t.cell.submit(five, "req-five")).wait(BACKGROUND_CONTEXT);
+    // Every job's first model request is open at the same moment.
+    await until(() => hold.waiting("research") === 5);
+
+    const board = await t.cell.board();
+    const conversations = Object.values(board.jobs).map((row) => row.conversationId);
+    expect(conversations.every((id) => id !== null)).toBe(true);
+    expect(new Set(conversations.map(String)).size).toBe(5);
+    const graph = await t.cell.harness.taskGraph(BACKGROUND_CONTEXT);
+    try {
+      const nodes = Object.values(graph.value.tasks);
+      const jobs = nodes.filter((node) => node.kind === "secbot.job");
+      expect(jobs).toHaveLength(5);
+      for (const job of jobs) expect(job.conversations).toHaveLength(1);
+      expect(jobs.map((job) => String(job.conversations[0])).sort()).toEqual(
+        conversations.map(String).sort(),
+      );
+      // Each job conversation has a live task of its own running the generation.
+      for (const id of conversations) {
+        expect(
+          nodes.some(
+            (node) => node.kind !== "secbot.job" && String(node.conversationId) === String(id),
+          ),
+          `a live generation in conversation ${String(id)}`,
+        ).toBe(true);
+      }
+    } finally {
+      graph.dispose();
+    }
+
+    hold.release("research");
+    await until(async () =>
+      Object.values((await t.cell.board()).jobs).every((row) => row.result !== null),
+    );
+    expect(
+      Object.values((await t.cell.board()).jobs).map((row) => [row.status, row.result?.pulledAt]),
+    ).toEqual(Array(5).fill(["done", null]));
+  });
+});
