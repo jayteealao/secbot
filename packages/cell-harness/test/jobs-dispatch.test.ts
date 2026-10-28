@@ -5,15 +5,17 @@ import { ROOT_CONVERSATION_ID, type TaskId } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ActivityPageDoc, JobBoardDoc } from "../src/docs.ts";
 import { createJobRow } from "../src/job-board.ts";
+import { RemindersDoc } from "../src/reminder.ts";
 import {
   createFauxGateway,
+  createHouseholdStub,
   loggedEvents,
   openTestCell,
   type Responder,
   type TestCell,
   until,
 } from "./fixtures.ts";
-import { answersOf, toolResultsOf } from "./job-helpers.ts";
+import { answersOf, toolCallsOf, toolResultsOf } from "./job-helpers.ts";
 import { createHold, JOB_BRIEF, jobResponder, RESEARCH_JOB, startJobLine } from "./responders.ts";
 
 let test: TestCell | undefined;
@@ -220,6 +222,32 @@ describe("the lead's job tools", () => {
     expect(toolTexts).toContain("research finding: evidence is mixed.");
     const row = (await t.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs["1"];
     expect(row?.result?.pulledAt).not.toBeNull();
+  });
+
+  it("sets a reminder and edits the household list itself, with no job (AC-2)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const household = createHouseholdStub();
+    test = await openTestCell({ gateway: createFauxGateway(jobResponder), household });
+    const t = test;
+    const at = new Date(Date.now() + 86_400_000).toISOString();
+    await (
+      await t.cell.submit(
+        `CALL set_reminder ${JSON.stringify({ at, text: "bins out" })}\nCALL household_change {"op":"add","text":"eggs"}`,
+        "req-1",
+      )
+    ).wait(BACKGROUND_CONTEXT);
+    // The lead's own tools ran on its conversation: a reminder, and the edit in the background.
+    expect(await toolCallsOf(t.cell.root)).toEqual(["set_reminder", "household_change"]);
+    const reminders = await t.cell.harness.snapshot(RemindersDoc, BACKGROUND_CONTEXT);
+    expect(Object.keys(reminders?.byCall ?? {})).toHaveLength(1);
+    await until(() =>
+      household.changes.some((change) => "text" in change && change.text === "eggs"),
+    );
+    // No job: the board is empty and no job conversation asked a model.
+    const board = await t.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT);
+    expect(board?.jobs).toEqual({});
+    expect(board?.nextNumber).toBe(1);
+    expect(t.gateway.requests.every((request) => request.role === "lead")).toBe(true);
   });
 });
 
