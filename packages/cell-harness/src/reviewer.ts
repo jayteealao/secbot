@@ -129,7 +129,7 @@ const FENCED = /^```(?:json)?\s*\n([\s\S]*)\n\s*```$/;
  * object and nothing else; otherwise undefined. A reply that also holds other text, or a second
  * object (for example one echoed from the call), is never read.
  */
-function onlyObject(text: string): Record<string, unknown> | undefined {
+export function onlyObject(text: string): Record<string, unknown> | undefined {
   const trimmed = text.trim();
   const body = (FENCED.exec(trimmed)?.[1] ?? trimmed).trim();
   if (!body.startsWith("{") || !body.endsWith("}")) return undefined;

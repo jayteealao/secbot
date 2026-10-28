@@ -38,6 +38,7 @@ import { doneRecord, jobRowLabel } from "./jobs.ts";
 import { modelRef } from "./model-map.ts";
 import { budgetOf } from "./month-ledger.ts";
 import { RESULT_WAKE_MS, RISKY_TEMPLATES, RISKY_TOOLS } from "./release-defaults.ts";
+import { type ReviewTask, startReview } from "./result-review.ts";
 import { templatesOf, tierModelOf } from "./templates.ts";
 
 /** The job task's kind. */
@@ -77,6 +78,8 @@ export type JobState =
 
 export interface JobTaskDeps {
   readonly person: string;
+  /** The review task a risky result starts (result-review.ts). */
+  readonly review: () => ReviewTask;
   readonly gate: () => BudgetWaiter | undefined;
   readonly timeZone: string;
   /** The extensions a job conversation selects (no tool that starts work). */
@@ -357,6 +360,11 @@ export function createJobTask(deps: JobTaskDeps) {
             chars: text.length,
             outcome: status === "done" ? "answered" : "failed",
           };
+          // A risky result is reviewed first; the review wakes the lead when it is done.
+          if (stored.kind === "risky" && status === "done") {
+            await startReview(tx, deps.review(), n);
+            return { status: "terminal", outcome: { status: "completed", result: null } };
+          }
           const next: JobState =
             stored.kind === "routine"
               ? { phase: "await", wakeAt: stored.at + RESULT_WAKE_MS }

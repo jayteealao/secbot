@@ -24,11 +24,12 @@ afterEach(async () => {
 describe("session frames", () => {
   it("streams the answer in parts, then sends the lead's answer to a wake notice with no new request", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    // The research job answers with nothing: a failed job wakes the lead at once.
+    // The research job's request is refused for good, so it does not answer (an empty reply
+    // alone now pauses a job instead): a failed job wakes the lead at once.
     const gateway = createFauxGateway(
       (request) =>
         request.role === "research"
-          ? fauxAssistantMessage([fauxText("")])
+          ? fauxAssistantMessage([], { stopReason: "error", errorMessage: "400 Bad request" })
           : researchResponder(request),
       { tokensPerSecond: 8 },
     );
@@ -55,7 +56,7 @@ describe("session frames", () => {
     // The wake notice is the lead's input, not a message to the person.
     expect(answers.map((frame) => frame.type)).toEqual(["answer", "answer"]);
     expect(answers[1]).toMatchObject({
-      text: "Research says: the job answered with nothing",
+      text: "Research says: the job did not answer: model_error",
     });
     expect(
       gateway.requests.filter((request) => request.role === "lead" && request.last?.role === "user")

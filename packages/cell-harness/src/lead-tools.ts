@@ -33,6 +33,7 @@ import {
   setTierEffort,
 } from "./job-board.ts";
 import type { JobHolds } from "./job-holds.ts";
+import { createReviewTask, type ReviewTask, reviewHold, startReview } from "./result-review.ts";
 import { configureJob, createJobTask, type JobTask } from "./job-task.ts";
 import { budgetOf } from "./month-ledger.ts";
 import {
@@ -59,6 +60,8 @@ export interface JobsExtensionDeps {
   readonly holds: JobHolds;
   /** The harness, to abort a job's task when the lead restarts it or it used its escalations. */
   readonly harness: () => Harness;
+  /** The extensions of a result reviewer's conversation: no tools. */
+  readonly reviewExtensions: () => readonly Extension[];
 }
 
 /** The lead's note when a job will wait above a limit before it starts. */
@@ -174,10 +177,17 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
   readonly extension: Extension;
   readonly JobTask: JobTask;
   readonly ReceiptTask: ReceiptTask;
+  readonly ReviewTask: ReviewTask;
 } {
   const { person } = deps;
+  const ReviewTask = createReviewTask({
+    person,
+    now: deps.now,
+    extensions: deps.reviewExtensions,
+  });
   const JobTask = createJobTask({
     person,
+    review: () => ReviewTask,
     gate: deps.gate,
     timeZone: deps.timeZone,
     extensions: deps.jobExtensions,
@@ -290,10 +300,16 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
       const pulled = await api.commit(async (tx) => {
         const found = await rowOrError(tx, args.job);
         if ("error" in found) return found;
+        // A risky result reaches the lead only after the reviewer passed it.
+        const held = reviewHold(found);
+        if (held !== null) return { held };
         const result = await pullResult(tx, args.job, now);
         return { row: { ...found }, result };
       }, context);
       if ("error" in pulled) return refusal(pulled.error);
+      if ("held" in pulled) {
+        return { ...text(pulled.held), details: { job: args.job, review: true } };
+      }
       const { row, result } = pulled;
       if (result === null) {
         return {
@@ -550,7 +566,10 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         // An unpulled routine result is reviewed before the lead uses it.
         const result = row.result;
         const review = result !== null && result.pulledAt === null && result.kind === "routine";
-        if (review) result.kind = "risky";
+        if (review) {
+          result.kind = "risky";
+          await startReview(tx, ReviewTask, args.job);
+        }
         return { number: row.number, review };
       }, context);
       if ("error" in marked) return refusal(marked.error);
@@ -575,6 +594,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
   return {
     JobTask,
     ReceiptTask,
+    ReviewTask,
     extension: defineExtension({
       name: "secbot-jobs",
       tools: [
@@ -588,7 +608,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         createReadResultTool(deps.now),
       ],
       wraps: remoteWraps(person, ReceiptTask, turnOf, deps.now),
-      tasks: [JobTask, ReceiptTask],
+      tasks: [JobTask, ReceiptTask, ReviewTask],
     }),
   };
 }

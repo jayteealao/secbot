@@ -13,9 +13,12 @@ const LEAD_TOOLS = [
   "household_change",
   "household_read",
   "job_result",
+  "job_transcript",
+  "mark_risky",
   "note_bookmark",
   "read_job",
   "read_result",
+  "restart_job",
   "resume_work",
   "search_history",
   "secret_get",
@@ -28,6 +31,7 @@ const JOB_TOOLS = [
   "household_change",
   "household_read",
   "search_history",
+  "search_old_job",
   "secret_get",
 ];
 

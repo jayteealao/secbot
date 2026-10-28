@@ -705,6 +705,8 @@ export async function openCellHarness(
     now,
     holds,
     harness: current,
+    // A result reviewer has no tools: it waits above a limit like a job, and its calls are logged.
+    reviewExtensions: () => [budget, telemetry],
     remote: {
       person,
       household: () => options.household,

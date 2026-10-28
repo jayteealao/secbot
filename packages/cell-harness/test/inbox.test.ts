@@ -15,6 +15,7 @@ import {
   type FakeCelldStorage,
   openTestCell,
   type Responder,
+  resultReviewer,
   type TestCell,
   until,
 } from "./fixtures.ts";
@@ -140,7 +141,8 @@ describe("the results inbox", () => {
 
   it("sends one wake notice for a question and for a risky result, without the result (AC-11)", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const { t, JobTask } = await openJobCell({});
+    // A risky result is reviewed first; the passing review sends its wake notice.
+    const { t, JobTask } = await openJobCell({ respond: resultReviewer(jobResponder) });
     test = t;
     const question = await startJob(t, JobTask, {
       kind: "question",
@@ -152,6 +154,7 @@ describe("the results inbox", () => {
     });
     await t.cell.harness.waitForTask(question.taskId, BACKGROUND_CONTEXT);
     await t.cell.harness.waitForTask(risky.taskId, BACKGROUND_CONTEXT);
+    await until(async () => (await wakeNotices(t)).length === 2);
     await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
     const notices = await wakeNotices(t);
     expect(notices.sort()).toEqual([

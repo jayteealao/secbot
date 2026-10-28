@@ -41,10 +41,14 @@ import {
 import {
   DEFAULT_LEAD_MODEL,
   DEFAULT_SPECIALIST_MODEL,
+  RESULT_REVIEW_PROMPT,
   TIER_MODELS,
 } from "../src/release-defaults.ts";
 import { REVIEWER_FIRST_LINE } from "../src/reviewer.ts";
 import type { SecretsClient } from "../src/secret-tools.ts";
+
+/** The first line of the result reviewer's instructions. */
+export const RESULT_REVIEW_FIRST_LINE = RESULT_REVIEW_PROMPT.split("\n")[0] as string;
 
 export { FakeCelldStorage, fauxAssistantMessage, fauxText, fauxToolCall };
 
@@ -222,6 +226,27 @@ export function reviewerResponder(
     const answer = await verdicts(request);
     return typeof answer === "string" ? fauxAssistantMessage([fauxText(answer)]) : answer;
   };
+}
+
+/** True for a request from the result reviewer (its instructions start with the first line). */
+export const isResultReviewRequest = (request: FauxRequest): boolean =>
+  request.system.includes(RESULT_REVIEW_FIRST_LINE);
+
+/**
+ * Answers result-review requests with `verdict` (default: pass) and every other request with
+ * `others`.
+ */
+export function resultReviewer(
+  others: Responder = defaultResponder,
+  verdict: (request: FauxRequest) => { verdict: "pass" | "reject"; reason: string } = () => ({
+    verdict: "pass",
+    reason: "it does what the brief asks",
+  }),
+): Responder {
+  return (request) =>
+    isResultReviewRequest(request)
+      ? fauxAssistantMessage([fauxText(JSON.stringify(verdict(request)))])
+      : others(request);
 }
 
 /** A reviewer verdict as the reviewer writes it. */
