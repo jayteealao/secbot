@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { createDecisionModels } from "@secbot/cell-harness";
 import {
-  addSpend,
+  addJobSpend,
   type FauxRequest,
   fauxAssistantMessage,
   fauxText,
@@ -239,7 +239,7 @@ describe("secbot activity against the cell routes", () => {
     await harness.answer(held?.number ?? 0, "allow", { device: "laptop" });
     await until(async () => (await kinds(setup)).some((record) => record.kind === "answered"));
 
-    // A reminder that is delivered, and a hand-off that ends with a known cost.
+    // A reminder that is delivered, and a job that ends with a known cost.
     const at = new Date(Date.now() + 1_000).toISOString();
     await agentCall(setup, `CALL set_reminder {"at":"${at}","text":"bins out"}`);
     await until(async () =>
@@ -247,24 +247,30 @@ describe("secbot activity against the cell routes", () => {
     );
     await agentCall(
       setup,
-      'CALL handoff {"specialist":"research","brief":"trains to Leeds on Friday"}',
+      'CALL start_job {"title":"trains to Leeds on Friday","brief":"trains to Leeds on Friday","template":"research"}',
     );
     await until(() =>
       setup.gateway.requests.some(
         (request) => request.role === "research" && request.lastText.includes("trains"),
       ),
     );
-    await addSpend(harness, 0.131, { role: "research" });
+    await addJobSpend(harness, 1, 0.131);
     releaseTrains();
     await until(async () =>
       (await kinds(setup)).some((record) => record.kind === "job" && record.agent === "research"),
     );
 
-    // A running hand-off, then a waiting one above a lowered limit.
-    await agentCall(setup, 'CALL handoff {"specialist":"health","brief":"sleep and caffeine"}');
+    // A running job, then a waiting one above a lowered limit.
+    await agentCall(
+      setup,
+      'CALL start_job {"title":"sleep and caffeine","brief":"sleep and caffeine","template":"health"}',
+    );
     await until(() => setup.gateway.requests.some((request) => request.role === "health"));
     await harness.setLimit(0.01, "owner");
-    await agentCall(setup, 'CALL handoff {"specialist":"research","brief":"buses to Leeds"}');
+    await agentCall(
+      setup,
+      'CALL start_job {"title":"buses to Leeds","brief":"buses to Leeds","template":"research"}',
+    );
     await until(async () =>
       (await harness.activity()).live.some((row) => row.verdict === "waiting"),
     );
@@ -306,21 +312,19 @@ describe("secbot activity against the cell routes", () => {
       [rowBody("lead", "household_change", "allowed", "person"), "allowed once by owner"],
       [rowBody("lead", "reminder: bins out", "done", "job"), "delivered to the lead", "$0.0000"],
       [
-        rowBody("research", "job: trains to Leeds on", "done", "job"),
-        "answered the lead",
+        rowBody("research", "job 1: trains to Leeds", "done", "job"),
+        "answered; waits for the lead",
         "$0.1310",
       ],
-      [
-        rowBody("health", "job: sleep and caffeine", "running", "job"),
-        "step 1 of 2: health is working",
-      ],
+      [rowBody("health", "job 2: sleep and", "running", "job"), "working on mid"],
     ];
     const missing = expected.filter(
       ([body, reason, money]) => findRow(lines, body, reason, money) === -1,
     );
     expect(missing).toEqual([]);
     const waiting = lines.findIndex(
-      (line) => line.slice(5, 67) === rowBody("research", "job: buses to Leeds", "waiting", "job"),
+      (line) =>
+        line.slice(5, 67) === rowBody("research", "job 3: buses to Leeds", "waiting", "job"),
     );
     expect(waiting).toBeGreaterThan(2);
     expect(lines[waiting + 1]).toMatch(/^ {9}waits above your limit since \d\d:\d\d$/);

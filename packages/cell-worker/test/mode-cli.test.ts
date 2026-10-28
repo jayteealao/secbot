@@ -119,7 +119,7 @@ describe("the reviewer role in secbot model", () => {
     await evidence("model-list.txt", "model list", listed);
     expect(listed.code).toBe(0);
     expect(listed.out.split("\n").at(-2)).toBe(
-      "reviewer   anthropic/claude-sonnet-5.5  (release default)",
+      "reviewer  anthropic/claude-sonnet-5.5  (release default)",
     );
     const set = await secbot(
       setup,
@@ -136,7 +136,7 @@ describe("the reviewer role in secbot model", () => {
       err: "",
     });
     const after = await secbot(setup, undefined, "model", "list");
-    expect(after.out).toContain("reviewer   anthropic/claude-haiku-4.5  (changed)\n");
+    expect(after.out).toContain("reviewer  anthropic/claude-haiku-4.5  (changed)\n");
     expect(fits(listed.out) && fits(after.out)).toBe(true);
   });
 });

@@ -44,15 +44,15 @@ const operator = (
 
 const LOOSER = {
   agent: "lead",
-  tool: "handoff",
+  tool: "start_job",
   verdict: "permit",
-  match: { kind: "exact", field: "specialist", value: "developer" },
+  match: { kind: "exact", field: "template", value: "developer" },
 };
 const OWNER_ASK = {
   agent: "all",
-  tool: "handoff",
+  tool: "start_job",
   verdict: "ask-first",
-  match: { kind: "exact", field: "specialist", value: "developer" },
+  match: { kind: "exact", field: "template", value: "developer" },
 };
 
 describe("the person's guard routes (device key)", () => {
@@ -69,7 +69,9 @@ describe("the person's guard routes (device key)", () => {
       ["set_reminder", "release"],
       ["search_history", "release"],
     ]);
+    // The default person rules: job starts first; the retired hand-off's rule still reads.
     expect(listed.person.map((r) => r.tool)).toEqual([
+      "start_job",
       "handoff",
       "household_change",
       "set_reminder",
@@ -79,9 +81,9 @@ describe("the person's guard routes (device key)", () => {
 
     const added = await device(s, "POST", "/v1/cells/owner/rules", {
       agent: "lead",
-      tool: "handoff",
+      tool: "start_job",
       verdict: "permit",
-      match: { kind: "exact", field: "specialist", value: "research" },
+      match: { kind: "exact", field: "template", value: "research" },
     });
     expect(added.status).toBe(201);
     expect(((await added.json()) as { rule: { source: string } }).rule.source).toBe("person");
@@ -92,13 +94,13 @@ describe("the person's guard routes (device key)", () => {
 
     const removed = await device(s, "DELETE", "/v1/cells/owner/rules", {
       agent: "lead",
-      tool: "handoff",
-      match: { kind: "exact", field: "specialist", value: "research" },
+      tool: "start_job",
+      match: { kind: "exact", field: "template", value: "research" },
     });
     expect(removed.status).toBe(200);
     const missing = await device(s, "DELETE", "/v1/cells/owner/rules", {
       agent: "lead",
-      tool: "handoff",
+      tool: "household_read",
     });
     expect(missing.status).toBe(404);
     // The device key edits only the person's level: the release rule is not on it.
@@ -117,7 +119,7 @@ describe("the person's guard routes (device key)", () => {
     expect(refused.status).toBe(400);
     expect(await refused.json()).toEqual({
       error:
-        "refused: this rule is looser than an owner rule:\n  all handoff (specialist = developer) -> ask first\n  Your rules can be stricter than the owner's rules, never looser.",
+        "refused: this rule is looser than an owner rule:\n  all start_job (template = developer) -> ask first\n  Your rules can be stricter than the owner's rules, never looser.",
     });
   });
 

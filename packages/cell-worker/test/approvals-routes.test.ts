@@ -27,17 +27,17 @@ const device = (s: GuardSetup, method: string, path: string, body?: unknown) =>
     s.env,
   );
 
-const handoff = (specialist: string) =>
-  `CALL handoff ${JSON.stringify({ specialist, brief: `Ask ${specialist}.` })}`;
+const startJob = (template: string) =>
+  `CALL start_job ${JSON.stringify({ title: `ask ${template}`, brief: `Ask ${template}.`, template })}`;
 
-/** A person ask-first rule on the lead's hand-off, then one held hand-off to `specialist`. */
-async function holdOne(s: GuardSetup, specialist: string, id: string) {
+/** One held start of a job from `template` (a rule asks first). */
+async function holdOne(s: GuardSetup, template: string, id: string) {
   // The first request opens the person cell.
   expect((await device(s, "GET", "/v1/cells/owner/status")).status).toBe(200);
-  await s.cells.get("owner")?.submitInput("owner", handoff(specialist), id);
+  await s.cells.get("owner")?.submitInput("owner", startJob(template), id);
   const harness = s.harness("owner");
   await until(async () =>
-    (await harness.heldCalls()).some((call) => call.summary === `handoff -> ${specialist}`),
+    (await harness.heldCalls()).some((call) => call.summary === `start_job -> ${template}`),
   );
 }
 
@@ -45,7 +45,7 @@ describe("the held-call routes (device key)", () => {
   it("lists held calls and answers allow, always, and deny", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = await setup();
-    const rule = { agent: "lead", tool: "handoff", verdict: "ask-first" };
+    const rule = { agent: "lead", tool: "start_job", verdict: "ask-first" };
     expect((await device(s, "POST", "/v1/cells/owner/rules", rule)).status).toBe(201);
     await holdOne(s, "research", "route-1");
 
@@ -55,7 +55,7 @@ describe("the held-call routes (device key)", () => {
     expect(listed.held).toEqual([
       expect.objectContaining({
         number: 1,
-        summary: "handoff -> research",
+        summary: "start_job -> research",
         reasonSource: "your-rule",
       }),
     ]);
@@ -72,8 +72,8 @@ describe("the held-call routes (device key)", () => {
       status: "allowed",
       answer: "allow",
       agent: "lead",
-      tool: "handoff",
-      summary: "handoff -> research",
+      tool: "start_job",
+      summary: "start_job -> research",
       answeredBy: "owner",
       rule: null,
     });
@@ -87,10 +87,10 @@ describe("the held-call routes (device key)", () => {
       status: "always",
       rule: {
         agent: "lead",
-        tool: "handoff",
+        tool: "start_job",
         verdict: "permit",
         source: "allow-always",
-        match: { kind: "exact", field: "specialist", value: "health" },
+        match: { kind: "exact", field: "template", value: "health" },
       },
     });
 
@@ -114,9 +114,9 @@ describe("the held-call routes (device key)", () => {
 
     await s.harness("owner").addRule("owner", {
       agent: "all",
-      tool: "handoff",
+      tool: "start_job",
       verdict: "ask-first",
-      match: { kind: "exact", field: "specialist", value: "developer" },
+      match: { kind: "exact", field: "template", value: "developer" },
     });
     await holdOne(s, "developer", "route-4");
     const always = await device(s, "POST", "/v1/cells/owner/approvals/1", { answer: "always" });
@@ -139,7 +139,7 @@ describe("the held-call routes (device key)", () => {
   it("refuses a late answer with 409 lapsed", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = await setup({ guard: { holdMs: 50 } });
-    const rule = { agent: "lead", tool: "handoff", verdict: "ask-first" };
+    const rule = { agent: "lead", tool: "start_job", verdict: "ask-first" };
     expect((await device(s, "POST", "/v1/cells/owner/rules", rule)).status).toBe(201);
     await holdOne(s, "research", "route-5");
     const harness = s.harness("owner");

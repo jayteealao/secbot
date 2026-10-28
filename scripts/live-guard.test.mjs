@@ -132,7 +132,9 @@ test("the owner-rule matchers read the rules list, the held call, and the denial
   assert.ok(
     CONTRACT.deniedSearch.test('[ denied ] #4 search_history; the lead was told "denied by sam"'),
   );
-  assert.ok(CONTRACT.alwaysLine.test("             /always 1    allow always; adds: lead handoff"));
+  assert.ok(
+    CONTRACT.alwaysLine.test("             /always 1    allow always; adds: lead start_job"),
+  );
   // Charter step 7's reminder holds no card number, so no owner rule holds it; the card step's does.
   const { CARD_NUMBER_PATTERN } = await import("../packages/cell-harness/src/release-defaults.ts");
   const card = new RegExp(CARD_NUMBER_PATTERN, "i");
@@ -163,16 +165,16 @@ test("the owner-rule matchers read the rules list, the held call, and the denial
 test("the matchers read the command line's contract lines", () => {
   const held = [
     "[ HELD #1 ] the lead wants to run a tool                  lapses in 23 h 58 m",
-    "  why held   your rule: lead handoff (any) -> ask first",
+    "  why held   your rule: lead start_job (any) -> ask first",
     "  answer     /allow 1     allow once",
-    "             /always 1    allow always; adds: lead handoff",
+    "             /always 1    allow always; adds: lead start_job",
   ].join("\n");
   assert.deepEqual(check(held, { expect: [CONTRACT.held, CONTRACT.heldYourRule] }).missing, []);
   assert.equal(newestHeld(`${held}\n[ HELD #2 of 2 ] the lead wants to run a tool`), 2);
   assert.equal(newestHeld("nothing held"), undefined);
   assert.ok(
     CONTRACT.heldOwnerRule.test(
-      "  why held   owner rule: all handoff (specialist = developer) -> ask first",
+      "  why held   owner rule: all start_job (template = developer) -> ask first",
     ),
   );
   assert.ok(
@@ -182,10 +184,10 @@ test("the matchers read the command line's contract lines", () => {
   );
   assert.ok(
     CONTRACT.allowedAlways.test(
-      "[ allowed always ] #1 handoff -> research; added rule: lead handoff",
+      "[ allowed always ] #1 start_job -> research; added rule: lead start_job",
     ),
   );
-  assert.ok(CONTRACT.allowedOnce.test("[ allowed once ] #2 handoff -> developer"));
+  assert.ok(CONTRACT.allowedOnce.test("[ allowed once ] #2 start_job -> developer"));
   for (const line of [
     "[ month: $11.52 / $25.00 ] [#####.....] 46% [ shadow ]",
     "[ month: $20.40 / $25.00 ] [########..] 82% [ 80% of limit ] [ shadow ]",
@@ -417,7 +419,7 @@ test("the step runner passes, marks a model miss not run, a wrong command fail, 
       actions: [
         { kind: "cmd", argv: ["rules", "list", "--person", "{person}"], expect: [/RULES/] },
         { kind: "stdin", argv: ["secrets", "add"], value: "testSecret", expect: [/stored/] },
-        { kind: "chat", say: "hand off", expect: [CONTRACT.held] },
+        { kind: "chat", say: "start a job", expect: [CONTRACT.held] },
         { kind: "answer", choice: "allow", expect: [CONTRACT.allowedOnce] },
       ],
     },
@@ -457,10 +459,10 @@ test("the step runner passes, marks a model miss not run, a wrong command fail, 
       },
     },
     chatReplies: (line) =>
-      line === "hand off"
+      line === "start a job"
         ? "\n[ HELD #3 ] the lead wants to run a tool\n"
         : line === "/allow 3"
-          ? "[ allowed once ] #3 handoff -> research\n"
+          ? "[ allowed once ] #3 start_job -> research\n"
           : "lead: fine\n",
     // The third read (after step three) is $6 above the start: the run stops before step four.
     spends: [1, 1, 7.5],
