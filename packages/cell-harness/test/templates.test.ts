@@ -5,11 +5,18 @@ import {
   ALWAYS_KEY_FIELD,
   DEFAULT_JOB_EFFORT,
   DEFAULT_PERSON_RULES,
+  EMPTY_REPLY_NUDGE,
+  ESCALATION_LIMITS,
   JOB_EFFORTS,
   JOB_TEMPLATES,
   LEAD_INSTRUCTIONS,
+  LOOP_LIMIT,
   MARK_THRESHOLDS,
+  NEAR_SAME_MAX_DISTANCE,
+  RESULT_REVIEW_PROMPT,
   RESULT_WAKE_MS,
+  RISKY_TEMPLATES,
+  RISKY_TOOLS,
   TIER_CAPS_USD,
   TIER_MODELS,
   TIERS,
@@ -51,7 +58,8 @@ describe("release defaults of the job model", () => {
     for (const template of JOB_TEMPLATES) {
       expect(template.instruction).toContain(`You are the ${template.name} specialist`);
       expect(template.instruction).toContain("no tool to start other agents");
-      expect(template.instruction).toContain("ask the lead in your answer");
+      expect(template.instruction).toContain("ask_lead");
+      expect(template.instruction).toContain("request_job");
     }
   });
 
@@ -84,6 +92,66 @@ describe("release defaults of the job model", () => {
       tool: "handoff",
       verdict: "permit",
     });
+  });
+});
+
+describe("release defaults of bounds, risk, and review", () => {
+  it("allows one raise and one restart, and pauses after three failing steps", () => {
+    expect(ESCALATION_LIMITS).toEqual({ raises: 1, restarts: 1 });
+    expect(LOOP_LIMIT).toBe(3);
+    expect(NEAR_SAME_MAX_DISTANCE).toBe(0.1);
+    expect(EMPTY_REPLY_NUDGE).toBe(
+      "[secbot: your last reply was empty or cut off; continue the job or answer it]",
+    );
+  });
+
+  it("marks the tools that act, spend, or touch money, and the health template", () => {
+    expect(RISKY_TOOLS).toEqual({
+      household_change: "acts",
+      broker_call: "spends",
+      secret_get: "money",
+    });
+    expect(RISKY_TEMPLATES).toEqual(["health"]);
+  });
+
+  it("gives the result reviewer a strict JSON verdict and an untrusted result block", () => {
+    expect(RESULT_REVIEW_PROMPT.split("\n")[0]).toBe(
+      "You review one job result for a household assistant.",
+    );
+    expect(RESULT_REVIEW_PROMPT).toContain("<untrusted-result>");
+    expect(RESULT_REVIEW_PROMPT).toContain(
+      '{"verdict":"pass"|"reject","reason":"<one short sentence>"}',
+    );
+  });
+
+  it("tells the lead how to escalate, answer, ask the person, and mark risk", () => {
+    for (const word of [
+      "set_job",
+      "restart_job",
+      "job_transcript",
+      "answer_job",
+      "ask_person",
+      "mark_risky",
+      "in either order, once each",
+    ]) {
+      expect(LEAD_INSTRUCTIONS).toContain(word);
+    }
+  });
+
+  it("permits and thresholds every new tool as start_job is", () => {
+    for (const tool of [
+      "restart_job",
+      "answer_job",
+      "ask_person",
+      "mark_risky",
+      "job_transcript",
+      "ask_lead",
+      "request_job",
+      "search_old_job",
+    ]) {
+      expect(DEFAULT_PERSON_RULES).toContainEqual({ agent: "all", tool, verdict: "permit" });
+      expect(MARK_THRESHOLDS[tool]).toBe(MARK_THRESHOLDS.start_job);
+    }
   });
 });
 

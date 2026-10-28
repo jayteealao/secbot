@@ -525,7 +525,7 @@ afterEach(async () => {
 });
 
 describe("the rule store", () => {
-  it("seeds the release owner rules and the five default person rules once", async () => {
+  it("seeds the release owner rules and the default person rules once", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     test = await openTestCell();
     const first = await test.cell.rules();
@@ -536,6 +536,14 @@ describe("the rule store", () => {
     ]);
     expect(first.person.map((r) => [r.agent, r.tool, r.verdict, r.source])).toEqual([
       ["all", "start_job", "permit", "default"],
+      ["all", "restart_job", "permit", "default"],
+      ["all", "answer_job", "permit", "default"],
+      ["all", "ask_person", "permit", "default"],
+      ["all", "mark_risky", "permit", "default"],
+      ["all", "job_transcript", "permit", "default"],
+      ["all", "ask_lead", "permit", "default"],
+      ["all", "request_job", "permit", "default"],
+      ["all", "search_old_job", "permit", "default"],
       ["all", "handoff", "permit", "default"],
       ["all", "household_change", "permit", "default"],
       ["all", "set_reminder", "permit", "default"],
@@ -544,7 +552,7 @@ describe("the rule store", () => {
     await test.cell.removeRule("person", { agent: "all", tool: "search_history" });
     await test.reopen();
     const after = await test.cell.rules();
-    expect(after.person).toHaveLength(4);
+    expect(after.person).toHaveLength(12);
     expect(after.owner).toHaveLength(3);
   });
 
@@ -568,6 +576,14 @@ describe("the rule store", () => {
     ]);
     expect(after.person.map((r) => r.tool)).toEqual([
       "start_job",
+      "restart_job",
+      "answer_job",
+      "ask_person",
+      "mark_risky",
+      "job_transcript",
+      "ask_lead",
+      "request_job",
+      "search_old_job",
       "handoff",
       "household_change",
       "set_reminder",
