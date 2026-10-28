@@ -165,7 +165,10 @@ export {
   type WaitingCounts,
   waitingCounts,
 } from "./job-board.ts";
+export { createJobGate, type JobGateDeps } from "./job-gate.ts";
+export { JobHolds } from "./job-holds.ts";
 export { JOB_KIND } from "./job-task.ts";
+export { createJobToolsExtension, type JobToolsDeps } from "./job-tools.ts";
 export { doneRecord, jobLabel, jobRowLabel, liveJobs } from "./jobs.ts";
 export {
   ANSWER_MAX_CHARS as JOB_ANSWER_MAX_CHARS,
@@ -185,6 +188,7 @@ export {
   type UsageLine,
   type WaitingItem,
 } from "./limits.ts";
+export { failingStreak, nearSame } from "./loop-guard.ts";
 export type { RoleModel } from "./model-map.ts";
 export {
   addGuardUsage,
@@ -249,6 +253,7 @@ export {
   TIERS,
 } from "./release-defaults.ts";
 export { REMINDER_PREFIX, type ReminderPayload, scheduleReminder } from "./reminder.ts";
+export { createReviewTask, type ReviewTask, reviewModelFor } from "./result-review.ts";
 export {
   createReviewer,
   parseVerdict,
