@@ -19,7 +19,14 @@ import {
 } from "@earendil-works/pi-durable";
 import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
-import { JobBoardDoc, type JobRow, RoleModelsDoc, TemplatesDoc, TierSettingsDoc } from "./docs.ts";
+import {
+  JobBoardDoc,
+  type JobRow,
+  RoleModelsDoc,
+  StopDoc,
+  TemplatesDoc,
+  TierSettingsDoc,
+} from "./docs.ts";
 import {
   answerQuestion,
   blockReason,
@@ -47,6 +54,7 @@ import {
 } from "./receipts.ts";
 import { DEFAULT_JOB_EFFORT, JOB_EFFORTS, TIERS } from "./release-defaults.ts";
 import { createReviewTask, type ReviewTask, reviewHold, startReview } from "./result-review.ts";
+import { STOP_RUNNING } from "./stop.ts";
 import { appliedEffort, capOf, templateNamed, templatesOf, tierModelOf } from "./templates.ts";
 
 export interface JobsExtensionDeps {
@@ -285,6 +293,8 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         return refusal("A new job needs a title, a brief, and a template.");
       }
       const started = await api.commit(async (tx) => {
+        // No job starts while a stop runs.
+        if ((await tx.doc(StopDoc)).active !== null) return { error: STOP_RUNNING };
         if (args.request !== undefined) {
           const found = await rowOrError(tx, args.request);
           if ("error" in found) return found;
@@ -545,6 +555,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     execute: async (args, api, context) => {
       const at = deps.now();
       const changed = await api.commit(async (tx) => {
+        if ((await tx.doc(StopDoc)).active !== null) return { error: STOP_RUNNING };
         const found = await rowOrError(tx, args.job);
         if ("error" in found) return found;
         if (found.status === "done" || found.status === "stopped" || found.status === "queued") {

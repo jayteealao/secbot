@@ -157,4 +157,35 @@ describe("the stop", () => {
       last: { at: 5_000, by: "owner", jobs: 0, turn: false },
     });
   });
+  it("starts no job while the stop runs", { timeout: 20_000 }, async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const hold = createHold();
+    test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
+    const t = test;
+    hold.hold("research");
+    await lead(t, start("flights", "research"));
+    await until(() => hold.waiting("research") === 1);
+    let refused = "";
+    const answer = await stopJobs(
+      { harness: t.cell.harness, root: t.cell.root, person: "owner", now: Date.now },
+      "person",
+      BACKGROUND_CONTEXT,
+      {
+        afterLock: async () => {
+          await lead(t, start("train times", "research"));
+          refused = (await toolResultsOf(t.cell.root)).at(-1) ?? "";
+          // Released once the abort is marked: the held step then ends aborted.
+          setTimeout(() => hold.release("research"), 200);
+        },
+      },
+    );
+    expect(answer.jobs).toBe(1);
+    expect(refused).toBe(STOP_RUNNING);
+    const board = await t.cell.board();
+    expect(Object.keys(board.jobs)).toEqual(["1"]);
+    const jobs = (await t.cell.harness.inspect(BACKGROUND_CONTEXT)).tasks.filter(
+      ({ record }) => record.kind === "secbot.job" && record.state.status !== "terminal",
+    );
+    expect(jobs).toEqual([]);
+  });
 });
