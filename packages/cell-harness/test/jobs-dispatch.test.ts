@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ActivityPageDoc, JobBoardDoc } from "../src/docs.ts";
 import { createJobRow } from "../src/job-board.ts";
 import { createJobTask } from "../src/job-task.ts";
-import { createFauxGateway, loggedEvents, openTestCell, type TestCell } from "./fixtures.ts";
+import { createFauxGateway, loggedEvents, openTestCell, type TestCell, until } from "./fixtures.ts";
 import { JOB_BRIEF, jobResponder } from "./responders.ts";
 
 let test: TestCell | undefined;
@@ -55,7 +55,17 @@ describe("the job task", () => {
         },
       );
     }, BACKGROUND_CONTEXT);
-    await harness.waitForTask(taskId as TaskId<null>, BACKGROUND_CONTEXT);
+    // The task stays alive after the result, waiting for its 30-minute mark.
+    await until(
+      async () =>
+        (await harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs["1"]?.result != null,
+    );
+    expect(
+      (await harness.getTask(taskId as TaskId<null>, BACKGROUND_CONTEXT))?.state,
+    ).toMatchObject({
+      status: "running",
+      checkpoint: { phase: "await" },
+    });
 
     const board = await harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT);
     const row = board?.jobs["1"];

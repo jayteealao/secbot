@@ -6,7 +6,8 @@
  * - a routine's `wakeAt` (routines.ts);
  * - a generation retry's `until` and a deferred generation's `pollAt`
  *   (dist/harness/generation.js:124-141, 320-330, 370-380, task "pi.generation");
- * - a compaction retry's `until` (dist/harness/compaction.js:137-159, task "pi.compaction").
+ * - a compaction retry's `until` (dist/harness/compaction.js:137-159, task "pi.compaction");
+ * - a finished job's 30-minute result wake `wakeAt` (job-task.ts, task "secbot.job", phase `await`).
  * The cell sets its one celld alarm from these records only; nothing here keeps a timer list.
  *
  * Work waiting above a spending limit (budget-gate.ts) is listed in `secbot.budget-waits`; such a
@@ -21,7 +22,16 @@ export const ROUTINE_KIND_PREFIX = "secbot.routine:";
 /** How far ahead the cell wakes itself while live work without a timer runs (a model call, a job). */
 export const LIVENESS_WAKE_MS = 60_000;
 
-export type WakeKind = "routine" | "model-retry" | "model-poll" | "compaction-retry" | "budget";
+export type WakeKind =
+  | "routine"
+  | "model-retry"
+  | "model-poll"
+  | "compaction-retry"
+  | "budget"
+  | "job";
+
+/** The job task's kind (job-task.ts); its `await` phase holds the 30-minute wake of a result. */
+export const JOB_TASK_KIND = "secbot.job";
 
 /** Tasks waiting above a limit, and when the month resets. */
 export interface BudgetWaits {
@@ -89,6 +99,9 @@ export function wakesOf(
       } else if (record.kind === "pi.generation" && checkpoint.phase === "poll") {
         const at = numberAt(checkpoint, "pollAt");
         if (at !== undefined) wake = { taskId, kind: "model-poll", source: record.kind, at };
+      } else if (record.kind === JOB_TASK_KIND && checkpoint.phase === "await") {
+        const at = numberAt(checkpoint, "wakeAt");
+        if (at !== undefined) wake = { taskId, kind: "job", source: record.kind, at };
       } else if (record.kind === "pi.compaction" && checkpoint.phase === "retry") {
         const at = numberAt(checkpoint, "until");
         if (at !== undefined) wake = { taskId, kind: "compaction-retry", source: record.kind, at };

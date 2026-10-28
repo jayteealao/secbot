@@ -9,12 +9,15 @@
  * Pattern adapted from the hand-off reporter (handoff.ts): request ids made from the job number,
  * and one commit that decides the outcome, so a restart submits once and stores once.
  */
+
+import type { Context } from "@earendil-works/chord";
 import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
   AssistantEntry,
   configure,
   defineTask,
   type Extension,
+  type TaskRuntime,
   type Tx,
   UsageDoc,
 } from "@earendil-works/pi-durable";
@@ -22,17 +25,22 @@ import { appendRecord } from "./activity.ts";
 import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
 import { JobBoardDoc, type JobRow, type ResultKind, RoleModelsDoc, TemplatesDoc } from "./docs.ts";
-import { endRow, recordCost, storeResult } from "./job-board.ts";
+import { ENDED, endRow, recordCost, storeResult } from "./job-board.ts";
 import { doneRecord, jobRowLabel } from "./jobs.ts";
 import { modelRef } from "./model-map.ts";
 import { budgetOf, conversationTotal } from "./month-ledger.ts";
+import { RESULT_WAKE_MS } from "./release-defaults.ts";
 import { templatesOf, tierModelOf } from "./templates.ts";
 
 /** The job task's kind. */
 export const JOB_KIND = "secbot.job";
 
 export type JobInput = { number: number };
-export type JobState = { phase: "open" } | { phase: "run" };
+export type JobState =
+  | { phase: "open" }
+  | { phase: "run" }
+  | { phase: "notify"; kind: ResultKind }
+  | { phase: "await"; wakeAt: number };
 
 export interface JobTaskDeps {
   readonly person: string;
@@ -109,6 +117,56 @@ async function finish(
 
 export function createJobTask(deps: JobTaskDeps) {
   const { person } = deps;
+  /**
+   * One wake notice to the lead, without the result: a follow-up with a request id made from the
+   * job and the reason, so a restart sends it once; the commit that sets `wokeAt` ends the task.
+   * The lead's answer to it is chat spend, so it waits on the person's limit first.
+   */
+  const wake = async (
+    n: number,
+    kind: ResultKind | "late",
+    reason: "immediate" | "late",
+    runtime: WakeRuntime,
+    context: Context,
+  ) => {
+    await deps
+      .gate()
+      ?.waitUntilUnder(
+        { budget: "person", taskId: String(runtime.taskId), what: `job ${n} result` },
+        context,
+      );
+    const lead = await runtime.conversation(runtime.conversationId, context);
+    await lead?.submit(
+      {
+        type: "input",
+        content:
+          kind === "late"
+            ? `[job ${n} waited 30 minutes: pull it with job_result]`
+            : `[job ${n} ${kind}: pull it with job_result]`,
+        whenBusy: "followUp",
+        requestId: `wake:${n}:${kind}`,
+      },
+      context,
+    );
+    let waited = 0;
+    let resultKind: string = kind;
+    await runtime.commit(async (tx) => {
+      const result = (await tx.doc(JobBoardDoc)).jobs[String(n)]?.result;
+      if (result !== undefined && result !== null) {
+        result.wokeAt ??= runtime.now();
+        waited = Math.max(0, runtime.now() - result.at);
+        resultKind = result.kind;
+      }
+      return { status: "terminal", outcome: { status: "completed", result: null } };
+    }, context);
+    logEvent("job.wake_sent", {
+      cell: person,
+      job: n,
+      kind: resultKind,
+      reason,
+      waited_ms: waited,
+    });
+  };
   return defineTask<JobInput, JobState, null>({
     name: JOB_KIND,
     version: 1,
@@ -163,16 +221,14 @@ export function createJobTask(deps: JobTaskDeps) {
           }, context);
           return;
         }
-        await deps
-          .gate()
-          ?.waitUntilUnder(
-            {
-              budget: budgetOf(row.template),
-              taskId: String(job.id),
-              what: `job ${n} ${row.template}`,
-            },
-            context,
-          );
+        await deps.gate()?.waitUntilUnder(
+          {
+            budget: budgetOf(row.template),
+            taskId: String(job.id),
+            what: `job ${n} ${row.template}`,
+          },
+          context,
+        );
         const conversation = await runtime.conversation(row.conversationId, context);
         if (conversation === undefined) throw new Error(`job ${n}: its conversation is missing`);
         const submission = await conversation.submit(
@@ -209,13 +265,19 @@ export function createJobTask(deps: JobTaskDeps) {
             { status, kind, text },
             runtime.now(),
           );
+          // A result a producer stored first (a question, a risky mark) keeps its kind.
+          const stored = row.result ?? { kind, at: runtime.now() };
           ended = {
             row: { ...row },
-            kind,
+            kind: stored.kind,
             chars: text.length,
             outcome: status === "done" ? "answered" : "failed",
           };
-          return { status: "terminal", outcome: { status: "completed", result: null } };
+          const next: JobState =
+            stored.kind === "routine"
+              ? { phase: "await", wakeAt: stored.at + RESULT_WAKE_MS }
+              : { phase: "notify", kind: stored.kind };
+          return { status: "running", checkpoint: next };
         }, context);
         if (ended !== undefined) {
           logEvent("job.finished", {
@@ -235,12 +297,30 @@ export function createJobTask(deps: JobTaskDeps) {
           });
         }
       },
+      notify: async (job, runtime, context) => {
+        const { kind } = job.state.checkpoint;
+        await wake(job.input.number, kind, "immediate", runtime, context);
+      },
+      await: async (job, runtime, context) => {
+        const n = job.input.number;
+        await runtime.sleep(job.state.checkpoint.wakeAt, context);
+        const pulled = (await runtime.snapshot(JobBoardDoc, context))?.jobs[String(n)]?.result;
+        if (pulled === undefined || pulled === null || pulled.pulledAt !== null) {
+          await runtime.commit(
+            () => ({ status: "terminal", outcome: { status: "completed", result: null } }),
+            context,
+          );
+          return;
+        }
+        await wake(n, "late", "late", runtime, context);
+      },
     },
     abort: async (job, runtime, context) => {
       const n = job.input.number;
       let row: JobRow | undefined;
       await runtime.commit(async (tx) => {
-        if ((await tx.doc(JobBoardDoc)).jobs[String(n)] !== undefined) {
+        const current = (await tx.doc(JobBoardDoc)).jobs[String(n)];
+        if (current !== undefined && !ENDED.has(current.status)) {
           row = {
             ...(await finish(tx, deps, String(job.id), n, { status: "stopped" }, runtime.now())),
           };
@@ -263,3 +343,9 @@ export function createJobTask(deps: JobTaskDeps) {
 }
 
 export type JobTask = ReturnType<typeof createJobTask>;
+
+/** What a wake notice needs of a task invocation. */
+type WakeRuntime = Pick<
+  TaskRuntime<JobInput, JobState, null, object>,
+  "taskId" | "conversationId" | "conversation" | "commit" | "now"
+>;
