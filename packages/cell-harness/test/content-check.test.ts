@@ -4,12 +4,19 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type JsonObject, LiveDoc } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { checkContent, chunkContent, contentCheckWraps } from "../src/content-check.ts";
+import {
+  checkContent,
+  chunkContent,
+  contentCheckWraps,
+  createContentCheckExtension,
+  WITHHELD_TEXT,
+} from "../src/content-check.ts";
 import {
   type ContentAnswer,
   DecisionFailure,
   type DecisionFailureCause,
   type DecisionModel,
+  type DecisionModels,
 } from "../src/decision-model.ts";
 import { JobBoardDoc } from "../src/docs.ts";
 import {
@@ -28,10 +35,12 @@ import {
   fauxText,
   fauxToolCall,
   openTestCell,
+  passingDecision,
   type Responder,
   type TestCell,
   until,
 } from "./fixtures.ts";
+import { toolResultsOf, wakeNoticesOf } from "./job-helpers.ts";
 import { jobResponder, RESEARCH_JOB } from "./responders.ts";
 
 const SIZES = {
@@ -308,4 +317,111 @@ describe("the reading-tool wrap", () => {
       expect((await t.cell.board()).jobs["1"]?.outside?.kinds).toEqual(["page"]);
     },
   );
+});
+
+const PAGES = {
+  clean: "Ferry timetable: boats leave at 9:00 and 14:30. Book now at the harbour office.",
+  injected: `Lentil soup: simmer for 30 minutes. ${ORDER}`,
+};
+
+/** A research job that reads `page` with the fixture tool, then answers. */
+const readsPage =
+  (page: string): Responder =>
+  (request) => {
+    if (request.role === "research" && request.last?.role !== "toolResult") {
+      return fauxAssistantMessage([fauxToolCall("read_fixture_page", { page })], {
+        stopReason: "toolUse",
+      });
+    }
+    if (request.role === "research") return fauxAssistantMessage([fauxText("Read it.")]);
+    return jobResponder(request);
+  };
+
+/** Decision models whose content check finds `ORDER` (or throws, or is clean). */
+const contentDecisions =
+  (judge: (content: string) => ContentAnswer): DecisionModels =>
+  (adapter) => ({
+    ...passingDecision(adapter),
+    checkContent: async (state) => judge(String(state.content)),
+  });
+const findsOrder = contentDecisions((content) => answer(content.includes(ORDER) ? "hit" : "clean"));
+
+describe("the afterTool check", () => {
+  let test: TestCell | undefined;
+  afterEach(async () => {
+    await test?.cell.close();
+    test = undefined;
+    vi.restoreAllMocks();
+  });
+
+  const open = async (page: string, decision: DecisionModels) => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const holder: { t?: TestCell } = {};
+    test = await openTestCell({
+      gateway: createFauxGateway(readsPage(page)),
+      extensions: [
+        createFixtureReaderExtension(PAGES),
+        createContentCheckExtension({
+          person: "owner",
+          harness: () => {
+            if (holder.t === undefined) throw new Error("not open");
+            return holder.t.cell.harness;
+          },
+          decision,
+          readers: {},
+          now: () => 7_000,
+        }),
+      ],
+    });
+    holder.t = test;
+    await (await test.cell.submit(RESEARCH_JOB, "read-1")).wait(BACKGROUND_CONTEXT);
+    return test;
+  };
+  const jobConversation = async (t: TestCell) => {
+    const id = (await t.cell.board()).jobs["1"]?.conversationId;
+    const conversation =
+      id == null ? undefined : await t.cell.harness.conversation(id, BACKGROUND_CONTEXT);
+    if (conversation === undefined) throw new Error("no job conversation");
+    return conversation;
+  };
+
+  it("keeps clean content as its text only and lets the job go on", async () => {
+    const t = await open("clean", findsOrder);
+    await until(async () => (await t.cell.board()).jobs["1"]?.status === "done");
+    expect(await toolResultsOf(await jobConversation(t))).toEqual([PAGES.clean]);
+    expect(await wakeNoticesOf(t.cell.root)).not.toContainEqual(expect.stringContaining("blocked"));
+  });
+
+  it("blocks on a hit once: the row, one lead notice, and only the withheld line kept", async () => {
+    const t = await open("injected", findsOrder);
+    await until(async () => (await t.cell.board()).jobs["1"]?.status === "blocked");
+    await until(async () => (await toolResultsOf(await jobConversation(t))).length > 0);
+    expect((await t.cell.board()).jobs["1"]).toMatchObject({
+      status: "blocked",
+      block: { cause: "hit", kind: "page", tool: "read_fixture_page", chunk: 0, at: 7_000 },
+      result: {
+        kind: "failure",
+        text: "a page tried to give the agent orders; nothing from it was used",
+      },
+    });
+    expect(await toolResultsOf(await jobConversation(t))).toEqual([WITHHELD_TEXT]);
+    await until(async () => (await wakeNoticesOf(t.cell.root)).length > 0);
+    expect(
+      (await wakeNoticesOf(t.cell.root)).filter((notice) => notice.includes("blocked")),
+    ).toEqual([
+      "[job 1 blocked: a page tried to give the agent orders; nothing from it was used; read it with job_result]",
+    ]);
+  });
+
+  it("blocks with error when the decision model throws", async () => {
+    const throwing = contentDecisions(() => {
+      throw new Error("decision stage broke");
+    });
+    const t = await open("clean", throwing);
+    await until(async () => (await t.cell.board()).jobs["1"]?.status === "blocked");
+    expect((await t.cell.board()).jobs["1"]?.block).toMatchObject({ cause: "error", chunk: 0 });
+    expect((await t.cell.board()).jobs["1"]?.result?.text).toBe(
+      "the content check did not answer; stopped to be safe",
+    );
+  });
 });

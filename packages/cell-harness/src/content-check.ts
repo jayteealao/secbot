@@ -4,15 +4,40 @@
  * overlapping chunks, every chunk is checked, and a hit, a timeout, or an error stops the job: the
  * check fails closed, in every guard mode.
  */
+import type { Context } from "@earendil-works/chord";
+import { withoutAbortSignal } from "@earendil-works/chord/context";
 import type { Usage } from "@earendil-works/pi-ai";
-import { type ToolRegistration, type Wrap, wrapTool } from "@earendil-works/pi-durable";
-import { buildContentState, DecisionFailure, type DecisionModel } from "./decision-model.ts";
-import { markOutside } from "./job-board.ts";
+import {
+  type ConversationId,
+  defineExtension,
+  type Extension,
+  type Harness,
+  hook,
+  ROOT_CONVERSATION_ID,
+  type TaskId,
+  type ToolExecutionResult,
+  type ToolRegistration,
+  ToolTask,
+  type Wrap,
+  wrapTool,
+} from "@earendil-works/pi-durable";
+import {
+  buildContentState,
+  DecisionFailure,
+  type DecisionModel,
+  type DecisionModels,
+} from "./decision-model.ts";
+import { type JobBlock, JobBoardDoc } from "./docs.ts";
+import { readDecisionAdapter } from "./guard-settings.ts";
+import { blockReason, blockRow, markOutside } from "./job-board.ts";
+import { addGuardUsage } from "./month-ledger.ts";
+import { readingKindOf } from "./outside-tools.ts";
 import {
   CONTENT_CHECK_MAX_BYTES,
   CONTENT_CHECK_PARALLEL,
   CONTENT_CHUNK_BYTES,
   CONTENT_CHUNK_OVERLAP_BYTES,
+  OUTSIDE_CONTENT_TOOLS,
   type OutsideKind,
 } from "./release-defaults.ts";
 import { jobOf } from "./telemetry.ts";
@@ -248,4 +273,161 @@ export function contentCheckWraps(
       },
     })),
   );
+}
+
+/** What a job's conversation keeps in place of content the check stopped. */
+export const WITHHELD_TEXT = "[secbot: this content was withheld; the job is stopped]";
+
+/** The note after content that was cut at the check's maximum. */
+export const CUT_NOTE = "\n[secbot: the rest was cut at 50 KB and not read]";
+
+/** The lead's wake notice for a blocked job. */
+export const blockedNotice = (n: number, block: JobBlock): string =>
+  `[job ${n} blocked: ${blockReason(block)}; read it with job_result]`;
+
+const withheld = (): ToolExecutionResult => ({
+  content: [{ type: "text", text: WITHHELD_TEXT }],
+  isError: true,
+  diagnostics: [],
+});
+
+export interface ContentCheckDeps {
+  readonly person: string;
+  readonly harness: () => Harness;
+  /** The decision models by adapter; the cell's current adapter answers (as for the guard). */
+  readonly decision: DecisionModels;
+  /** Reading tools the cell declares beside the release table. */
+  readonly readers: Readonly<Record<string, OutsideKind>>;
+  readonly now: () => number;
+}
+
+/**
+ * The text a reading tool returned, as one string: every text part (an error result too). A part
+ * that is not text cannot be checked, so it gives null. An error result with no text is read
+ * from its error diagnostics, which may quote the outside source.
+ */
+function resultText(result: ToolExecutionResult): string | null {
+  const parts = result.content ?? [];
+  if (parts.some((part) => part.type !== "text")) return null;
+  const text = parts.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+  if (text !== "" || result.isError !== true) return text;
+  return (result.diagnostics ?? [])
+    .filter((diagnostic) => diagnostic.severity === "error")
+    .map((diagnostic) => diagnostic.message)
+    .join("\n");
+}
+
+/**
+ * The content check on job conversations: the reading tools' wraps (`contentCheckWraps`) and an
+ * `afterTool` hook that checks a reading tool's result before the conversation keeps it. It never
+ * reads the guard mode: it stops a job in shadow mode too. A clean result is kept as its checked
+ * text only (no details or diagnostics). Anything else (a hit, a timeout, an error, a part that is
+ * not text, or any throw but an abort) blocks the job in one commit, tells the lead once, stops
+ * the job's task, and keeps only a withheld line.
+ */
+export function createContentCheckExtension(deps: ContentCheckDeps): Extension {
+  const { harness, now } = deps;
+  const readers = { ...OUTSIDE_CONTENT_TOOLS, ...deps.readers };
+
+  /**
+   * Blocks the job's current run in one commit (with the check's usage), tells the lead once, and
+   * stops the job's task once this read's tool task has settled with the withheld line (an abort
+   * now would settle the read as aborted instead). The job gate stops a blocked job's task too, at
+   * its next step, so a crash before the stop does not let it run on.
+   */
+  const block = async (
+    n: number,
+    api: { readonly conversationId: ConversationId; readonly taskId: TaskId },
+    stop: JobBlock,
+    usages: readonly Usage[],
+    context: Context,
+  ) => {
+    // The job may be stopping already: the block commits whatever happens to the call.
+    const quiet = withoutAbortSignal(context);
+    const row = await harness().commit(async (tx) => {
+      for (const usage of usages) await addGuardUsage(tx, api.conversationId, "decision", usage);
+      const blocked = await blockRow(tx, n, api.conversationId, stop);
+      return blocked === null ? null : { taskId: blocked.taskId };
+    }, quiet);
+    if (row === null) return;
+    const lead = await harness().conversation(ROOT_CONVERSATION_ID, quiet);
+    await lead?.submit(
+      {
+        type: "input",
+        content: blockedNotice(n, stop),
+        whenBusy: "followUp",
+        requestId: `blocked:${n}:${String(api.conversationId)}`,
+      },
+      quiet,
+    );
+    const jobTask = row.taskId;
+    if (jobTask === null) return;
+    void harness()
+      .waitForTask(api.taskId, quiet)
+      .then(() => harness().abortTask(jobTask, quiet))
+      // The cell closing first leaves the stop to the job gate on the next open.
+      .catch(() => {});
+  };
+
+  return defineExtension({
+    name: "secbot-content-check",
+    wraps: contentCheckWraps(readers, now),
+    hooks: [
+      hook(ToolTask, {
+        afterTool: async (call, result, api, context) => {
+          const kind = readingKindOf(call.name, readers);
+          if (kind === null) return undefined;
+          const n = await jobOf(api, api.conversationId, context);
+          if (n === null) return undefined;
+          const row = (await api.snapshot(JobBoardDoc, context))?.jobs[String(n)];
+          // A re-run of a read after a crash, or a read racing the stop: never kept.
+          if (row?.status === "blocked") return withheld();
+          const failed = (cause: "error" | "timeout" | "hit", chunk: number | null): JobBlock => ({
+            cause,
+            kind,
+            tool: call.name,
+            chunk,
+            at: now(),
+          });
+          try {
+            const text = resultText(result);
+            if (text === null) {
+              await block(n, api, failed("error", null), [], context);
+              return withheld();
+            }
+            const model = deps.decision(await readDecisionAdapter(api, context));
+            const verdict = await checkContent(
+              model,
+              { kind, tool: call.name, text },
+              context.abortSignal,
+            );
+            if (verdict.outcome !== "clean") {
+              const stop = failed(verdict.outcome, verdict.chunk);
+              await block(n, api, stop, verdict.usages, context);
+              return withheld();
+            }
+            if (verdict.usages.length > 0) {
+              await harness().commit(async (tx) => {
+                for (const usage of verdict.usages) {
+                  await addGuardUsage(tx, api.conversationId, "decision", usage);
+                }
+              }, context);
+            }
+            return {
+              content: [
+                { type: "text", text: verdict.checkedText + (verdict.cut ? CUT_NOTE : "") },
+              ],
+              ...(result.isError === undefined ? {} : { isError: result.isError }),
+              ...(result.usage === undefined ? {} : { usage: result.usage }),
+              diagnostics: [],
+            };
+          } catch (error) {
+            if (context.abortSignal?.aborted) throw error;
+            await block(n, api, failed("error", null), [], context);
+            return withheld();
+          }
+        },
+      }),
+    ],
+  });
 }
