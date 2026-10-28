@@ -146,3 +146,20 @@ export function createHold(): Hold {
     },
   };
 }
+
+/**
+ * A result reviewer that checks the months: it rejects a result naming a month the brief does not
+ * (the brief asks for May dates and the result quotes June prices) and passes any other.
+ */
+export function monthChecker(request: FauxRequest): {
+  verdict: "pass" | "reject";
+  reason: string;
+} {
+  const brief = /^Brief:\n([\s\S]*?)\n\n<untrusted-result>/.exec(request.lastText)?.[1] ?? "";
+  const result = request.lastText.slice(brief.length);
+  const months = ["May", "June"].filter((month) => result.includes(month));
+  const stray = months.find((month) => !brief.includes(month));
+  return stray === undefined
+    ? { verdict: "pass", reason: "the dates match the brief" }
+    : { verdict: "reject", reason: `the brief asks for other dates; the result quotes ${stray}` };
+}
