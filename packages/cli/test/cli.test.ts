@@ -1,7 +1,8 @@
 // The CLI against an in-process fake cell: chat streams and shows a follow-up that arrives while
 // the session is open, a dropped connection resends unacknowledged lines under the
 // same request id, missed lists in order, model set refuses an unknown id with exit 1,
-// specialist add, device new prints only the hash line, and a refused key fails.
+// model cap changes a tier's per-job cap, specialist add adds a job template and the cell's
+// refusal of a model reaches stderr, device new prints only the hash line, and a refused key fails.
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -198,25 +199,55 @@ describe("secbot commands", () => {
     expect(await run(["model", "set", "lead"], { environment, io: usage.io })).toBe(2);
   });
 
-  it("adds a specialist with an instruction and a model", async () => {
+  it("shows tier caps and changes one, refusing an unknown tier with exit 1", async () => {
+    const { environment } = await setup();
+    const listed = testIo();
+    expect(await run(["model", "list"], { environment, io: listed.io })).toBe(0);
+    expect(listed.out()).toContain(
+      "cheap     anthropic/claude-haiku-4.5  (release default)  cap $0.25 per job",
+    );
+    const changed = testIo();
+    expect(await run(["model", "cap", "mid", "2.5"], { environment, io: changed.io })).toBe(0);
+    expect(changed.out()).toBe("mid jobs now cap at $2.5\n");
+    expect(cell?.calls.at(-1)).toMatchObject({
+      method: "PUT",
+      path: "/v1/cells/owner/tiers/mid/cap",
+      body: { usd: "2.5" },
+    });
+    const refused = testIo();
+    expect(await run(["model", "cap", "huge", "1"], { environment, io: refused.io })).toBe(1);
+    expect(refused.err()).toContain('unknown tier "huge"');
+    const usage = testIo();
+    expect(await run(["model", "cap", "mid"], { environment, io: usage.io })).toBe(2);
+  });
+
+  it("adds a job template, and the cell's refusal of a model reaches stderr", async () => {
     const { environment } = await setup();
     const { io, out } = testIo();
-    const argv = [
-      "specialist",
-      "add",
-      "tax",
-      "--instruction",
-      "Track forms.",
-      "--model",
-      "anthropic/claude-haiku-4.5",
-    ];
-    expect(await run(argv, { environment, io })).toBe(0);
-    expect(out()).toContain("added tax");
+    expect(
+      await run(["specialist", "add", "tax", "--instruction", "Track forms."], { environment, io }),
+    ).toBe(0);
+    expect(out()).toBe(
+      "added tax as a job template; the lead can start jobs from it from its next turn\n",
+    );
     expect(cell?.calls.at(-1)).toMatchObject({
       method: "POST",
       path: "/v1/cells/owner/specialists",
-      body: { name: "tax", instruction: "Track forms.", model: "anthropic/claude-haiku-4.5" },
+      body: { name: "tax", instruction: "Track forms." },
     });
+    const refused = testIo();
+    const argv = [
+      "specialist",
+      "add",
+      "garden",
+      "--instruction",
+      "Plants.",
+      "--model",
+      "anthropic/claude-haiku-4.5",
+    ];
+    expect(await run(argv, { environment, io: refused.io })).toBe(1);
+    expect(refused.err()).toContain("a template starts on a tier");
+    expect(refused.out()).toBe("");
   });
 
   it("explains a missing cell address and shows usage for an unknown command", async () => {

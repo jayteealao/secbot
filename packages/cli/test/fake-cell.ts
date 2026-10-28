@@ -319,7 +319,12 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
         return reply(200, {
           roles: [
             { role: "lead", model: "anthropic/claude-opus-5.5", source: "release default" },
-            { role: "research", model: "anthropic/claude-haiku-4.5", source: "release default" },
+            {
+              role: "cheap",
+              model: "anthropic/claude-haiku-4.5",
+              source: "release default",
+              capUsd: 0.25,
+            },
             { role: "reviewer", model: "anthropic/claude-sonnet-5.5", source: "release default" },
           ],
         });
@@ -332,8 +337,21 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       }
       const guardRoute = /^\/(rules|activity)(\?.*)?$/.exec(route);
       if (guardRoute !== null) return guard("person", guardRoute[1] ?? "");
-      if (route === "/specialists" && request.method === "POST")
+      const cap = /^\/tiers\/([a-z]+)\/cap$/.exec(route);
+      if (cap !== null && request.method === "PUT") {
+        if (cap[1] !== "cheap" && cap[1] !== "mid" && cap[1] !== "frontier")
+          return reply(400, { error: `unknown tier "${cap[1]}": use cheap, mid, frontier` });
+        return reply(200, { tier: cap[1], capUsd: Number(body?.usd) });
+      }
+      if (route === "/specialists" && request.method === "POST") {
+        if (body?.model !== undefined) {
+          return reply(400, {
+            error:
+              "a template starts on a tier; the lead picks the tier per job and the owner maps tiers to models",
+          });
+        }
         return reply(201, { name: body?.name, status: "added" });
+      }
       return reply(404, { error: "not found" });
     });
   });

@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 /**
  * secbot: the owner's command-line client. It talks to the owner's own cell only (the
- * person in the device file). It has no option that chooses a specialist: every chat line goes to
- * the lead, and the lead decides on a hand-off.
+ * person in the device file). It has no option that chooses a job template: every chat line goes
+ * to the lead, and the lead decides which jobs to start.
  *
  *   secbot chat                             (answer a held call: /allow N, /always N, /deny N)
  *   secbot missed
  *   secbot model list
  *   secbot model set <role> <model-id>
- *   secbot specialist add <name> --instruction "<text>" [--model <model-id>]
+ *   secbot model cap <tier> <usd>
+ *   secbot specialist add <name> --instruction "<text>"   (a job template, on the cheap tier)
  *   secbot device new <name>
  *   secbot rules list | add | remove        (owner rules: --owner --person <name>)
  *   secbot activity [--month YYYY-MM] [--page N]   (another person: --person <name>)
@@ -33,7 +34,7 @@ import { deviceNew } from "./commands/device.ts";
 import { limits } from "./commands/limits.ts";
 import { missed } from "./commands/missed.ts";
 import { mode } from "./commands/mode.ts";
-import { modelList, modelSet } from "./commands/model.ts";
+import { modelCap, modelList, modelSet } from "./commands/model.ts";
 import {
   deviceTarget,
   type GuardTarget,
@@ -54,7 +55,10 @@ const USAGE = `usage:
   secbot missed
   secbot model list
   secbot model set <role> <model-id>
-  secbot specialist add <name> --instruction "<text>" [--model <model-id>]
+      a role is the lead, a job tier (cheap, mid, frontier), or the reviewer
+  secbot model cap <tier> <usd>
+  secbot specialist add <name> --instruction "<text>"
+      adds a job template; its jobs start on the cheap tier
   secbot device new <name>
   secbot rules list
   secbot rules add <agent> <tool> <permit|ask-first|prohibit> [match]
@@ -73,7 +77,7 @@ const USAGE = `usage:
   secbot limits set <person> <usd>                  (operator key)
   secbot limits developer <usd>                     (operator key)
   secbot limits zone <IANA time zone>               (operator key)
-      above a limit, hand-offs, routines, and reminders wait; chat with the
+      above a limit, jobs, routines, and reminders wait; chat with the
       lead continues; nothing is dropped
   secbot secrets list [--person <name> (operator key)]
   secbot secrets grant <secret> <agent>
@@ -148,6 +152,8 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
     if (command === "model" && sub === "list") return await modelList(await client(), io);
     if (command === "model" && sub === "set")
       return await modelSet(await client(), io, rest[0], rest[1]);
+    if (command === "model" && sub === "cap")
+      return await modelCap(await client(), io, rest[0], rest[1]);
     if (command === "specialist" && sub === "add") {
       return await specialistAdd(await client(), io, rest[0], values.instruction, values.model);
     }
