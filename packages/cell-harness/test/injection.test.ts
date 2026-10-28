@@ -4,10 +4,17 @@
 // stops the job, keeps nothing of the page, and tells the lead.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Usage } from "@earendil-works/pi-ai";
-import { type Conversation, UsageDoc } from "@earendil-works/pi-durable";
+import {
+  type Conversation,
+  type HookApi,
+  type TaskId,
+  type ToolHooks,
+  UsageDoc,
+} from "@earendil-works/pi-durable";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CUT_NOTE, chunkContent, READ_SIZES, WITHHELD_TEXT } from "../src/content-check.ts";
 import { createDecisionModels } from "../src/decision-model.ts";
+import { JobBoardDoc } from "../src/docs.ts";
 import { readGuardMode } from "../src/guard-settings.ts";
 import { CONTENT_CHECK_MAX_BYTES, GUARD_USAGE_KEYS } from "../src/release-defaults.ts";
 import { leadCalls } from "./escalation-helpers.ts";
@@ -215,5 +222,56 @@ describe("content past one chunk (AC-26)", () => {
     expect(new TextEncoder().encode(kept[0] ?? "").length).toBeLessThanOrEqual(
       CONTENT_CHECK_MAX_BYTES,
     );
+  });
+});
+
+/** The content check's `afterTool` handler, from a cell's job list. */
+function afterToolOf(t: TestCell): ToolHooks["afterTool"] {
+  const extension = t.cell.extensions.job.find((each) => each.name === "secbot-content-check");
+  const handlers = (extension as { hooks?: { handlers: object }[] } | undefined)?.hooks?.[0]
+    ?.handlers as Partial<ToolHooks> | undefined;
+  if (handlers?.afterTool === undefined) throw new Error("no afterTool hook");
+  return handlers.afterTool.bind(handlers);
+}
+
+describe("a read run again after a crash", () => {
+  it("is withheld at once when the job is already blocked, with no check", async () => {
+    const t = await readJob("clean");
+    await until(async () => (await row(t))?.status === "done");
+    const conversationId = (await row(t))?.conversationId;
+    if (conversationId == null) throw new Error("no job conversation");
+    // The block committed before the crash; the safe read runs again on recovery.
+    await t.cell.harness.commit(async (tx) => {
+      const job = (await tx.doc(JobBoardDoc)).jobs["1"];
+      if (job === undefined) throw new Error("no job");
+      job.status = "blocked";
+      job.block = { cause: "hit", kind: "page", tool: "read_fixture_page", chunk: 0, at: 1 };
+    }, BACKGROUND_CONTEXT);
+    const asked = contentRequests().length;
+    const harness = t.cell.harness;
+    const api = {
+      taskId: "77" as unknown as TaskId,
+      conversationId,
+      snapshot: harness.snapshot.bind(harness),
+      snapshotAsOf: harness.snapshotAsOf.bind(harness),
+      memo: (() => Promise.resolve(undefined)) as HookApi["memo"],
+    } as HookApi;
+    const result = await afterToolOf(t)(
+      {
+        type: "toolCall",
+        id: "call-again",
+        name: "read_fixture_page",
+        arguments: { page: "clean" },
+      },
+      { content: [{ type: "text", text: FIXTURE_PAGES.clean }] },
+      api,
+      BACKGROUND_CONTEXT,
+    );
+    expect(result).toEqual({
+      content: [{ type: "text", text: WITHHELD_TEXT }],
+      isError: true,
+      diagnostics: [],
+    });
+    expect(contentRequests()).toHaveLength(asked);
   });
 });
