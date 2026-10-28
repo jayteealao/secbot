@@ -111,9 +111,17 @@ export function jobStateDetails(row: JobRow): string {
   return details.length === 0 ? "" : ` (${details.join("; ")})`;
 }
 
+/** A job's priority word: `urgent`, `due <date>`, `routine`, or `research`. */
+export const priorityWord = (row: Pick<JobRow, "priority" | "deadline">): string =>
+  row.priority === "deadline"
+    ? row.deadline === null
+      ? "routine"
+      : `due ${row.deadline}`
+    : row.priority;
+
 /** A job's line in the jobs section. */
 const jobLine = (row: JobRow) =>
-  `#${row.number} ${row.template} ${row.tier}/${row.effort.applied} ${row.status} $${row.cost.toFixed(2)}/$${row.cap} ${row.title}${jobStateDetails(row)}`;
+  `#${row.number} ${row.template} ${row.tier}/${row.effort.applied} ${row.status} ${priorityWord(row)} $${row.cost.toFixed(2)}/$${row.cap} ${row.title}${jobStateDetails(row)}`;
 
 /**
  * The jobs section: the templates with their start tiers, each live job (and each whose result is
@@ -132,10 +140,11 @@ export function jobsSection(
   const reviewing = Object.values(board.jobs).filter(
     (row) => ENDED.has(row.status) && row.review?.status === "running",
   );
-  const live = [...liveRows(board), ...reviewing].sort((a, b) => a.number - b.number);
+  // Live jobs in the order they run (the person can reorder them), then those under review.
+  const live = [...liveRows(board), ...reviewing];
   if (live.length === 0) lines.push("No live jobs.");
   else {
-    lines.push("Live jobs:");
+    lines.push("Live jobs, in queue order:");
     for (const row of live) lines.push(jobLine(row));
   }
   const blocked = Object.values(board.jobs)
@@ -183,6 +192,7 @@ export function createLeadExtension(
           nextNumber: 1,
           jobs: {},
           byConversation: {},
+          queue: [],
         };
         const custom = (await input.read.snapshot(TemplatesDoc, context))?.custom ?? {};
         return jobsSection(board, templatesOf(custom), await openReceipts(input.read, context));

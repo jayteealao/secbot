@@ -1,10 +1,14 @@
 // The lead's prompt sections: the bookmark first (only while one exists), the time, and the jobs
 // section with templates, live rows, a count of the rest, and the results waiting by kind.
-import type { ConversationId, TaskId } from "@earendil-works/pi-durable";
-import { describe, expect, it } from "vitest";
-import { emptyJobExtras, type JobRow } from "../src/docs.ts";
+
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { ConversationId, TaskId, Tx } from "@earendil-works/pi-durable";
+import { describe, expect, it, vi } from "vitest";
+import { emptyJobExtras, JobBoardDoc, type JobRow } from "../src/docs.ts";
+import { type BoardState, markUrgent, moveBefore, setDeadline } from "../src/job-board.ts";
 import { bookmarkSection, createLeadExtension, jobsSection } from "../src/sections.ts";
 import { templatesOf } from "../src/templates.ts";
+import { openTestCell } from "./fixtures.ts";
 
 const row = (number: number, fields: Partial<JobRow> = {}): JobRow => ({
   number,
@@ -59,9 +63,9 @@ describe("the lead's prompt sections", () => {
     expect(text).toBe(
       [
         "Job templates (start a job with start_job): household (cheap), research (mid), health (mid), developer (frontier).",
-        "Live jobs:",
-        "#1 research mid/medium running $0.12/$1 job title 1",
-        "#4 developer frontier/medium queued $0.00/$3 job title 4",
+        "Live jobs, in queue order:",
+        "#1 research mid/medium running routine $0.12/$1 job title 1",
+        "#4 developer frontier/medium queued routine $0.00/$3 job title 4",
         "and 2 finished or stopped",
         "results waiting: failure 1, question 0, risky 0, routine 2 (pull them with job_result or read_result)",
       ].join("\n"),
@@ -120,14 +124,14 @@ describe("the lead's prompt sections", () => {
     };
     const lines = jobsSection(board, templatesOf(), []).split("\n").slice(2, 10);
     expect(lines).toEqual([
-      "#1 research mid/medium paused $0.24/$0.25 job title 1 (paused: cap $0.24/$0.25)",
-      "#2 research mid/medium paused $0.12/$1 job title 2 (paused: same step failed 3 times; raises 1/1, restarts 0/1)",
-      '#3 research mid/medium waiting $0.12/$1 job title 3 (waiting: asks "Which airport?")',
-      '#4 research mid/medium waiting $0.12/$1 job title 4 (waiting: asks "Which airport?" (asked the person))',
-      "#5 research mid/medium done $0.12/$1 job title 5 (review running on anthropic/claude-opus-5.5)",
-      "#6 research mid/medium rejected $0.12/$1 job title 6 (review rejected: wrong dates)",
-      "#7 research mid/medium queued $0.12/$1 job title 7 (requested by job 3)",
-      "#8 research mid/medium running $0.12/$1 job title 8 (raises 1/1, restarts 1/1)",
+      "#1 research mid/medium paused routine $0.24/$0.25 job title 1 (paused: cap $0.24/$0.25)",
+      "#2 research mid/medium paused routine $0.12/$1 job title 2 (paused: same step failed 3 times; raises 1/1, restarts 0/1)",
+      '#3 research mid/medium waiting routine $0.12/$1 job title 3 (waiting: asks "Which airport?")',
+      '#4 research mid/medium waiting routine $0.12/$1 job title 4 (waiting: asks "Which airport?" (asked the person))',
+      "#6 research mid/medium rejected routine $0.12/$1 job title 6 (review rejected: wrong dates)",
+      "#7 research mid/medium queued routine $0.12/$1 job title 7 (requested by job 3)",
+      "#8 research mid/medium running routine $0.12/$1 job title 8 (raises 1/1, restarts 1/1)",
+      "#5 research mid/medium done routine $0.12/$1 job title 5 (review running on anthropic/claude-opus-5.5)",
     ]);
   });
 
@@ -197,10 +201,68 @@ describe("blocked jobs in the lead's jobs section", () => {
     expect(jobsSection(board, templatesOf(), []).split("\n").slice(1)).toEqual([
       "No live jobs.",
       "Blocked jobs (read why with job_result; restart one only when the person asks):",
-      "#1 research mid/medium blocked $0.12/$1 job title 1 (blocked: a page tried to give the agent orders; nothing from it was used)",
-      "#2 research mid/medium blocked $0.12/$1 job title 2 (blocked: the content check did not answer; stopped to be safe)",
+      "#1 research mid/medium blocked routine $0.12/$1 job title 1 (blocked: a page tried to give the agent orders; nothing from it was used)",
+      "#2 research mid/medium blocked routine $0.12/$1 job title 2 (blocked: the content check did not answer; stopped to be safe)",
       "and 3 finished or stopped",
       "results waiting: failure 2, question 0, risky 0, routine 0 (pull them with job_result or read_result)",
     ]);
+  });
+});
+
+describe("the lead's jobs section in queue order", () => {
+  const four = (): BoardState & { queue: number[]; jobs: Record<string, JobRow> } => ({
+    nextNumber: 5,
+    byConversation: {},
+    queue: [1, 2, 4, 3],
+    jobs: {
+      "1": row(1, { priority: "urgent" }),
+      "2": row(2, { priority: "deadline", deadline: "2026-10-20" }),
+      "3": row(3, { priority: "research" }),
+      "4": row(4, { priority: "routine" }),
+    },
+  });
+  const order = (board: BoardState) =>
+    jobsSection(board, templatesOf(), [])
+      .split("\n")
+      .filter((line) => line.startsWith("#"))
+      .map((line) =>
+        line
+          .split(" ")
+          .slice(0, 1)
+          .concat(line.split(" ")[4] ?? "")
+          .join(" "),
+      );
+
+  it("lists live jobs in queue order with their priority words", () => {
+    expect(order(four())).toEqual(["#1 urgent", "#2 due", "#4 routine", "#3 research"]);
+    expect(jobsSection(four(), templatesOf(), [])).toContain(
+      "#2 research mid/medium running due 2026-10-20 $0.12/$1 job title 2",
+    );
+  });
+
+  it("follows the person's reorder: urgent, deadline, move", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const test = await openTestCell();
+    try {
+      const ops = <T>(change: (tx: Tx) => Promise<T>) =>
+        test.cell.harness.commit(change, BACKGROUND_CONTEXT);
+      await ops(async (tx) => {
+        const board = await tx.doc(JobBoardDoc);
+        Object.assign(board, structuredClone(four()));
+      });
+      const section = async () => order(await test.cell.board());
+      expect(await section()).toEqual(["#1 urgent", "#2 due", "#4 routine", "#3 research"]);
+      await ops((tx) => markUrgent(tx, 4));
+      expect(await section()).toEqual(["#4 urgent", "#1 urgent", "#2 due", "#3 research"]);
+      await ops((tx) => setDeadline(tx, 4, "2026-10-12"));
+      expect(await section()).toEqual(["#1 urgent", "#4 due", "#2 due", "#3 research"]);
+      await ops((tx) => moveBefore(tx, 3, 1));
+      expect(await section()).toEqual(["#3 research", "#1 urgent", "#4 due", "#2 due"]);
+      // No board change, no section change.
+      const board = await test.cell.board();
+      expect(jobsSection(board, templatesOf(), [])).toBe(jobsSection(board, templatesOf(), []));
+    } finally {
+      await test.cell.close();
+    }
   });
 });
