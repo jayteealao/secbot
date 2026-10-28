@@ -103,14 +103,14 @@ import { ModelHealthMonitor } from "./model-health.ts";
 import { listRoleModels, type RoleModel, setRoleModel } from "./model-map.ts";
 import { ledgerConversations } from "./month-ledger.ts";
 import type { ReceiptTask } from "./receipts.ts";
-import { type DecisionAdapter, LEAD_ROLE } from "./release-defaults.ts";
+import type { DecisionAdapter, } from "./release-defaults.ts";
 import {
   createReminderExtension,
   createReminderRoutine,
   type ReminderPayload,
 } from "./reminder.ts";
 import { createReviewer, type Reviewer } from "./reviewer.ts";
-import { addSpecialist, ensureRoster } from "./roster.ts";
+import { addTemplate, ensureRoster } from "./roster.ts";
 import { ensureRoutines, type Routine } from "./routines.ts";
 import {
   addRule,
@@ -126,7 +126,7 @@ import { createSecretsExtension, redactionLoader, type SecretsClient } from "./s
 import { createLeadExtension, type TimeEnv, timeZoneOf } from "./sections.ts";
 import { type Frame, openSessionStream, type SessionStream } from "./session-stream.ts";
 import { cellSettings } from "./settings.ts";
-import { createTelemetryExtension } from "./telemetry.ts";
+import { agentNames, createTelemetryExtension } from "./telemetry.ts";
 import {
   type NextWake,
   nextWake,
@@ -457,13 +457,13 @@ export class CellHarness implements CellParts {
     return this.root.submit({ type: "input", content: text, requestId, whenBusy }, context);
   }
 
+  /** The cell is up; its roles are the lead, each job template, and each frozen specialist. */
   async status(context: Context = BACKGROUND_CONTEXT): Promise<CellStatus> {
-    const roster = await this.harness.snapshot(RosterDoc, context);
     return {
       status: "up",
       person: this.person,
       version: this.version,
-      roles: [LEAD_ROLE, ...Object.keys(roster?.specialists ?? {})],
+      roles: [...(await agentNames(this.harness, context))],
     };
   }
 
@@ -479,7 +479,7 @@ export class CellHarness implements CellParts {
     input: { readonly name: string; readonly instruction: string; readonly model?: string },
     context: Context = BACKGROUND_CONTEXT,
   ): Promise<void> {
-    return addSpecialist(this, input, context);
+    return addTemplate(this, input, context);
   }
 
   /**
@@ -866,7 +866,7 @@ async function finishOpen(
   // What the last run left: live work, and routines whose time passed while the cell was down.
   // Read before this open creates anything and before resume(), so nothing has run yet.
   const left = (await harness.inspect(context)).tasks;
-  const created = await ensureRoster(cell, context);
+  const migrated = await ensureRoster(cell, context);
   const releaseRules = await harness.commit(async (tx) => {
     await tx.doc(ModelHealthDoc);
     // Sessions watch the held-call list from the start.
@@ -931,7 +931,7 @@ async function finishOpen(
     cell: person,
     version: options.version,
     roles: (await cell.status(context)).roles,
-    specialists_created: created,
+    templates_migrated: migrated,
     pending_tasks_resumed: pending,
     duration_ms: Date.now() - started,
   });
