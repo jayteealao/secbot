@@ -19,6 +19,7 @@ import { CellAlarm } from "../src/alarm.ts";
 import { leadMessageOf } from "../src/delivery.ts";
 import { ApprovalDoc, ApprovalsDoc } from "../src/docs.ts";
 import { messageText } from "../src/history-search.ts";
+import type { CellHarness } from "../src/open-harness.ts";
 import { routineWake } from "../src/routines.ts";
 import { approvalCrashResponder, CRASH_BRIEF } from "./approval-crash-script.ts";
 import { createFauxGateway, loggedEvents, openTestCell, type TestCell, until } from "./fixtures.ts";
@@ -31,9 +32,12 @@ import {
   probeResponder,
   type ReplayPolicy,
 } from "./hook-crash-probe.ts";
-import { PULL_JOB_1, researchResponder } from "./responders.ts";
+import { createHold, jobResponder, PULL_JOB_1, researchResponder } from "./responders.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
+
+/** The job board document's value. */
+type JobBoard = NonNullable<Awaited<ReturnType<CellHarness["board"]>>>;
 
 let test: TestCell | undefined;
 let probeCell: { harness: Harness; storage: FakeCelldStorage } | undefined;
@@ -161,6 +165,49 @@ describe("a SIGKILL with a running job, an open transaction, and a pending timer
       "secbot.job",
     ]);
     expect((await alarms.report(t.cell)).ok).toBe(true);
+  }, 120_000);
+});
+
+// The job board after compaction and a SIGKILL (AC-3). The child starts three jobs (one done with
+// its result waiting, one whose model call is held open, one queued on the developer budget),
+// compacts the lead, prints the board, and is killed; the reopened cell's board equals it field
+// for field, and each job is still where it was.
+describe("a SIGKILL after compaction with three jobs on the board", () => {
+  it("keeps every board field, the waiting result, the held job, and the queued job", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    directory = await mkdtemp(join(tmpdir(), "secbot-jobs-crash-"));
+    const file = join(directory, "cell.sqlite");
+    const { ready, kill } = await runChildUntilReady<{ board: JobBoard; compacted: boolean }>(
+      "jobs-crash-child.ts",
+      [file],
+    );
+    expect(ready.compacted).toBe(true);
+    expect(Object.keys(ready.board.jobs)).toEqual(["1", "2", "3"]);
+    await kill();
+
+    // The parent's model holds the health job open as the child's did, so nothing moves on.
+    const hold = createHold();
+    hold.hold("health");
+    const storage = new FakeCelldStorage({ file });
+    test = await openTestCell({ storage, gateway: createFauxGateway(hold.wrap(jobResponder)) });
+    const t = test;
+    const board = await t.cell.board();
+    expect(board).toEqual(ready.board);
+    expect(board.jobs["1"]).toMatchObject({
+      status: "done",
+      template: "research",
+      result: { kind: "routine", pulledAt: null },
+    });
+    expect(board.jobs["2"]?.result).toBeNull();
+    expect(board.jobs["3"]?.result).toBeNull();
+    // The held job's call runs again in this life; the developer job still waits on its budget.
+    await until(() => hold.waiting("health") === 1, 30_000);
+    await until(
+      async () => (await t.cell.waiting()).some((wait) => wait.what === "job 3 developer"),
+      30_000,
+    );
+    expect(await t.cell.board()).toEqual(ready.board);
+    hold.release("health");
   }, 120_000);
 });
 
