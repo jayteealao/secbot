@@ -159,6 +159,26 @@ describe("the cap gate (AC-16)", () => {
     expect((await job(t))?.status).toBe("paused");
     expect(householdRequests(t)).toBe(12);
   });
+
+  it("runs again after a raise to mid: the cap is $1 and the next request runs", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({
+      gateway: pricedGateway(jobAnswers("household", workingHousehold)),
+    });
+    const t = test;
+    await startHousehold(t);
+    await until(async () => (await job(t))?.status === "paused");
+    expect(householdRequests(t)).toBe(12);
+    await (await t.cell.submit('CALL set_job {"job":1,"tier":"mid"}', "raise-1")).wait(
+      BACKGROUND_CONTEXT,
+    );
+    await until(() => householdRequests(t) > 12);
+    expect(await job(t)).toMatchObject({
+      tier: "mid",
+      cap: 1,
+      attempts: { raises: 1, restarts: 0 },
+    });
+  });
 });
 
 describe("provider waits are not failing steps (AC-15)", () => {

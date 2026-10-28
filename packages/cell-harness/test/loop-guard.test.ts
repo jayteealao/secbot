@@ -171,6 +171,21 @@ describe("the failing-step streak", () => {
     expect(failingStreak([user("brief"), refused(429), refused(402)])).toBe(0);
   });
 
+  it("counts only steps from the lead's resume on", () => {
+    const old = [
+      ...call("household_read", { document: "shopping" }),
+      ...call("household_read", { document: "shopping" }),
+      ...call("household_read", { document: "shopping" }),
+    ];
+    const later = call("household_read", { document: "shopping" }).map((message) => ({
+      ...message,
+      timestamp: 5_000,
+    })) as Message[];
+    expect(failingStreak([...old, ...later])).toBe(4);
+    expect(failingStreak([...old, ...later], 5_000)).toBe(1);
+    expect(failingStreak(old, 5_000)).toBe(0);
+  });
+
   it("is zero for a fresh job and after a real answer", () => {
     expect(failingStreak([user("brief")])).toBe(0);
     expect(failingStreak([user("brief"), assistant([{ type: "text", text: "done" }])])).toBe(0);

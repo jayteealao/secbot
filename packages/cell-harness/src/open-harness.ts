@@ -691,6 +691,8 @@ export async function openCellHarness(
     models: () => models,
     jobExtensions: () => jobList,
     now,
+    holds,
+    harness: current,
     remote: {
       person,
       household: () => options.household,

@@ -4,19 +4,33 @@
  * in its job task (job-task.ts) and its result waits on the board until the lead pulls it.
  */
 import type { Context } from "@earendil-works/chord";
+import { withoutAbortSignal } from "@earendil-works/chord/context";
 import { type Models, Type } from "@earendil-works/pi-ai";
 import {
   defineExtension,
   defineTool,
   type Extension,
+  type Harness,
   LiveDoc,
+  type TaskId,
   type ToolExecutionApi,
   type Tx,
 } from "@earendil-works/pi-durable";
 import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
-import { JobBoardDoc, type JobRow, RoleModelsDoc, TemplatesDoc } from "./docs.ts";
-import { createJobRow, ENDED, pullResult, setTierEffort } from "./job-board.ts";
+import { JobBoardDoc, type JobRow, RoleModelsDoc, TemplatesDoc, TierSettingsDoc } from "./docs.ts";
+import {
+  createJobRow,
+  ENDED,
+  escalate,
+  escalationsUsed,
+  exhaust,
+  jobCost,
+  pullResult,
+  resumeRow,
+  setTierEffort,
+} from "./job-board.ts";
+import type { JobHolds } from "./job-holds.ts";
 import { configureJob, createJobTask, type JobTask } from "./job-task.ts";
 import { budgetOf } from "./month-ledger.ts";
 import {
@@ -27,7 +41,7 @@ import {
   remoteWraps,
 } from "./receipts.ts";
 import { DEFAULT_JOB_EFFORT, JOB_EFFORTS, TIERS } from "./release-defaults.ts";
-import { appliedEffort, templateNamed, templatesOf, tierModelOf } from "./templates.ts";
+import { appliedEffort, capOf, templateNamed, templatesOf, tierModelOf } from "./templates.ts";
 
 export interface JobsExtensionDeps {
   readonly person: string;
@@ -39,6 +53,10 @@ export interface JobsExtensionDeps {
   readonly now: () => number;
   /** The household and secrets cells the lead's remote tools reach in the background. */
   readonly remote?: RemoteDeps;
+  /** Where paused and questioning jobs wait; a lead move wakes the job. */
+  readonly holds: JobHolds;
+  /** The harness, to abort a job's task when the lead restarts it or it used its escalations. */
+  readonly harness: () => Harness;
 }
 
 /** The lead's note when a job will wait above a limit before it starts. */
@@ -96,6 +114,10 @@ export function jobSummary(row: JobRow): string {
   return `job ${row.number} "${row.title}": ${row.status}, ${row.template} on ${row.tier}, ${effort}, $${row.cost.toFixed(2)} of $${row.cap}, priority ${row.priority}${due}, ${row.attempts.raises} raises and ${row.attempts.restarts} restarts; ${result}.`;
 }
 
+/** The lead's refusal when a job has used both escalations: the job has stopped. */
+export const exhaustedText = (n: number) =>
+  `Refused: job ${n} has used its raise and its restart. It has stopped; ask the person in your own words what to do — the chat adds the /answer line.`;
+
 export function createJobsExtension(deps: JobsExtensionDeps): {
   readonly extension: Extension;
   readonly JobTask: JobTask;
@@ -109,6 +131,21 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     extensions: deps.jobExtensions,
   });
   const jobParameter = Type.Integer({ minimum: 1, description: "The job's number." });
+
+  /**
+   * A job past its escalations ended failed in the caller's commit: its task stops (a paused run
+   * waits on its hold, which the abort rejects); the lead asks the person in its own words.
+   */
+  const endExhausted = async (
+    ended: { readonly number: number; readonly taskId: TaskId | null },
+    context: Context,
+  ) => {
+    logEvent("job.paused", { cell: person, job: ended.number, reason: "escalation" });
+    if (ended.taskId !== null) {
+      await deps.harness().abortTask(ended.taskId, withoutAbortSignal(context));
+    }
+    deps.holds.wake(ended.number);
+  };
 
   const startJob = defineTool({
     name: "start_job",
@@ -250,6 +287,28 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         const from = { tier: found.tier, applied: found.effort.applied };
         const tier = args.tier ?? found.tier;
         const requested = args.effort ?? found.effort.requested;
+        // A move up in tier or effort is the job's one raise; a lower or equal move is free.
+        const raise =
+          TIERS.indexOf(tier) > TIERS.indexOf(found.tier) ||
+          JOB_EFFORTS.indexOf(requested) > JOB_EFFORTS.indexOf(found.effort.requested);
+        const paused = found.status === "paused";
+        const cost = paused ? await jobCost(tx, found) : 0;
+        const cap = capOf(tier, (await tx.doc(TierSettingsDoc)).caps);
+        if (paused && cost >= cap) {
+          return {
+            error: `Refused: job ${args.job} is still over its $${cap} cap at $${cost.toFixed(2)}; pick a higher tier or restart_job.`,
+          };
+        }
+        if (raise) {
+          const counted = await escalate(tx, args.job, "raise");
+          if ("refused" in counted) {
+            if (escalationsUsed(found)) {
+              const ended = await exhaust(tx, args.job, deps.now());
+              return { exhausted: { number: ended.number, taskId: ended.taskId } };
+            }
+            return { error: `Refused: job ${args.job} has used its raise; restart_job is left.` };
+          }
+        }
         const modelId = tierModelOf(tier, (await tx.doc(RoleModelsDoc)).overrides);
         const row = await setTierEffort(tx, args.job, {
           tier,
@@ -257,10 +316,28 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
           applied: appliedEffort(deps.models(), modelId, requested),
         });
         await configureJob(tx, row, deps.jobExtensions());
-        return { from, row: { ...row, effort: { ...row.effort } } };
+        const resumed = paused && (await resumeRow(tx, args.job));
+        return {
+          from,
+          raise,
+          resumed,
+          row: { ...row, effort: { ...row.effort }, attempts: { ...row.attempts } },
+        };
       }, context);
+      if ("exhausted" in changed) {
+        await endExhausted(changed.exhausted, context);
+        return refusal(exhaustedText(args.job));
+      }
       if ("error" in changed) return refusal(changed.error);
       const { from, row } = changed;
+      if (changed.resumed) deps.holds.wake(row.number);
+      if (changed.raise) {
+        logEvent("job.raised", {
+          cell: person,
+          job: row.number,
+          attempts: row.attempts.raises + row.attempts.restarts,
+        });
+      }
       logEvent("job.effort_changed", {
         cell: person,
         job: row.number,
@@ -271,7 +348,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
       });
       return {
         ...text(
-          `job ${row.number} now runs on ${row.tier} (cap $${row.cap}), effort ${row.effort.applied}${row.effort.applied === row.effort.requested ? "" : ` (asked ${row.effort.requested}; the model does not offer it)`}.`,
+          `job ${row.number} now runs on ${row.tier} (cap $${row.cap}), effort ${row.effort.applied}${row.effort.applied === row.effort.requested ? "" : ` (asked ${row.effort.requested}; the model does not offer it)`}.${changed.resumed ? " It was paused and runs again." : ""}`,
         ),
         details: { job: row.number, tier: row.tier, effort: row.effort.applied },
       };

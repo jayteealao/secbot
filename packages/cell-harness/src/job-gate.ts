@@ -109,7 +109,7 @@ export function createJobGate(deps: JobGateDeps): Extension {
     if (held(row, conversationId)) return "held";
     const cost = await jobCostOf(harness(), row, context);
     const projected = projectNext(messages);
-    const streak = failingStreak(messages);
+    const streak = failingStreak(messages, row.resumedAt ?? 0);
     const reason =
       cost >= row.cap || cost + projected > row.cap
         ? "cap"

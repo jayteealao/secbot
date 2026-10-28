@@ -69,6 +69,7 @@ const row: JobRow = {
   runs: [],
   review: null,
   requestedBy: null,
+  resumedAt: null,
 };
 
 /** A row with every field this slice adds set. */
@@ -113,7 +114,8 @@ const fullRow: JobRow = {
 describe("the job board upgrade", () => {
   it("is version 2 and migrates a version-1 board, field by field", () => {
     expect(JobBoardDoc.definition.version).toBe(2);
-    const { pause, question, risky, toolsUsed, runs, review, requestedBy, ...v1 } = row;
+    const { pause, question, risky, toolsUsed, runs, review, requestedBy, resumedAt, ...v1 } =
+      row;
     const migrated = JobBoardDoc.definition.migrate?.(
       { nextNumber: 2, jobs: { "1": v1 }, byConversation: { "7": 1 } } as never,
       1,
@@ -126,6 +128,7 @@ describe("the job board upgrade", () => {
     expect(upgraded?.runs).toEqual([]);
     expect(upgraded?.review).toBeNull();
     expect(upgraded?.requestedBy).toBeNull();
+    expect(upgraded?.resumedAt).toBeNull();
     expect(migrated).toEqual({ nextNumber: 2, jobs: { "1": row }, byConversation: { "7": 1 } });
   });
 
@@ -364,6 +367,7 @@ describe("escalation bounds, questions, and risk on the board", () => {
     expect((await job())?.status).toBe("paused");
     expect(await ops((tx) => resumeRow(tx, 1))).toBe(true);
     expect(await job()).toMatchObject({ status: "running", pause: null });
+    expect((await job())?.resumedAt).toEqual(expect.any(Number));
     expect(await ops((tx) => resumeRow(tx, 1))).toBe(false);
   });
 

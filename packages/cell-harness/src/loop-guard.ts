@@ -131,10 +131,13 @@ function trailingFailures(messages: readonly Message[]): Failure[] {
 
 /**
  * How many failing steps in a row end the messages: tool errors each near-same to the failing call
- * after it, or empty and cut-off replies. A different kind of failure ends the run.
+ * after it, or empty and cut-off replies. A different kind of failure ends the run. Only messages
+ * from `since` on count (the lead resumed the job then).
  */
-export function failingStreak(messages: readonly Message[]): number {
-  const failures = trailingFailures(messages);
+export function failingStreak(messages: readonly Message[], since = 0): number {
+  const failures = trailingFailures(
+    since === 0 ? messages : messages.filter((message) => (message.timestamp ?? 0) >= since),
+  );
   const first = failures[0];
   if (first === undefined) return 0;
   let streak = 1;

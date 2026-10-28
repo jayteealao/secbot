@@ -386,7 +386,7 @@ export type JobReview = {
 /** The fields this slice adds to every row, empty (a new row, and a row of a version-1 board). */
 export const emptyJobExtras = (): Pick<
   JobRow,
-  "pause" | "question" | "risky" | "toolsUsed" | "runs" | "review" | "requestedBy"
+  "pause" | "question" | "risky" | "toolsUsed" | "runs" | "review" | "requestedBy" | "resumedAt"
 > => ({
   pause: null,
   question: null,
@@ -395,6 +395,7 @@ export const emptyJobExtras = (): Pick<
   runs: [],
   review: null,
   requestedBy: null,
+  resumedAt: null,
 });
 
 /** One job on the board. Numbers grow per cell and are never reused. */
@@ -436,6 +437,11 @@ export type JobRow = {
   review: JobReview | null;
   /** The job that asked the lead for this one (`request_job`), or null. */
   requestedBy: number | null;
+  /**
+   * When the lead last resumed the paused job (wall clock, as message timestamps): the loop guard
+   * counts only failing steps after it. Null when never resumed.
+   */
+  resumedAt: number | null;
 };
 
 /**
