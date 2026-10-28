@@ -6,8 +6,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ActivityPageDoc, JobBoardDoc } from "../src/docs.ts";
 import { createJobRow } from "../src/job-board.ts";
 import { createJobTask } from "../src/job-task.ts";
-import { createFauxGateway, loggedEvents, openTestCell, type TestCell, until } from "./fixtures.ts";
-import { JOB_BRIEF, jobResponder } from "./responders.ts";
+import { createJobsExtension } from "../src/lead-tools.ts";
+import {
+  createFauxGateway,
+  loggedEvents,
+  openTestCell,
+  type Responder,
+  type TestCell,
+  until,
+} from "./fixtures.ts";
+import { answersOf, toolResultsOf } from "./job-helpers.ts";
+import { createHold, JOB_BRIEF, jobResponder, RESEARCH_JOB, startJobLine } from "./responders.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -109,5 +118,131 @@ describe("the job task", () => {
       outcome: "answered",
     });
     expect(JSON.stringify(events)).not.toContain(JOB_BRIEF);
+  });
+});
+
+/** A cell with the lead's job tools on every list (wired for the lead only once the harness is). */
+async function openToolCell(respond: Responder = jobResponder): Promise<TestCell> {
+  let opened: TestCell | undefined;
+  const jobs = createJobsExtension({
+    person: "owner",
+    gate: () => undefined,
+    timeZone: "UTC",
+    models: () => gateway.models,
+    jobExtensions: () =>
+      (opened?.cell.extensions.specialist ?? []).filter((each) => each.name !== "secbot-jobs"),
+    now: Date.now,
+  });
+  const gateway = createFauxGateway(respond);
+  opened = await openTestCell({ gateway, extensions: [jobs.extension] });
+  return opened;
+}
+
+const answers = (t: TestCell) => answersOf(t.cell.root);
+const toolResults = (t: TestCell) => toolResultsOf(t.cell.root);
+
+describe("the lead's job tools", () => {
+  it("starts a research job with every board field and answers with the one-line notice (AC-1)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openToolCell();
+    const t = test;
+    await (await t.cell.submit(`Find me flights\n${RESEARCH_JOB}`, "req-1")).wait(
+      BACKGROUND_CONTEXT,
+    );
+    expect(await answers(t)).toEqual([
+      "On it: comparing direct flights to Lisbon in May (job 1, research, mid)",
+    ]);
+    const row = (await t.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs["1"];
+    expect(row).toMatchObject({
+      number: 1,
+      title: "comparing direct flights to Lisbon in May",
+      brief: JOB_BRIEF,
+      priority: "routine",
+      deadline: null,
+      template: "research",
+      tier: "mid",
+      effort: { requested: "medium", applied: "medium" },
+      attempts: { raises: 0, restarts: 0 },
+      cap: 1,
+      owner: "owner",
+    });
+    expect(typeof row?.cost).toBe("number");
+    expect(["queued", "running", "done"]).toContain(row?.status);
+    expect(row?.turn).not.toBeNull();
+  });
+
+  it("refuses an unknown template and an unknown job with the valid names", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openToolCell();
+    const t = test;
+    await (
+      await t.cell.submit(
+        `${startJobLine({ title: "x", brief: "y", template: "astrology" })}\nCALL read_job {"job":9}`,
+        "req-1",
+      )
+    ).wait(BACKGROUND_CONTEXT);
+    const said = (await toolResults(t)).join("\n");
+    expect(said).toContain(
+      "No template named astrology. Templates: household, research, health, developer.",
+    );
+    expect(said).toContain("No job 9: the board has no jobs.");
+    expect((await t.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.nextNumber ?? 1).toBe(
+      1,
+    );
+  });
+
+  it("lowers a research job to cheap and raises its effort, keeping both efforts (AC-5)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const hold = createHold();
+    hold.hold("research");
+    test = await openToolCell(hold.wrap(jobResponder));
+    const t = test;
+    await (await t.cell.submit(RESEARCH_JOB, "req-1")).wait(BACKGROUND_CONTEXT);
+    await until(() => hold.waiting("research") === 1);
+    await (
+      await t.cell.submit('CALL set_job {"job":1,"tier":"cheap","effort":"low"}', "req-2")
+    ).wait(BACKGROUND_CONTEXT);
+    let row = (await t.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs["1"];
+    expect(row).toMatchObject({
+      tier: "cheap",
+      cap: 0.25,
+      effort: { requested: "low", applied: "medium" },
+    });
+    const conversationId = row?.conversationId;
+    if (conversationId === null || conversationId === undefined) throw new Error("no conversation");
+    const agent = await (
+      await t.cell.harness.conversation(conversationId, BACKGROUND_CONTEXT)
+    )?.agent(BACKGROUND_CONTEXT);
+    expect(agent?.model?.modelId).toBe("anthropic/claude-haiku-4.5");
+    expect(agent?.thinkingLevel).toBe("medium");
+
+    await (await t.cell.submit('CALL set_job {"job":1,"effort":"high"}', "req-3")).wait(
+      BACKGROUND_CONTEXT,
+    );
+    row = (await t.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs["1"];
+    expect(row).toMatchObject({ tier: "cheap", effort: { requested: "high", applied: "high" } });
+    hold.release("research");
+    await until(
+      async () =>
+        (await t.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs["1"]?.result != null,
+    );
+  });
+
+  it("pulls a result with job_result and reads a job with read_job", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openToolCell();
+    const t = test;
+    await (await t.cell.submit(RESEARCH_JOB, "req-1")).wait(BACKGROUND_CONTEXT);
+    await until(
+      async () =>
+        (await t.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs["1"]?.result != null,
+    );
+    await (await t.cell.submit('CALL job_result {"job":1}\nCALL read_job {"job":1}', "req-2")).wait(
+      BACKGROUND_CONTEXT,
+    );
+    const toolTexts = (await toolResults(t)).join("\n");
+    expect(toolTexts).toContain("research finding: evidence is mixed.");
+    const row = (await t.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs["1"];
+    expect(row?.result?.pulledAt).not.toBeNull();
   });
 });
