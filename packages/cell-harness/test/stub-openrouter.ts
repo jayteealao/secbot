@@ -12,8 +12,24 @@ import type { AddressInfo } from "node:net";
 /** The HTTP failures the Decisions API documents, plus the ones the chat routes already used. */
 export const STUB_STATUSES = [400, 401, 402, 403, 413, 429, 500, 502, 503, 524, 529] as const;
 
+/** OpenRouter's transient 402 body when the key's in-flight budget is full (its limits page). */
+export const INFLIGHT_BODY = {
+  error: {
+    code: 402,
+    message: "Too many requests in flight",
+    metadata: {
+      reason: "in_flight_budget_exhausted",
+      limit_source: "openrouter_in_flight_budget",
+    },
+  },
+};
+
+/** The error text pi-ai gives for that 402 (status, then the body). */
+export const INFLIGHT_402 = `402 ${JSON.stringify(INFLIGHT_BODY)}`;
+
 export type StubMode =
   | "answer"
+  | "402-inflight"
   | (typeof STUB_STATUSES)[number]
   | "malformed"
   | "unknown-choice"
@@ -169,6 +185,11 @@ export async function startStubOpenRouter(): Promise<StubOpenRouter> {
   const answer = (path: string, body: Record<string, unknown>, response: ServerResponse) => {
     if (stub.mode === "hang") {
       hanging.add(() => response.destroy());
+      return;
+    }
+    if (stub.mode === "402-inflight") {
+      response.writeHead(402, { "content-type": "application/json", "retry-after": "1" });
+      response.end(JSON.stringify(INFLIGHT_BODY));
       return;
     }
     if (typeof stub.mode === "number") {

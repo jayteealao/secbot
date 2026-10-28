@@ -10,7 +10,9 @@
  *
  * This decorator rewrites only such a terminal error into a retryable one tagged with
  * CREDIT_MARKER, so the durable generation waits at the capped backoff and resumes on its own once
- * the limit rises. Every other event passes through unchanged.
+ * the limit rises. OpenRouter's transient in-flight 402 is rewritten to a retryable wait tagged
+ * INFLIGHT_MARKER instead: the job waits, and no credit alert goes out. Every other event passes
+ * through unchanged.
  */
 import {
   type AssistantMessage,
@@ -30,15 +32,40 @@ export const CREDIT_MARKER = "[secbot.credit]";
 const CREDIT_ERROR =
   /^\s*40[23]\b|insufficient.?credits|credit.?limit|key.?limit|insufficient_quota/i;
 
+/** Prefix of a rewritten in-flight wait: a transient 402, not a credit outage. */
+export const INFLIGHT_MARKER = "[secbot.inflight]";
+
+/**
+ * OpenRouter's transient 402: the key's in-flight budget is full (`metadata.reason`
+ * `in_flight_budget_exhausted`, `limit_source` `openrouter_in_flight_budget`); it carries
+ * `Retry-After` and should be retried (https://openrouter.ai/docs/api-reference/limits, read
+ * 2026-10-28). It is a wait, never a credit outage, so it raises no credit alert.
+ */
+const INFLIGHT_ERROR = /in_flight_budget_exhausted|openrouter_in_flight_budget/;
+
+export const isInflightError = (message: Pick<AssistantMessage, "stopReason" | "errorMessage">) =>
+  message.stopReason === "error" &&
+  typeof message.errorMessage === "string" &&
+  (message.errorMessage.startsWith(INFLIGHT_MARKER) || INFLIGHT_ERROR.test(message.errorMessage));
+
 export const isCreditError = (message: Pick<AssistantMessage, "stopReason" | "errorMessage">) =>
   message.stopReason === "error" &&
   typeof message.errorMessage === "string" &&
+  !isInflightError(message) &&
   (message.errorMessage.startsWith(CREDIT_MARKER) || CREDIT_ERROR.test(message.errorMessage));
+
+/** The rewritten in-flight text: retryable ("retry delay"), and not a credit error. */
+export const INFLIGHT_WAIT_TEXT = `${INFLIGHT_MARKER} in-flight budget full (HTTP 402); request kept; retry delay applies`;
 
 /** The rewritten text names the HTTP status and "retry delay", which pi-ai retries. */
 export const CREDIT_PAUSE_TEXT = `${CREDIT_MARKER} credit limit reached (HTTP 402); request kept; retry delay applies`;
 
 export function rewriteCreditError(message: AssistantMessage): AssistantMessage {
+  if (isInflightError(message)) {
+    return message.errorMessage?.startsWith(INFLIGHT_MARKER)
+      ? message
+      : { ...message, errorMessage: INFLIGHT_WAIT_TEXT };
+  }
   if (!isCreditError(message) || message.errorMessage?.startsWith(CREDIT_MARKER)) return message;
   return { ...message, errorMessage: CREDIT_PAUSE_TEXT };
 }

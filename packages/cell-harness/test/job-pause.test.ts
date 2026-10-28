@@ -9,13 +9,16 @@ import {
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
+  loggedEvents,
   openTestCell,
   type Responder,
   type TestCell,
   until,
 } from "./fixtures.ts";
 import { wakeNoticesOf } from "./job-helpers.ts";
+import { ALERT_ENV, incidentStub } from "./outage-fixtures.ts";
 import { jobResponder, startJobLine } from "./responders.ts";
+import { INFLIGHT_402 } from "./stub-openrouter.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -156,4 +159,51 @@ describe("the cap gate (AC-16)", () => {
     expect((await job(t))?.status).toBe("paused");
     expect(householdRequests(t)).toBe(12);
   });
+});
+
+describe("provider waits are not failing steps (AC-15)", () => {
+  it("waits through a 429 and an in-flight 402 without pausing, counting, or a credit alert", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    let research = 0;
+    const respond = jobAnswers("research", () => {
+      research++;
+      if (research === 1) {
+        return fauxAssistantMessage([], {
+          stopReason: "error",
+          errorMessage: '429 {"error":{"code":429,"message":"Rate limit exceeded"}}',
+        });
+      }
+      if (research === 2) {
+        return fauxAssistantMessage([], { stopReason: "error", errorMessage: INFLIGHT_402 });
+      }
+      return fauxAssistantMessage([fauxText("Three flights found.")]);
+    });
+    const { incidents, fetcher } = incidentStub();
+    test = await openTestCell({
+      gateway: createFauxGateway(respond),
+      env: ALERT_ENV,
+      fetch: fetcher,
+    });
+    const t = test;
+    const statuses = new Set<string>();
+    const watch = setInterval(() => {
+      void job(t).then((row) => row !== undefined && statuses.add(row.status));
+    }, 5);
+    try {
+      await startResearch(t);
+      await until(async () => (await job(t))?.status === "done", 30_000);
+    } finally {
+      clearInterval(watch);
+    }
+    expect(research).toBe(3);
+    expect(statuses.has("paused")).toBe(false);
+    expect((await job(t))?.pause).toBeNull();
+    expect((await job(t))?.result).toMatchObject({ kind: "routine", text: "Three flights found." });
+    await t.cell.monitor.settled();
+    expect(incidents).toHaveLength(0);
+    const calls = loggedEvents(log.mock.calls).filter(
+      (event) => event.event === "model.call" && event.role === "research",
+    );
+    expect(calls.map((event) => event.credit)).toEqual([false, false, false]);
+  }, 40_000);
 });
