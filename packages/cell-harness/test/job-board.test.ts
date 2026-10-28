@@ -1,7 +1,7 @@
 // The job documents (board, receipts, bookmark, custom templates, tier settings) and the board
 // operations: each document commits and reads back as written.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import type { ConversationId, TaskId } from "@earendil-works/pi-durable";
+import type { ConversationId, TaskId, Tx } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BookmarkDoc,
@@ -12,8 +12,19 @@ import {
   TierSettingsDoc,
 } from "../src/docs.ts";
 import {
+  answerQuestion,
+  askQuestion,
   createJobRow,
+  EXHAUSTED,
   endRow,
+  escalate,
+  escalationsUsed,
+  exhaust,
+  isRisky,
+  jobConversations,
+  markRisky,
+  pauseRow,
+  resumeRow,
   liveRows,
   pullResult,
   recordCost,
@@ -304,5 +315,123 @@ describe("board operations", () => {
     if (board === undefined) throw new Error("no board");
     expect(waitingCounts(board).routine).toBe(0);
     expect(await harness.commit((tx) => pullResult(tx, 4, 9_000), BACKGROUND_CONTEXT)).toBeNull();
+  });
+});
+
+describe("escalation bounds, questions, and risk on the board", () => {
+  const ops = async <T>(change: (tx: Tx) => T | Promise<T>): Promise<T> => {
+    if (test === undefined) throw new Error("no cell");
+    return test.cell.harness.commit(async (tx) => change(tx), BACKGROUND_CONTEXT);
+  };
+  const job = async (n = 1) => (await test?.cell.board())?.jobs[String(n)];
+
+  it("allows one raise and one restart in either order and refuses a second of each", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    await ops(async (tx) => {
+      await createJobRow(tx, fields("restart first"));
+      await createJobRow(tx, fields("raise first"));
+    });
+    // Order A: restart, then raise.
+    expect(await ops((tx) => escalate(tx, 1, "restart"))).toEqual({ ok: true });
+    expect(await ops((tx) => escalate(tx, 1, "restart"))).toEqual({ refused: "restart used" });
+    expect(await ops((tx) => escalate(tx, 1, "raise"))).toEqual({ ok: true });
+    expect(await ops((tx) => escalate(tx, 1, "raise"))).toEqual({ refused: "raise used" });
+    // Order B: raise, then restart.
+    expect(await ops((tx) => escalate(tx, 2, "raise"))).toEqual({ ok: true });
+    expect(await ops((tx) => escalate(tx, 2, "raise"))).toEqual({ refused: "raise used" });
+    expect(await ops((tx) => escalate(tx, 2, "restart"))).toEqual({ ok: true });
+    expect(await ops((tx) => escalate(tx, 2, "restart"))).toEqual({ refused: "restart used" });
+    for (const n of [1, 2]) {
+      const row = await job(n);
+      expect(row?.attempts).toEqual({ raises: 1, restarts: 1 });
+      expect(row !== undefined && escalationsUsed(row)).toBe(true);
+    }
+  });
+
+  it("pauses only a running job, keeps the first pause, and resumes it", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    await ops((tx) => createJobRow(tx, fields("a", "cheap")));
+    expect(await ops((tx) => pauseRow(tx, 1, "cap", "queued", 1))).toBe(false);
+    await ops(async (tx) => {
+      const one = (await tx.doc(JobBoardDoc)).jobs["1"];
+      if (one !== undefined) one.status = "running";
+    });
+    expect(await ops((tx) => pauseRow(tx, 1, "cap", "$0.24 of $0.25", 10))).toBe(true);
+    expect(await ops((tx) => pauseRow(tx, 1, "loop", "3 failing steps", 20))).toBe(false);
+    expect((await job())?.pause).toEqual({ reason: "cap", at: 10, detail: "$0.24 of $0.25" });
+    expect((await job())?.status).toBe("paused");
+    expect(await ops((tx) => resumeRow(tx, 1))).toBe(true);
+    expect(await job()).toMatchObject({ status: "running", pause: null });
+    expect(await ops((tx) => resumeRow(tx, 1))).toBe(false);
+  });
+
+  it("ends an exhausted job failed with the escalation question to the person", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    await ops((tx) => createJobRow(tx, fields("a")));
+    await ops((tx) => exhaust(tx, 1, 50));
+    expect(await job()).toMatchObject({
+      status: "failed",
+      endedAt: 50,
+      result: { kind: "failure", text: EXHAUSTED },
+      question: { number: 1, from: "escalation", toPerson: true, personAskedAt: 50, answer: null },
+    });
+  });
+
+  it("asks one question at a time, waits, and the first answer wins", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    await ops(async (tx) => {
+      await createJobRow(tx, fields("a"));
+      const one = (await tx.doc(JobBoardDoc)).jobs["1"];
+      if (one !== undefined) one.status = "running";
+    });
+    const first = await ops((tx) => askQuestion(tx, 1, "Which address?", 5));
+    const again = await ops((tx) => askQuestion(tx, 1, "Another?", 6));
+    expect(first).toMatchObject({ number: 1, text: "Which address?" });
+    expect(again).toMatchObject({ number: 1, text: "Which address?" });
+    expect((await job())?.status).toBe("waiting");
+    expect(await ops((tx) => answerQuestion(tx, 1, "home", "lead", 7))).toMatchObject({
+      answer: "home",
+      answeredBy: "lead",
+    });
+    expect(await ops((tx) => answerQuestion(tx, 1, "office", "person", 8))).toBeNull();
+    expect(await job()).toMatchObject({ status: "running", question: { answer: "home" } });
+    const next = await ops((tx) => askQuestion(tx, 1, "Which date?", 9));
+    expect(next.number).toBe(2);
+  });
+
+  it("adds risky marks and never clears one", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    await ops((tx) => createJobRow(tx, fields("a")));
+    const fresh = await job();
+    expect(fresh !== undefined && isRisky(fresh)).toBe(false);
+    await ops((tx) => markRisky(tx, 1, { code: ["household_change acts"] }));
+    await ops((tx) => markRisky(tx, 1, { code: ["household_change acts", "health template"] }));
+    await ops((tx) => markRisky(tx, 1, { lead: "it books a room" }));
+    await ops((tx) => markRisky(tx, 1, { lead: "another reason" }));
+    await ops((tx) => markRisky(tx, 1, { code: [] }));
+    expect((await job())?.risky).toEqual({
+      code: ["household_change acts", "health template"],
+      lead: "it books a room",
+    });
+  });
+
+  it("lists every conversation of a job: current, earlier runs, review", () => {
+    const id = (n: number) => n as unknown as ConversationId;
+    expect(
+      jobConversations({
+        conversationId: id(9),
+        runs: [
+          { conversationId: id(3), taskId: null, startedAt: 0, endedAt: 1, note: "n" },
+          { conversationId: id(9), taskId: null, startedAt: 0, endedAt: 1, note: "dup" },
+        ],
+        review: { status: "passed", model: "m", reason: "", conversationId: id(11), at: 2 },
+      }),
+    ).toEqual([id(9), id(3), id(11)]);
+    expect(jobConversations({ conversationId: null, runs: [], review: null })).toEqual([]);
   });
 });

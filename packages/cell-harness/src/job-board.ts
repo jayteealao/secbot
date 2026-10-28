@@ -3,11 +3,13 @@
  * task's `runtime.commit`), so the board and the work it describes never disagree after a crash.
  * The board holds every job (C1); the lead's prompt shows only the live ones and a count of the rest.
  */
-import type { Tx } from "@earendil-works/pi-durable";
+import { type ConversationId, type Tx, UsageDoc } from "@earendil-works/pi-durable";
 import {
   emptyJobExtras,
   JobBoardDoc,
+  type JobPause,
   type JobPriority,
+  type JobQuestion,
   type JobResult,
   type JobRow,
   type JobStatus,
@@ -15,7 +17,8 @@ import {
   type ResultKind,
   TierSettingsDoc,
 } from "./docs.ts";
-import type { JobEffort, Tier } from "./release-defaults.ts";
+import { conversationTotal } from "./month-ledger.ts";
+import { ESCALATION_LIMITS, type JobEffort, type Tier } from "./release-defaults.ts";
 import { capOf } from "./templates.ts";
 
 /** Statuses of a job that no longer runs. */
@@ -97,11 +100,200 @@ export async function setTierEffort(
   return row;
 }
 
-/** A job's cost: its conversation's ledger total, which only grows. */
+/** A job's cost: the sum of its conversations' ledger totals (`jobCost`), which only grows. */
 export async function recordCost(tx: Tx, n: number, total: number): Promise<void> {
   const row = await mustRow(tx, n);
   row.cost = Math.max(row.cost, total);
 }
+
+/**
+ * Every conversation a job used: the current run's, each earlier run's, and its review's. A job's
+ * cost and its cap count them all, so a restart does not start the job's spend again (D-051).
+ */
+export function jobConversations(
+  row: Pick<JobRow, "conversationId" | "runs" | "review">,
+): ConversationId[] {
+  const ids = [
+    row.conversationId,
+    ...row.runs.map((run) => run.conversationId),
+    row.review?.conversationId ?? null,
+  ].filter((id): id is ConversationId => id !== null);
+  return [...new Set(ids)];
+}
+
+/** A job's cost now, in a commit: the ledger totals of every conversation it used. */
+export async function jobCost(
+  tx: Tx,
+  row: Pick<JobRow, "conversationId" | "runs" | "review">,
+): Promise<number> {
+  let total = 0;
+  for (const id of jobConversations(row)) total += conversationTotal(await tx.doc(UsageDoc, id));
+  return total;
+}
+
+/**
+ * Pauses a running job before its next model step; a job that is not running (already paused,
+ * waiting, ended) keeps its state and its first pause. True when this call paused it.
+ */
+export async function pauseRow(
+  tx: Tx,
+  n: number,
+  reason: JobPause["reason"],
+  detail: string,
+  at: number,
+): Promise<boolean> {
+  const row = await mustRow(tx, n);
+  if (row.status !== "running") return false;
+  row.status = "paused";
+  row.pause = { reason, at, detail };
+  return true;
+}
+
+/** A paused job runs again: its pause is cleared. True when it was paused. */
+export async function resumeRow(tx: Tx, n: number): Promise<boolean> {
+  const row = await mustRow(tx, n);
+  if (row.status !== "paused") return false;
+  row.status = "running";
+  row.pause = null;
+  return true;
+}
+
+export type EscalationMove = "raise" | "restart";
+
+/**
+ * Counts one escalation move of the lead against the limits (one raise, one restart, in either
+ * order); a move past its limit is refused and changes nothing.
+ */
+export async function escalate(
+  tx: Tx,
+  n: number,
+  move: EscalationMove,
+): Promise<{ readonly ok: true } | { readonly refused: "raise used" | "restart used" }> {
+  const row = await mustRow(tx, n);
+  if (move === "raise") {
+    if (row.attempts.raises >= ESCALATION_LIMITS.raises) return { refused: "raise used" };
+    row.attempts.raises++;
+  } else {
+    if (row.attempts.restarts >= ESCALATION_LIMITS.restarts) return { refused: "restart used" };
+    row.attempts.restarts++;
+  }
+  return { ok: true };
+}
+
+/** True when the job has used both its raise and its restart. */
+export const escalationsUsed = (row: Pick<JobRow, "attempts">): boolean =>
+  row.attempts.raises >= ESCALATION_LIMITS.raises &&
+  row.attempts.restarts >= ESCALATION_LIMITS.restarts;
+
+/** The failure text of a job that used its raise and its restart. */
+export const EXHAUSTED = "raise and restart used";
+
+/**
+ * A job past its escalations ends `failed` ("raise and restart used") and opens the escalation
+ * question to the person; the lead asks it in its own words.
+ */
+export async function exhaust(tx: Tx, n: number, at: number): Promise<JobRow> {
+  const row = await mustRow(tx, n);
+  row.pause = null;
+  if (row.result === null || row.result.pulledAt !== null) {
+    row.result = { kind: "failure", text: EXHAUSTED, at, pulledAt: null, wokeAt: null };
+  }
+  if (row.question === null || row.question.answer !== null || row.question.from !== "escalation") {
+    row.question = {
+      number: (row.question?.number ?? 0) + 1,
+      from: "escalation",
+      text: `job ${n} used its raise and its restart; what should happen next?`,
+      askedAt: at,
+      toPerson: true,
+      personAskedAt: at,
+      answer: null,
+      answeredAt: null,
+      answeredBy: null,
+    };
+  }
+  if (!ENDED.has(row.status)) {
+    row.status = "failed";
+    row.endedAt = at;
+  }
+  return row;
+}
+
+/** The job's question that waits for an answer, or null. */
+export const openQuestion = (row: Pick<JobRow, "question">): JobQuestion | null =>
+  row.question !== null && row.question.answer === null ? row.question : null;
+
+/**
+ * The job asks the lead a question: the job waits (status `waiting`) until it is answered. A job
+ * with a question already open keeps it. Returns the open question.
+ */
+export async function askQuestion(
+  tx: Tx,
+  n: number,
+  text: string,
+  at: number,
+): Promise<JobQuestion> {
+  const row = await mustRow(tx, n);
+  const open = openQuestion(row);
+  if (open !== null) return { ...open };
+  row.question = {
+    number: (row.question?.number ?? 0) + 1,
+    from: "job",
+    text,
+    askedAt: at,
+    toPerson: false,
+    personAskedAt: null,
+    answer: null,
+    answeredAt: null,
+    answeredBy: null,
+  };
+  if (row.status === "running" || row.status === "queued") row.status = "waiting";
+  return { ...row.question };
+}
+
+/**
+ * Answers the job's open question; the first answer wins. A job waiting on its own question runs
+ * again in the same commit. Returns a copy of the answered question; null when none waits.
+ */
+export async function answerQuestion(
+  tx: Tx,
+  n: number,
+  answer: string,
+  by: "lead" | "person",
+  at: number,
+): Promise<JobQuestion | null> {
+  const row = await mustRow(tx, n);
+  const open = openQuestion(row);
+  if (open === null) return null;
+  open.answer = answer;
+  open.answeredAt = at;
+  open.answeredBy = by;
+  if (open.from === "job" && row.status === "waiting") row.status = "running";
+  return { ...open };
+}
+
+/**
+ * Adds a risky mark: code's reasons (tools used, the template) or the lead's reason. A mark is
+ * never removed; the lead's first reason is kept.
+ */
+export async function markRisky(
+  tx: Tx,
+  n: number,
+  mark: { readonly code: readonly string[] } | { readonly lead: string },
+): Promise<JobRow> {
+  const row = await mustRow(tx, n);
+  if ("code" in mark) {
+    for (const reason of mark.code) {
+      if (!row.risky.code.includes(reason)) row.risky.code.push(reason);
+    }
+  } else {
+    row.risky.lead ??= mark.lead;
+  }
+  return row;
+}
+
+/** True when code or the lead marked the job's result risky. */
+export const isRisky = (row: Pick<JobRow, "risky">): boolean =>
+  row.risky.code.length > 0 || row.risky.lead !== null;
 
 /** Stores a job's result as waiting; a stored result is never replaced. */
 export async function storeResult(
