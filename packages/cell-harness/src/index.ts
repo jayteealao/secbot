@@ -61,6 +61,14 @@ export {
   RefusedChange,
   safeErrorText,
 } from "./cell-parts.ts";
+export {
+  type ContentCheckDeps,
+  type ContentRead,
+  type ContentVerdict,
+  checkContent,
+  chunkContent,
+  createContentCheckExtension,
+} from "./content-check.ts";
 export { CREDIT_MARKER, isCreditError, withCreditPause } from "./credit-pause.ts";
 export {
   DECISION_EXAMPLES,
@@ -72,6 +80,8 @@ export {
 } from "./decision-examples.ts";
 export {
   buildDecisionState,
+  type ContentAnswer,
+  type ContentChoice,
   createDecisionModel,
   createDecisionModels,
   type DecisionAnswer,
@@ -81,6 +91,7 @@ export {
   type DecisionModel,
   type DecisionModels,
   type DecisionsClientOptions,
+  INJECTION_QUESTION,
   markScore,
   parseThresholdCaps,
   RISK_QUESTION,
@@ -158,7 +169,16 @@ export {
   rowOf,
 } from "./household-cost.ts";
 export {
+  type CorpusCase,
+  type CorpusGroup,
+  type CorpusResult,
+  falsePositiveRate,
+  INJECTION_CORPUS,
+  missRate,
+} from "./injection-corpus.ts";
+export {
   type BoardState,
+  blockReason,
   ENDED,
   liveRows,
   restCount,
@@ -213,6 +233,11 @@ export {
   type ReportGate,
   reportFields,
 } from "./open-harness.ts";
+export {
+  createFixtureReaderExtension,
+  isOutsideAction,
+  readingKindOf,
+} from "./outside-tools.ts";
 export { RECEIPT_KIND, REMOTE_TOOLS } from "./receipts.ts";
 export {
   ARGUMENTS_LIMIT,
