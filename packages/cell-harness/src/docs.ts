@@ -415,6 +415,8 @@ export const emptyJobExtras = (): Pick<
   | "resumedAt"
   | "outside"
   | "block"
+  | "stop"
+  | "resumes"
 > => ({
   pause: null,
   question: null,
@@ -426,6 +428,8 @@ export const emptyJobExtras = (): Pick<
   resumedAt: null,
   outside: null,
   block: null,
+  stop: null,
+  resumes: 0,
 });
 
 /** One job on the board. Numbers grow per cell and are never reused. */
@@ -479,43 +483,86 @@ export type JobRow = {
   outside: JobOutside | null;
   /** Why the content check stopped the job; null unless it is `blocked`. */
   block: JobBlock | null;
+  /** Who stopped the job and when (the person's or the owner's stop); null unless it is `stopped`. */
+  stop: JobStop | null;
+  /** How often the person resumed the job after a stop or a block; never counted as a restart. */
+  resumes: number;
+};
+
+/** Who stopped a job with the stop command, and when. */
+export type JobStop = { at: number; by: "person" | "owner" };
+
+/** Statuses of a job that no longer runs. */
+export const ENDED: ReadonlySet<JobStatus> = new Set(["done", "failed", "stopped", "blocked"]);
+
+/**
+ * A job's place in the priority order: urgent first, then deadlines by date, then routine, then
+ * research. Two keys compare by rank, then by date.
+ */
+export function priorityKey(row: Pick<JobRow, "priority" | "deadline">): [number, string] {
+  switch (row.priority) {
+    case "urgent":
+      return [0, ""];
+    case "deadline":
+      return [1, row.deadline ?? "9999-12-31"];
+    case "routine":
+      return [2, ""];
+    default:
+      return [3, ""];
+  }
+}
+
+/** Compares two priority keys: negative when `a` comes first. */
+export function compareKeys(a: [number, string], b: [number, string]): number {
+  return a[0] !== b[0] ? a[0] - b[0] : a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0;
+}
+
+type Board = {
+  nextNumber: number;
+  jobs: Record<string, JobRow>;
+  byConversation: Record<string, number>;
+  /** The live jobs' numbers in the order they run and show: the person can change it. */
+  queue: number[];
 };
 
 /**
  * `secbot.job-board`: every job of this person, keyed by its number as text, and each job
  * conversation's number (`roleOf` and the ledger find a job from its conversation in one read).
  */
-export const JobBoardDoc = defineDoc<{
-  nextNumber: number;
-  jobs: Record<string, JobRow>;
-  byConversation: Record<string, number>;
-}>({
+export const JobBoardDoc = defineDoc<Board>({
   kind: "secbot.job-board",
-  version: 3,
+  version: 4,
   scope: "session",
-  initial: () => ({ nextNumber: 1, jobs: {}, byConversation: {} }),
+  initial: () => ({ nextNumber: 1, jobs: {}, byConversation: {}, queue: [] }),
   migrate: (value) => migrateJobBoard(value),
 });
 
-/** A board of an earlier version: every row gains this version's fields, empty. */
-export function migrateJobBoard(value: JsonObject): {
-  nextNumber: number;
-  jobs: Record<string, JobRow>;
-  byConversation: Record<string, number>;
-} {
+/**
+ * A board of an earlier version: every row gains this version's fields, empty, and the queue lists
+ * the live jobs by priority (older first within one priority).
+ */
+export function migrateJobBoard(value: JsonObject): Board {
   const old = value as unknown as {
     nextNumber: number;
     jobs: Record<string, Partial<JobRow>>;
     byConversation: Record<string, number>;
+    queue?: number[];
   };
   const jobs: Record<string, JobRow> = {};
   for (const [key, row] of Object.entries(old.jobs ?? {})) {
     jobs[key] = { ...emptyJobExtras(), ...row } as JobRow;
   }
+  const queue =
+    old.queue ??
+    Object.values(jobs)
+      .filter((row) => !ENDED.has(row.status))
+      .sort((a, b) => compareKeys(priorityKey(a), priorityKey(b)) || a.number - b.number)
+      .map((row) => row.number);
   return {
     nextNumber: old.nextNumber ?? 1,
     jobs,
     byConversation: old.byConversation ?? {},
+    queue,
   };
 }
 
@@ -588,4 +635,42 @@ export const TierSettingsDoc = defineDoc<{ caps: Record<string, number> }>({
   version: 1,
   scope: "session",
   initial: () => ({ caps: {} }),
+});
+
+/**
+ * `secbot.stop`: the stop command. `active` is set while a stop runs: no job starts, restarts, or
+ * resumes then. `last` is the newest finished stop and what it stopped.
+ */
+export const StopDoc = defineDoc<{
+  active: JobStop | null;
+  last: { at: number; by: JobStop["by"]; jobs: number; turn: boolean } | null;
+}>({
+  kind: "secbot.stop",
+  version: 1,
+  scope: "session",
+  initial: () => ({ active: null, last: null }),
+});
+
+/**
+ * `secbot.handoff-note`: the lead's hand-off note, written before its last compaction: the text,
+ * when, the first entry the compaction kept, and how many compactions wrote a note.
+ */
+export const HandoffNoteDoc = defineDoc<{
+  note: { text: string; at: number; firstKept: string; compactions: number } | null;
+}>({
+  kind: "secbot.handoff-note",
+  version: 1,
+  scope: "session",
+  initial: () => ({ note: null }),
+});
+
+/**
+ * `secbot.capacity`: how many jobs this cell was measured to run at once, and when; null until it
+ * is measured. More running jobs only show a warning: nothing is held back.
+ */
+export const CapacityDoc = defineDoc<{ measured: number | null; at: number | null }>({
+  kind: "secbot.capacity",
+  version: 1,
+  scope: "session",
+  initial: () => ({ measured: null, at: null }),
 });

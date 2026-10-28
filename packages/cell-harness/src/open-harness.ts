@@ -331,6 +331,7 @@ export class CellHarness implements CellParts {
         nextNumber: 1,
         jobs: {},
         byConversation: {},
+        queue: [],
       }
     );
   }

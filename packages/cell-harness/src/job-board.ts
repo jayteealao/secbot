@@ -5,6 +5,7 @@
  */
 import { type ConversationId, type Tx, UsageDoc } from "@earendil-works/pi-durable";
 import {
+  ENDED,
   emptyJobExtras,
   type JobBlock,
   JobBoardDoc,
@@ -27,8 +28,7 @@ import {
 } from "./release-defaults.ts";
 import { capOf } from "./templates.ts";
 
-/** Statuses of a job that no longer runs. */
-export const ENDED: ReadonlySet<JobStatus> = new Set(["done", "failed", "stopped", "blocked"]);
+export { ENDED };
 
 export type BoardState = {
   readonly nextNumber: number;

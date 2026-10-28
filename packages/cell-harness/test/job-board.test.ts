@@ -5,9 +5,12 @@ import type { ConversationId, TaskId, Tx } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BookmarkDoc,
+  CapacityDoc,
+  HandoffNoteDoc,
   JobBoardDoc,
   type JobRow,
   ReceiptDoc,
+  StopDoc,
   TemplatesDoc,
   TierSettingsDoc,
 } from "../src/docs.ts";
@@ -76,6 +79,8 @@ const row: JobRow = {
   resumedAt: null,
   outside: null,
   block: null,
+  stop: null,
+  resumes: 0,
 };
 
 /** A row with every field this slice adds set. */
@@ -117,11 +122,13 @@ const fullRow: JobRow = {
   requestedBy: 4,
   outside: { at: 1_200, kinds: ["page", "mail"], tools: ["read_fixture_page", "read_mail"] },
   block: { cause: "hit", kind: "page", tool: "read_fixture_page", chunk: 3, at: 2_500 },
+  stop: { at: 2_600, by: "owner" },
+  resumes: 2,
 };
 
 describe("the job board upgrade", () => {
-  it("is version 3 and migrates a version-1 board, field by field", () => {
-    expect(JobBoardDoc.definition.version).toBe(3);
+  it("is version 4 and migrates a version-1 board, field by field", () => {
+    expect(JobBoardDoc.definition.version).toBe(4);
     const {
       pause,
       question,
@@ -133,6 +140,8 @@ describe("the job board upgrade", () => {
       resumedAt,
       outside,
       block,
+      stop,
+      resumes,
       ...v1
     } = row;
     const migrated = JobBoardDoc.definition.migrate?.(
@@ -150,11 +159,18 @@ describe("the job board upgrade", () => {
     expect(upgraded?.resumedAt).toBeNull();
     expect(upgraded?.outside).toBeNull();
     expect(upgraded?.block).toBeNull();
-    expect(migrated).toEqual({ nextNumber: 2, jobs: { "1": row }, byConversation: { "7": 1 } });
+    expect(upgraded?.stop).toBeNull();
+    expect(upgraded?.resumes).toBe(0);
+    expect(migrated).toEqual({
+      nextNumber: 2,
+      jobs: { "1": row },
+      byConversation: { "7": 1 },
+      queue: [1],
+    });
   });
 
   it("migrates a version-2 board, keeping every field and adding the outside and block fields", () => {
-    const { outside, block, ...v2 } = fullRow;
+    const { outside, block, stop, resumes, ...v2 } = fullRow;
     const migrated = JobBoardDoc.definition.migrate?.(
       { nextNumber: 2, jobs: { "1": v2 }, byConversation: {} } as never,
       2,
@@ -165,6 +181,45 @@ describe("the job board upgrade", () => {
     for (const [field, value] of Object.entries(v2)) {
       expect(upgraded?.[field as keyof JobRow]).toEqual(value);
     }
+  });
+
+  it("migrates a version-3 board field by field, with the live jobs queued by priority", () => {
+    const v3 = (number: number, change: Partial<JobRow>) => {
+      const { stop, resumes, ...rest } = { ...fullRow, ...change, number };
+      return rest;
+    };
+    const jobs = {
+      "1": v3(1, { priority: "research", status: "running" }),
+      "2": v3(2, { priority: "routine", status: "queued" }),
+      "3": v3(3, { priority: "deadline", deadline: "2026-10-20", status: "waiting" }),
+      "4": v3(4, { priority: "urgent", status: "done" }),
+      "5": v3(5, { priority: "deadline", deadline: "2026-10-13", status: "paused" }),
+      "6": v3(6, { priority: "urgent", status: "running" }),
+      "7": v3(7, { priority: "routine", status: "rejected" }),
+    };
+    const migrated = JobBoardDoc.definition.migrate?.(
+      { nextNumber: 8, jobs, byConversation: { "9": 6 } } as never,
+      3,
+    );
+    expect(migrated?.queue).toEqual([6, 5, 3, 2, 7, 1]);
+    expect(migrated?.nextNumber).toBe(8);
+    expect(migrated?.byConversation).toEqual({ "9": 6 });
+    for (const [key, old] of Object.entries(jobs)) {
+      const upgraded = migrated?.jobs[key];
+      for (const [field, value] of Object.entries(old)) {
+        expect(upgraded?.[field as keyof JobRow]).toEqual(value);
+      }
+      expect(upgraded?.stop).toBeNull();
+      expect(upgraded?.resumes).toBe(0);
+    }
+  });
+
+  it("keeps the queue of a version-4 board", () => {
+    const migrated = JobBoardDoc.definition.migrate?.(
+      { nextNumber: 2, jobs: { "1": row }, byConversation: {}, queue: [1] } as never,
+      4,
+    );
+    expect(migrated?.queue).toEqual([1]);
   });
 
   it("round-trips every new field through a commit and a snapshot", async () => {
@@ -217,7 +272,12 @@ describe("the job documents", () => {
     }, BACKGROUND_CONTEXT);
 
     const board = await harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT);
-    expect(board).toEqual({ nextNumber: 2, jobs: { "1": row }, byConversation: { "7": 1 } });
+    expect(board).toEqual({
+      nextNumber: 2,
+      jobs: { "1": row },
+      byConversation: { "7": 1 },
+      queue: [],
+    });
     expect((await harness.snapshot(ReceiptDoc, "r1", BACKGROUND_CONTEXT))?.receipt).toMatchObject({
       tool: "household_read",
       status: "done",
@@ -236,12 +296,50 @@ describe("the job documents", () => {
     expect((await harness.snapshot(TierSettingsDoc, BACKGROUND_CONTEXT))?.caps).toEqual({ mid: 2 });
   });
 
+  it("round-trips the stop, hand-off note, and capacity documents", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    const { harness } = test.cell;
+    const stop = {
+      active: { at: 3_000, by: "person" as const },
+      last: { at: 2_000, by: "owner" as const, jobs: 3, turn: true },
+    };
+    const note = {
+      note: {
+        text: "Open promises:\n- send the flight list\nPending questions:\nRecent preferences:",
+        at: 4_000,
+        firstKept: "e12",
+        compactions: 2,
+      },
+    };
+    const capacity = { measured: 8, at: 5_000 };
+    await harness.commit(async (tx) => {
+      Object.assign(await tx.doc(StopDoc), structuredClone(stop));
+      Object.assign(await tx.doc(HandoffNoteDoc), structuredClone(note));
+      Object.assign(await tx.doc(CapacityDoc), capacity);
+    }, BACKGROUND_CONTEXT);
+    expect(await harness.snapshot(StopDoc, BACKGROUND_CONTEXT)).toEqual(stop);
+    expect(await harness.snapshot(HandoffNoteDoc, BACKGROUND_CONTEXT)).toEqual(note);
+    expect(await harness.snapshot(CapacityDoc, BACKGROUND_CONTEXT)).toEqual(capacity);
+    await test.reopen();
+    expect(await test.cell.harness.snapshot(StopDoc, BACKGROUND_CONTEXT)).toEqual(stop);
+    expect(await test.cell.harness.snapshot(HandoffNoteDoc, BACKGROUND_CONTEXT)).toEqual(note);
+  });
+
   it("starts empty", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     test = await openTestCell();
     await test.cell.harness.commit(async (tx) => {
-      expect(await tx.doc(JobBoardDoc)).toEqual({ nextNumber: 1, jobs: {}, byConversation: {} });
+      expect(await tx.doc(JobBoardDoc)).toEqual({
+        nextNumber: 1,
+        jobs: {},
+        byConversation: {},
+        queue: [],
+      });
       expect((await tx.doc(BookmarkDoc)).bookmark).toBeNull();
+      expect(await tx.doc(StopDoc)).toEqual({ active: null, last: null });
+      expect(await tx.doc(HandoffNoteDoc)).toEqual({ note: null });
+      expect(await tx.doc(CapacityDoc)).toEqual({ measured: null, at: null });
       expect((await tx.doc(ReceiptDoc, "r9", null)).receipt).toBeNull();
     }, BACKGROUND_CONTEXT);
   });
