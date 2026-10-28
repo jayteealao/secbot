@@ -1,14 +1,16 @@
 // The slice's signals, each one JSON line through logEvent with its fields: a job's start, finish,
 // waiting result, wake notice, pull, and effort change, the closing of its usage watch, a receipt's
-// start and finish, the bookmark's record and resume, and the steered input. No line carries a
-// brief, a result, a note, or a secret's value.
+// start and finish, the bookmark's record and resume, the steered input, each job a stop ends,
+// the stop's end and a job it left running, a restart, and a reorder. No line carries a brief, a
+// title, a result, a note, or a secret's value.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DecisionModels } from "../src/decision-model.ts";
-import { JobBoardDoc } from "../src/docs.ts";
+import { JobBoardDoc, StopDoc } from "../src/docs.ts";
 import { createJobRow } from "../src/job-board.ts";
 import { QUEUED_LONG_MS } from "../src/job-task.ts";
+import { stopJobs } from "../src/stop.ts";
 import { failingResearch, job, leadCalls } from "./escalation-helpers.ts";
 import {
   cleanContent,
@@ -516,5 +518,106 @@ describe("the content check signals", () => {
     expect(verdicts.find((each) => each.tool === "read_fixture_page")).not.toHaveProperty(
       "outside_content",
     );
+  });
+});
+
+describe("the stop, restart, and reorder signals", () => {
+  const SECRET_TITLE = "title that must stay out of the log: plum-4410";
+  const start = (t: TestCell, n: number) =>
+    t.cell
+      .submit(
+        startJobLine({ title: `${SECRET_TITLE} ${n}`, brief: BRIEF, template: "research" }),
+        `signal-job-${n}`,
+      )
+      .then((input) => input.wait(BACKGROUND_CONTEXT));
+  const stopParts = (t: TestCell) => ({
+    harness: t.cell.harness,
+    root: t.cell.root,
+    person: t.cell.person,
+    now: t.cell.now,
+  });
+
+  it("logs each stopped job, the stop's end, a restart, and a reorder with their fields", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const hold = createHold();
+    test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
+    const t = test;
+    hold.hold("research");
+    await start(t, 1);
+    await start(t, 2);
+    await until(() => hold.waiting("research") === 2);
+
+    const reordered = await t.cell.reorderJob(2, { urgent: true });
+    expect(reordered.ok).toBe(true);
+    const stopping = stopJobs(stopParts(t), "person", BACKGROUND_CONTEXT);
+    await until(
+      async () => (await t.cell.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.active != null,
+    );
+    hold.release("research");
+    await stopping;
+    expect(await t.cell.resumeJob(1)).toMatchObject({ ok: true });
+    await until(async () => (await job(t, 1))?.status === "done");
+
+    const lines = loggedEvents(log.mock.calls);
+    const of = (event: string) => lines.filter((line) => line.event === event);
+    expect(of("job.reordered")).toEqual([
+      {
+        event: "job.reordered",
+        level: "info",
+        cell: "owner",
+        job: 2,
+        change: "urgent",
+        place: 1,
+        of: 2,
+      },
+    ]);
+    expect(of("job.stopped")).toEqual([
+      { event: "job.stopped", level: "info", cell: "owner", job: 1, by: "person" },
+      { event: "job.stopped", level: "info", cell: "owner", job: 2, by: "person" },
+    ]);
+    expect(of("stop.done")).toEqual([
+      {
+        event: "stop.done",
+        level: "info",
+        cell: "owner",
+        by: "person",
+        jobs: 2,
+        turn: false,
+        duration_ms: expect.any(Number),
+      },
+    ]);
+    expect(of("job.resumed")).toEqual([
+      { event: "job.resumed", level: "info", cell: "owner", job: 1, by: "person", resumes: 1 },
+    ]);
+    expect(of("stop.left_running")).toEqual([]);
+    const text = JSON.stringify(lines);
+    expect(text).not.toContain("plum-4410");
+    expect(text).not.toContain("kale-7731");
+  });
+
+  it("warns when a stop leaves a marked job running", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const hold = createHold();
+    test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
+    const t = test;
+    hold.hold("research");
+    await start(t, 1);
+    await until(() => hold.waiting("research") === 1);
+    // A task that does not end on its abort: the stop finds it still running.
+    vi.spyOn(t.cell.harness, "abortTask").mockResolvedValue(undefined as never);
+    vi.spyOn(t.cell.harness, "waitForTask").mockResolvedValue(undefined as never);
+    expect(await stopJobs(stopParts(t), "owner", BACKGROUND_CONTEXT)).toEqual({
+      jobs: 1,
+      turn: false,
+    });
+    expect(
+      loggedEvents(warn.mock.calls).filter((line) => line.event === "stop.left_running"),
+    ).toEqual([{ event: "stop.left_running", level: "warn", cell: "owner", jobs: 1 }]);
+    expect((await job(t, 1))?.stop).toBeNull();
+    vi.mocked(t.cell.harness.abortTask).mockRestore();
+    vi.mocked(t.cell.harness.waitForTask).mockRestore();
+    hold.release("research");
+    await until(async () => (await job(t, 1))?.status === "done");
   });
 });
