@@ -6,15 +6,10 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Usage } from "@earendil-works/pi-ai";
 import { type Conversation, UsageDoc } from "@earendil-works/pi-durable";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chunkContent, WITHHELD_TEXT } from "../src/content-check.ts";
+import { CUT_NOTE, chunkContent, READ_SIZES, WITHHELD_TEXT } from "../src/content-check.ts";
 import { createDecisionModels } from "../src/decision-model.ts";
 import { readGuardMode } from "../src/guard-settings.ts";
-import {
-  CONTENT_CHECK_MAX_BYTES,
-  CONTENT_CHUNK_BYTES,
-  CONTENT_CHUNK_OVERLAP_BYTES,
-  GUARD_USAGE_KEYS,
-} from "../src/release-defaults.ts";
+import { CONTENT_CHECK_MAX_BYTES, GUARD_USAGE_KEYS } from "../src/release-defaults.ts";
 import { leadCalls } from "./escalation-helpers.ts";
 import {
   createFauxGateway,
@@ -26,7 +21,7 @@ import {
   type TestCell,
   until,
 } from "./fixtures.ts";
-import { FIXTURE_PAGES, standInDecide } from "./injection-fixtures.ts";
+import { FIXTURE_ORDER, FIXTURE_PAGES, standInDecide } from "./injection-fixtures.ts";
 import { entriesOf, toolResultsOf, wakeNoticesOf } from "./job-helpers.ts";
 import { jobResponder, RESEARCH_JOB } from "./responders.ts";
 import { DECISIONS_ROUTE, type StubOpenRouter, startStubOpenRouter } from "./stub-openrouter.ts";
@@ -99,11 +94,7 @@ const contentRequests = () =>
       Object.hasOwn((request.body.questions ?? {}) as object, "injection"),
   );
 
-const SIZES = {
-  chunkBytes: CONTENT_CHUNK_BYTES,
-  overlapBytes: CONTENT_CHUNK_OVERLAP_BYTES,
-  maxBytes: CONTENT_CHECK_MAX_BYTES,
-};
+const SIZES = READ_SIZES;
 
 describe("clean content is kept and the job goes on (AC-24)", () => {
   it("keeps the clean page exactly, marks the job, and books the check on the job", async () => {
@@ -194,5 +185,35 @@ describe("an order, a timeout, or an error stops the job in shadow mode (AC-25)"
     stub.mode = 500;
     const t = await readJob("clean");
     await expectStopped(t, "clean", "error", NO_ANSWER);
+  });
+});
+
+describe("content past one chunk (AC-26)", () => {
+  it("stops when the order is only in the last chunk, after asking every chunk", async () => {
+    const { chunks } = chunkContent(FIXTURE_PAGES["long-tail"], SIZES);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.at(-1)).toContain(FIXTURE_ORDER);
+    expect(chunks.slice(0, -1).some((chunk) => chunk.includes(FIXTURE_ORDER))).toBe(false);
+    const t = await readJob("long-tail");
+    await expectStopped(t, "long-tail", "hit", HIT);
+    expect((await row(t))?.block?.chunk).toBe(chunks.length - 1);
+    expect(contentRequests()).toHaveLength(chunks.length);
+  });
+
+  it("keeps only the checked 50 KB of a longer page, with a note, never a byte past it", async () => {
+    const page = FIXTURE_PAGES["over-max"];
+    const { checkedText, cut } = chunkContent(page, SIZES);
+    expect(cut).toBe(true);
+    expect(
+      new TextEncoder().encode(page.slice(0, page.indexOf(FIXTURE_ORDER))).length,
+    ).toBeGreaterThan(CONTENT_CHECK_MAX_BYTES);
+    const t = await readJob("over-max");
+    await until(async () => (await row(t))?.status === "done");
+    const kept = await toolResultsOf(await jobConversation(t));
+    expect(kept).toEqual([checkedText + CUT_NOTE]);
+    expect(await storedText(t)).not.toContain(FIXTURE_ORDER);
+    expect(new TextEncoder().encode(kept[0] ?? "").length).toBeLessThanOrEqual(
+      CONTENT_CHECK_MAX_BYTES,
+    );
   });
 });

@@ -162,10 +162,18 @@ export type ContentVerdict =
 
 type Stop = { outcome: "hit" | "timeout" | "error"; chunk: number | null; cause: string };
 
-const DEFAULT_SIZES: ChunkSizes = {
+/** The note after content that was cut at the check's maximum. */
+export const CUT_NOTE = "\n[secbot: the rest was cut at 50 KB and not read]";
+
+/**
+ * The sizes a job's read is checked with: the kept text and the cut note together stay within
+ * the check's maximum, which is also pi-durable's default bound on a result, so the bound never
+ * cuts the kept text again (it would drop the note).
+ */
+export const READ_SIZES: ChunkSizes = {
   chunkBytes: CONTENT_CHUNK_BYTES,
   overlapBytes: CONTENT_CHUNK_OVERLAP_BYTES,
-  maxBytes: CONTENT_CHECK_MAX_BYTES,
+  maxBytes: CONTENT_CHECK_MAX_BYTES - encoder.encode(CUT_NOTE).length,
 };
 
 /** The abort reason of a signal, as an error to throw. */
@@ -181,7 +189,7 @@ export async function checkContent(
   model: DecisionModel,
   read: ContentRead,
   signal?: AbortSignal,
-  sizes: ChunkSizes = DEFAULT_SIZES,
+  sizes: ChunkSizes = READ_SIZES,
   parallel: number = CONTENT_CHECK_PARALLEL,
 ): Promise<ContentVerdict> {
   if (signal?.aborted) throw abortError(signal);
@@ -277,9 +285,6 @@ export function contentCheckWraps(
 
 /** What a job's conversation keeps in place of content the check stopped. */
 export const WITHHELD_TEXT = "[secbot: this content was withheld; the job is stopped]";
-
-/** The note after content that was cut at the check's maximum. */
-export const CUT_NOTE = "\n[secbot: the rest was cut at 50 KB and not read]";
 
 /** The lead's wake notice for a blocked job. */
 export const blockedNotice = (n: number, block: JobBlock): string =>
