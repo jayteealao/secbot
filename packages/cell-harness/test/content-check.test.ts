@@ -8,7 +8,6 @@ import {
   checkContent,
   chunkContent,
   contentCheckWraps,
-  createContentCheckExtension,
   WITHHELD_TEXT,
 } from "../src/content-check.ts";
 import {
@@ -41,7 +40,7 @@ import {
   until,
 } from "./fixtures.ts";
 import { toolResultsOf, wakeNoticesOf } from "./job-helpers.ts";
-import { jobResponder, RESEARCH_JOB } from "./responders.ts";
+import { createHold, jobResponder, RESEARCH_JOB } from "./responders.ts";
 
 const SIZES = {
   chunkBytes: CONTENT_CHUNK_BYTES,
@@ -356,24 +355,12 @@ describe("the afterTool check", () => {
 
   const open = async (page: string, decision: DecisionModels) => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const holder: { t?: TestCell } = {};
     test = await openTestCell({
       gateway: createFauxGateway(readsPage(page)),
-      extensions: [
-        createFixtureReaderExtension(PAGES),
-        createContentCheckExtension({
-          person: "owner",
-          harness: () => {
-            if (holder.t === undefined) throw new Error("not open");
-            return holder.t.cell.harness;
-          },
-          decision,
-          readers: {},
-          now: () => 7_000,
-        }),
-      ],
+      fixturePages: PAGES,
+      guard: { decision },
+      now: () => 7_000,
     });
-    holder.t = test;
     await (await test.cell.submit(RESEARCH_JOB, "read-1")).wait(BACKGROUND_CONTEXT);
     return test;
   };
@@ -411,6 +398,45 @@ describe("the afterTool check", () => {
     ).toEqual([
       "[job 1 blocked: a page tried to give the agent orders; nothing from it was used; read it with job_result]",
     ]);
+  });
+
+  it("puts the check and the fixture tool on job conversations, and no reading tool on the lead's", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const hold = createHold();
+    hold.hold("research");
+    test = await openTestCell({
+      gateway: createFauxGateway(hold.wrap(readsPage("clean"))),
+      fixturePages: PAGES,
+    });
+    const t = test;
+    await (await t.cell.submit(RESEARCH_JOB, "wire-1")).wait(BACKGROUND_CONTEXT);
+    await until(() => hold.waiting("research") === 1);
+    const id = (await t.cell.board()).jobs["1"]?.conversationId;
+    if (id == null) throw new Error("no job conversation");
+    const agent = await (await t.cell.harness.conversation(id, BACKGROUND_CONTEXT))?.agent(
+      BACKGROUND_CONTEXT,
+    );
+    expect(agent?.tools.map((tool) => tool.name)).toContain("read_fixture_page");
+    const names = agent?.extensions.map((extension) => extension.name) ?? [];
+    expect(names.slice(0, 4)).toEqual([
+      "secbot-guard",
+      "secbot-budget",
+      "secbot-job-gate",
+      "secbot-content-check",
+    ]);
+    const lead = await t.cell.root.agent(BACKGROUND_CONTEXT);
+    expect(lead.tools.filter((tool) => readingKindOf(tool.name) !== null)).toEqual([]);
+    expect(lead.extensions.map((extension) => extension.name)).not.toContain(
+      "secbot-content-check",
+    );
+    hold.release("research");
+  });
+
+  it("has no fixture tool in a cell without fixture pages", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    const tools = test.cell.extensions.job.flatMap((extension) => extension.tools ?? []);
+    expect(tools.map((tool) => tool.name)).not.toContain("read_fixture_page");
   });
 
   it("blocks with error when the decision model throws", async () => {

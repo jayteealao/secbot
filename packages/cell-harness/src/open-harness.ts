@@ -46,6 +46,7 @@ import {
 import { createBookmarkExtension, recordInterruption } from "./bookmark.ts";
 import { BudgetGate, createBudgetExtension } from "./budget-gate.ts";
 import { type CellParts, errorFields, logEvent } from "./cell-parts.ts";
+import { createContentCheckExtension } from "./content-check.ts";
 import { createDecisionModels, type DecisionModels, parseThresholdCaps } from "./decision-model.ts";
 import { type MissedPage, markDelivered, missedPage } from "./delivery.ts";
 import {
@@ -85,8 +86,8 @@ import { createHouseholdExtension, type HouseholdClient } from "./household-tool
 import { answerQuestion, ENDED, openQuestion } from "./job-board.ts";
 import { createJobGate } from "./job-gate.ts";
 import { JobHolds } from "./job-holds.ts";
-import { createJobToolsExtension } from "./job-tools.ts";
 import type { JobTask } from "./job-task.ts";
+import { createJobToolsExtension } from "./job-tools.ts";
 import { liveJobs } from "./jobs.ts";
 import { createJobsExtension } from "./lead-tools.ts";
 import {
@@ -105,8 +106,9 @@ import {
 import { ModelHealthMonitor } from "./model-health.ts";
 import { listRoleModels, type RoleModel, setRoleModel, setTierCap } from "./model-map.ts";
 import { ledgerConversations } from "./month-ledger.ts";
+import { createFixtureReaderExtension } from "./outside-tools.ts";
 import type { ReceiptTask } from "./receipts.ts";
-import type { DecisionAdapter } from "./release-defaults.ts";
+import type { DecisionAdapter, OutsideKind } from "./release-defaults.ts";
 import {
   createReminderExtension,
   createReminderRoutine,
@@ -180,6 +182,16 @@ export interface OpenCellOptions {
   readonly routines?: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
   /** Tests: more extensions for every role, after the release ones (the guard stays first). */
   readonly extensions?: readonly Extension[];
+  /**
+   * Tests and the test cell: fixed web pages a job can read with `read_fixture_page`, a reading
+   * tool whose content is checked like any other. A cell without them has no fixture tool.
+   */
+  readonly fixturePages?: Readonly<Record<string, string>>;
+  /**
+   * Reading tools that later units add with `extensions`, beside the release table: their results
+   * are checked before a job keeps them.
+   */
+  readonly readers?: Readonly<Record<string, OutsideKind>>;
   /**
    * Tests and later inputs: the held-call request id, the hold length, and the lapse timer; tests
    * also replace the decision model (default: the Decisions API with the cell's OpenRouter key)
@@ -755,6 +767,33 @@ export async function openCellHarness(
   // Paused and questioning jobs wait here; the job gate, the job tools, and the lead's tools share it.
   const holds = new JobHolds();
   const jobGate = createJobGate({ person, harness: current, holds, now });
+  const {
+    decision: decisionOption,
+    reviewer: reviewerOption,
+    reviewerTimeoutMs,
+    budgetTimer: _budgetTimer,
+    ...guardOptions
+  } = options.guard ?? {};
+  // One decision model for the guard and the content check, on the cell's current adapter.
+  const decisionModels =
+    decisionOption ??
+    createDecisionModels({
+      apiKey: env.OPENROUTER_API_KEY,
+      baseUrl: env.OPENROUTER_BASE_URL,
+      thresholdCaps: parseThresholdCaps(env.SECBOT_MARK_THRESHOLD_CAPS),
+    });
+  const readers = options.readers ?? {};
+  // The fixture reading tool exists only where fixture pages are given (tests, the test cell).
+  const fixtureReader =
+    options.fixturePages === undefined ? [] : [createFixtureReaderExtension(options.fixturePages)];
+  // Every web page, mail, or file a job reads is checked before the job keeps it, in every mode.
+  const contentCheck = createContentCheckExtension({
+    person,
+    harness: current,
+    decision: decisionModels,
+    readers,
+    now,
+  });
   // A job's own tools: search its earlier attempts (no tool that starts a subagent); every tool
   // a job calls is recorded on its row, so a result is marked risky by the tools it used.
   const jobTools = createJobToolsExtension({
@@ -762,9 +801,14 @@ export async function openCellHarness(
     harness: current,
     holds,
     now,
-    wrapped: [history, household, secrets, ...(options.extensions ?? [])].flatMap((extension) =>
-      (extension.tools ?? []).map((tool) => tool.name),
-    ),
+    wrapped: [
+      ...new Set([
+        ...[history, household, secrets, ...fixtureReader, ...(options.extensions ?? [])].flatMap(
+          (extension) => (extension.tools ?? []).map((tool) => tool.name),
+        ),
+        ...Object.keys(readers),
+      ]),
+    ],
   });
   let jobList: readonly Extension[] = [];
   const jobs = createJobsExtension({
@@ -790,22 +834,9 @@ export async function openCellHarness(
     },
   });
   const bookmark = createBookmarkExtension(person, now);
-  const {
-    decision: decisionOption,
-    reviewer: reviewerOption,
-    reviewerTimeoutMs,
-    budgetTimer: _budgetTimer,
-    ...guardOptions
-  } = options.guard ?? {};
   // The decision model and the reviewer run after the rules, on calls the rules passed.
   const modelStage = createModelStage({
-    decision:
-      decisionOption ??
-      createDecisionModels({
-        apiKey: env.OPENROUTER_API_KEY,
-        baseUrl: env.OPENROUTER_BASE_URL,
-        thresholdCaps: parseThresholdCaps(env.SECBOT_MARK_THRESHOLD_CAPS),
-      }),
+    decision: decisionModels,
     reviewer:
       reviewerOption ??
       createReviewer({
@@ -832,8 +863,21 @@ export async function openCellHarness(
   // limit a job waits before its next request; chat with the lead runs.
   const budget = createBudgetExtension(() => gate);
   // The job gate is after the budget: above a limit a job waits there first; then the gate pauses
-  // a job at its cap or after three failing steps.
-  const job = [guard, budget, jobGate, jobTools, history, household, secrets, telemetry, ...extra];
+  // a job at its cap or after three failing steps. The content check is on job lists only: no
+  // reading tool is on the lead's list.
+  const job = [
+    guard,
+    budget,
+    jobGate,
+    contentCheck,
+    jobTools,
+    history,
+    household,
+    secrets,
+    telemetry,
+    ...fixtureReader,
+    ...extra,
+  ];
   jobList = job;
   const extensions = {
     lead: [
