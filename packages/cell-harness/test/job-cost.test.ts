@@ -3,8 +3,10 @@
 // the job, the month ledger counts their spend, and the usage watch stops when the job ends.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ledgerConversations, readMonth } from "../src/month-ledger.ts";
 import { roleOf } from "../src/telemetry.ts";
 import {
+  addJobSpend,
   addSpend,
   createFauxGateway,
   fauxAssistantMessage,
@@ -89,5 +91,49 @@ describe("roles of job conversations", () => {
     // Chat with the lead still runs.
     await (await t.cell.submit("hello", "d-2")).wait(BACKGROUND_CONTEXT);
     expect((await t.cell.board()).jobs["1"]?.result).toBeNull();
+  });
+});
+
+describe("the month ledger counts job conversations", () => {
+  it("puts a research job's spend in the person's month, by role and in the hour chart", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(jobResponder) });
+    const t = test;
+    await (
+      await t.cell.submit(startJobLine({ title: "a", brief: "look", template: "research" }), "m-1")
+    ).wait(BACKGROUND_CONTEXT);
+    await until(boardResult(t, 1));
+    const before = await readMonth(t.cell.harness, Date.now(), "UTC", BACKGROUND_CONTEXT);
+    await addJobSpend(t.cell, 1, 0.5);
+    t.cell.budget.watch.trigger();
+    await t.cell.budget.watch.settled();
+    const after = await readMonth(t.cell.harness, Date.now(), "UTC", BACKGROUND_CONTEXT);
+    expect((after.person.byRole.research ?? 0) - (before.person.byRole.research ?? 0)).toBeCloseTo(
+      0.5,
+      10,
+    );
+    expect(after.person.spentUsd - before.person.spentUsd).toBeCloseTo(0.5, 10);
+    const hourly = Object.values(after.hours).reduce(
+      (all, roles) => all + (roles.research ?? 0),
+      0,
+    );
+    expect(hourly).toBeGreaterThanOrEqual(0.5);
+    const conversations = await ledgerConversations(t.cell.harness, BACKGROUND_CONTEXT);
+    expect(conversations.find((each) => each.job === 1)).toMatchObject({ role: "research" });
+  });
+
+  it("puts a developer job's spend in the developer budget", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(jobResponder) });
+    const t = test;
+    await (
+      await t.cell.submit(startJobLine({ title: "a", brief: "fix", template: "developer" }), "m-2")
+    ).wait(BACKGROUND_CONTEXT);
+    await until(boardResult(t, 1));
+    const before = await readMonth(t.cell.harness, Date.now(), "UTC", BACKGROUND_CONTEXT);
+    await addJobSpend(t.cell, 1, 2);
+    const after = await readMonth(t.cell.harness, Date.now(), "UTC", BACKGROUND_CONTEXT);
+    expect(after.developer.spentUsd - before.developer.spentUsd).toBeCloseTo(2, 10);
+    expect(after.person.spentUsd).toBeCloseTo(before.person.spentUsd, 10);
   });
 });

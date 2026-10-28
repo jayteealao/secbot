@@ -23,7 +23,7 @@ import {
   type UsageState,
 } from "@earendil-works/pi-durable";
 import { monthOf } from "./activity.ts";
-import { type BudgetName, MonthLedgerDoc, RosterDoc } from "./docs.ts";
+import { type BudgetName, JobBoardDoc, MonthLedgerDoc, RosterDoc } from "./docs.ts";
 import { DEVELOPER_ROLE, GUARD_USAGE_KEYS, LEAD_ROLE } from "./release-defaults.ts";
 
 /** The zone's offset from UTC at `at`, in milliseconds (positive east of Greenwich). */
@@ -82,14 +82,33 @@ export interface LedgerConversation {
   /** The id as a document key. */
   readonly conversationId: string;
   readonly role: string;
+  /** The job the conversation runs, for a job conversation. */
+  readonly job?: number;
 }
 
-/** The lead's conversation and each specialist's, from the roster. */
+/**
+ * The lead's conversation, each specialist's from the roster, and each job's from the board (role:
+ * its template). A job that ended before the current month began is left out: its spend is all in
+ * earlier months.
+ */
 export async function ledgerConversations(
   reader: Pick<DocumentReader, "snapshot">,
   context: Context,
 ): Promise<LedgerConversation[]> {
   const roster = await reader.snapshot(RosterDoc, context);
+  const board = await reader.snapshot(JobBoardDoc, context);
+  const startsAt = (await reader.snapshot(MonthLedgerDoc, context))?.startsAt ?? 0;
+  const jobs: LedgerConversation[] = [];
+  for (const row of Object.values(board?.jobs ?? {})) {
+    if (row.conversationId === null) continue;
+    if (row.endedAt !== null && row.endedAt < startsAt) continue;
+    jobs.push({
+      id: row.conversationId,
+      conversationId: String(row.conversationId),
+      role: row.template,
+      job: row.number,
+    });
+  }
   return [
     { id: ROOT_CONVERSATION_ID, conversationId: String(ROOT_CONVERSATION_ID), role: LEAD_ROLE },
     ...Object.entries(roster?.specialists ?? {}).map(([role, record]) => ({
@@ -97,6 +116,7 @@ export async function ledgerConversations(
       conversationId: String(record.conversationId),
       role,
     })),
+    ...jobs,
   ];
 }
 
