@@ -79,6 +79,8 @@ export interface FakeCell {
   held: unknown[];
   /** The answer route: number -> [status, body]; an unknown number answers 404. */
   answers: Record<number, [number, unknown]>;
+  /** The job answer route: job -> [status, body]; an unknown job answers 404. */
+  jobAnswers: Record<number, [number, unknown]>;
   /** The guard routes: both rule levels, the activity answer, and a refusal for the next add. */
   rules: { owner: Record<string, unknown>[]; person: Record<string, unknown>[]; timeZone: string };
   activity: Record<string, unknown>;
@@ -122,6 +124,7 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     missed: [],
     held: [],
     answers: {},
+    jobAnswers: {},
     rules: { owner: [], person: [], timeZone: "UTC" },
     activity: { person, month: "2026-10", timeZone: "UTC", total: 0, records: [], next: null },
     activityOf: undefined,
@@ -309,6 +312,12 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       }
       if (route === "/approvals" && request.method === "GET")
         return reply(200, { held: cell.held });
+      const jobAnswer = /^\/jobs\/(\d+)\/answer$/.exec(route);
+      if (jobAnswer !== null && request.method === "POST") {
+        const job = Number(jobAnswer[1]);
+        const [status, value] = cell.jobAnswers[job] ?? [404, { error: `no job #${job}` }];
+        return reply(status, value);
+      }
       const answer = /^\/approvals\/(\d+)$/.exec(route);
       if (answer !== null && request.method === "POST") {
         const number = Number(answer[1]);

@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Io } from "../src/io.ts";
+import { answeredLine, answerJobOf } from "../src/commands/job-answer.ts";
 import { run } from "../src/main.ts";
 import { type FakeCell, startFakeCell } from "./fake-cell.ts";
 
@@ -141,6 +142,68 @@ describe("secbot chat", () => {
     expect(await run(["chat"], { environment, io, reconnectMs: 20 })).toBe(0);
     expect(out()).toContain("connection lost; reconnecting");
     expect(fake.inputs).toHaveLength(1);
+  });
+
+  it("prints a job's question line once and answers it only with an exact /answer", async () => {
+    const { environment } = await setup();
+    if (cell === undefined) throw new Error("no cell");
+    const fake = cell;
+    fake.jobAnswers[11] = [200, { job: 11, title: "renew passport form" }];
+    fake.jobAnswers[12] = [409, { error: "job 12 has no question waiting" }];
+    fake.onInput = (_input, socket) => {
+      socket.send({ type: "delta", text: "Which address, home or the office?" });
+      socket.send({ type: "answer", entryId: 2, text: "Which address, home or the office?" });
+      socket.send({ type: "question", job: 11, title: "renew passport form" });
+      // A reconnect or a second notice of the same question prints nothing new.
+      socket.send({ type: "question", job: 11, title: "renew passport form" });
+    };
+    const { io, out, err } = testIo(async function* (output) {
+      yield "the passport form";
+      await waitFor(() => output().includes("[ job 11 asks ]"));
+      yield "/answer eleven home";
+      yield "/answer 12 home";
+      yield "/answer 11 home address";
+      await waitFor(() => output().includes("[ answered ]"));
+    });
+    expect(await run(["chat"], { environment, io })).toBe(0);
+    expect(out()).toBe(
+      [
+        "connected to owner lead",
+        "Which address, home or the office?",
+        "",
+        "[ job 11 asks ] answer with /answer 11 <text>",
+        "[ answered ] #11 renew passport form continues",
+        "",
+      ].join("\n"),
+    );
+    expect(err()).toBe(
+      [
+        "not sent: answer with /answer <#> <text>",
+        "secbot: job 12 has no question waiting",
+        "",
+      ].join("\n"),
+    );
+    // Only the plain line reached the lead; the answers went to the answer route.
+    expect(fake.inputs.map((input) => input.text)).toEqual(["the passport form"]);
+    expect(
+      fake.calls.filter((each) => each.path.endsWith("/answer")).map((each) => each.body),
+    ).toEqual([{ text: "home" }, { text: "home address" }]);
+    for (const line of out().split("\n")) {
+      expect(line.length).toBeLessThan(80);
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: the check is for control codes.
+      expect(line).not.toMatch(/[\u0000-\u001f\u007f]/);
+    }
+  });
+
+  it("keeps an answered line within 78 columns for a long title", () => {
+    const line = answeredLine(3, "x".repeat(120));
+    expect(line.length).toBe(78);
+    expect(line.endsWith("… continues")).toBe(true);
+    expect(answeredLine(4, "two\nlines")).toBe("[ answered ] #4 two lines continues");
+    expect(answerJobOf("/answer 4 home")).toEqual({ kind: "answer", job: 4, text: "home" });
+    expect(answerJobOf("/answer 4")).toEqual({ kind: "malformed" });
+    expect(answerJobOf("/Answer 4 home")).toEqual({ kind: "malformed" });
+    expect(answerJobOf("answer 4 home")).toEqual({ kind: "other" });
   });
 
   it("fails with the cell's reason when the device is refused", async () => {

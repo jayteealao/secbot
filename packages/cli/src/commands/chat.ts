@@ -5,7 +5,9 @@
  * line the cell has not acknowledged, under the same request id, so nothing is submitted twice.
  * Calls held for the person arrive first, as `held` frames, then messages the lead sent while no
  * session was open, as `missed` frames. Only an exact `/allow N`, `/always N`, or `/deny N`
- * answers a held call; every other line goes to the lead unchanged. The usage line (the month's
+ * answers a held call, and only an exact `/answer <#> <text>` answers a job's question the lead
+ * put to the person (printed after the lead's words as `[ job <n> asks ]`); every other line goes
+ * to the lead unchanged. The usage line (the month's
  * spend against the person's limit) prints on connect and after each answer; a limit notice prints
  * when a limit line is reached, or at connect when this device has not seen it.
  */
@@ -13,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import type { CellClient } from "../client.ts";
 import type { Io } from "../io.ts";
 import { answerHeld, answerOf, type HeldCall, heldBlock, NOT_SENT } from "./held.ts";
+import { ANSWER_NOT_SENT, answerJob, answerJobOf, questionLine } from "./job-answer.ts";
 import { type Notice, noticeBlock, type Usage, usageLine, type Waiting } from "./usage.ts";
 
 export type Frame =
@@ -27,7 +30,8 @@ export type Frame =
   | { type: "error"; message: string; requestId?: string }
   | { type: "held"; call: HeldCall; count: number }
   | { type: "usage"; usage: Usage }
-  | { type: "notice"; notice: Notice; waiting: Waiting[] };
+  | { type: "notice"; notice: Notice; waiting: Waiting[] }
+  | { type: "question"; job: number; title: string };
 
 /** The longest line the cell accepts, in characters. */
 export const INPUT_LIMIT = 20_000;
@@ -51,6 +55,7 @@ export function frameRenderer(
   let noted = false;
   const shown = new Set<number>();
   const noticed = new Set<number>();
+  const asked = new Set<number>();
 
   const print = (text: string) => {
     if (midAnswer) io.stdout("\n");
@@ -111,6 +116,12 @@ export function frameRenderer(
         if (noticed.has(frame.notice.seq)) break;
         noticed.add(frame.notice.seq);
         print(`\n${noticeBlock(frame.notice, frame.waiting ?? []).join("\n")}\n`);
+        break;
+      case "question":
+        // Once per job in this session, one blank line after the lead's words.
+        if (asked.has(frame.job)) break;
+        asked.add(frame.job);
+        print(`\n${questionLine(frame.job)}\n`);
         break;
     }
   };
@@ -179,6 +190,18 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
     if (text === "") continue;
     if (text.length > INPUT_LIMIT) {
       io.stderr(`not sent: a message is at most ${INPUT_LIMIT} characters\n`);
+      continue;
+    }
+    // An answer to a job's question goes to the cell's answer route, never to the lead; a line
+    // that only looks like one is not sent at all.
+    const job = answerJobOf(text);
+    if (job.kind === "answer") {
+      print("");
+      await answerJob(client, io, job.job, job.text);
+      continue;
+    }
+    if (job.kind === "malformed") {
+      io.stderr(`${ANSWER_NOT_SENT}\n`);
       continue;
     }
     // An answer to a held call goes to the cell's approval route, never to the lead; a line that
