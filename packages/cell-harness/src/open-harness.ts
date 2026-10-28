@@ -83,6 +83,8 @@ import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import { createHistoryExtension } from "./history-search.ts";
 import { createHouseholdExtension, type HouseholdClient } from "./household-tools.ts";
 import { ENDED } from "./job-board.ts";
+import { createJobGate } from "./job-gate.ts";
+import { JobHolds } from "./job-holds.ts";
 import type { JobTask } from "./job-task.ts";
 import { liveJobs } from "./jobs.ts";
 import { createJobsExtension } from "./lead-tools.ts";
@@ -234,6 +236,9 @@ export class CellHarness implements CellParts {
 
   /** The job and receipt tasks (job-task.ts, receipts.ts), set at open. */
   tasks: { readonly job: JobTask; readonly receipt: ReceiptTask } | undefined;
+
+  /** Where paused and questioning jobs wait (job-holds.ts); the gate and the lead share it. */
+  holds: JobHolds = new JobHolds();
 
   /** The person's job board, as committed. */
   async board(context: Context = BACKGROUND_CONTEXT) {
@@ -675,6 +680,9 @@ export async function openCellHarness(
   });
   const telemetry = createTelemetryExtension(person, monitor);
   const models = options.models ?? createGatewayModels(env);
+  // Paused and questioning jobs wait here; the job gate, the job tools, and the lead's tools share it.
+  const holds = new JobHolds();
+  const jobGate = createJobGate({ person, harness: current, holds, now });
   let jobList: readonly Extension[] = [];
   const jobs = createJobsExtension({
     person,
@@ -736,7 +744,9 @@ export async function openCellHarness(
   // The budget extension is on every job's list, after the guard, and never on the lead's: above a
   // limit a job waits before its next request; chat with the lead runs.
   const budget = createBudgetExtension(() => gate);
-  const job = [guard, budget, history, household, secrets, telemetry, ...extra];
+  // The job gate is after the budget: above a limit a job waits there first; then the gate pauses
+  // a job at its cap or after three failing steps.
+  const job = [guard, budget, jobGate, history, household, secrets, telemetry, ...extra];
   jobList = job;
   const extensions = {
     lead: [
@@ -783,6 +793,7 @@ export async function openCellHarness(
       onReport,
       reports,
       tasks: { job: jobs.JobTask, receipt: jobs.ReceiptTask },
+      holds,
     });
   } catch (error) {
     // A failure after the open (roster, routines, inspect) must not leave this harness running on
@@ -823,6 +834,7 @@ async function finishOpen(
     readonly onReport: (error: unknown) => void;
     readonly reports: ReportGate;
     readonly tasks: { readonly job: JobTask; readonly receipt: ReceiptTask };
+    readonly holds: JobHolds;
   },
 ): Promise<CellHarness> {
   const { person } = options;
@@ -867,6 +879,7 @@ async function finishOpen(
     parts.reports,
   );
   cell.tasks = parts.tasks;
+  cell.holds = parts.holds;
 
   // What the last run left: live work, and routines whose time passed while the cell was down.
   // Read before this open creates anything and before resume(), so nothing has run yet.

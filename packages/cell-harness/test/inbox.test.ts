@@ -126,12 +126,11 @@ describe("the results inbox", () => {
 
   it("sends one wake notice for a failure, without the result (AC-11)", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const { t, JobTask } = await openJobCell({
-      respond: (request) =>
-        request.role === "research" ? fauxAssistantMessage([fauxText("")]) : jobResponder(request),
-    });
+    // An empty reply no longer fails a job (the loop guard pauses it after three); a failure a
+    // producer stores (an escalation, a review rejection) wakes the lead.
+    const { t, JobTask } = await openJobCell({});
     test = t;
-    const { taskId } = await startJob(t, JobTask);
+    const { taskId } = await startJob(t, JobTask, { kind: "failure", text: "the job broke" });
     await t.cell.harness.waitForTask(taskId, BACKGROUND_CONTEXT);
     await until(async () => (await wakeNotices(t)).length > 0);
     await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);

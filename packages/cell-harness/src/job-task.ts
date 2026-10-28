@@ -278,7 +278,9 @@ export function createJobTask(deps: JobTaskDeps) {
               text = "the job answered with nothing";
             }
           }
-          const status = kind === "failure" ? "failed" : "done";
+          // A failure a producer stored first (an escalation) ends the job failed too.
+          const prior = (await rowOf(tx, n)).result?.kind;
+          const status = kind === "failure" || prior === "failure" ? "failed" : "done";
           const row = await finish(
             tx,
             deps,
