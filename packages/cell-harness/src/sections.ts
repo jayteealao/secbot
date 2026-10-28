@@ -7,10 +7,24 @@
  */
 import { defineExtension, type Extension, section } from "@earendil-works/pi-durable";
 import { bookmarkText } from "./bookmark.ts";
-import { type Bookmark, BookmarkDoc, JobBoardDoc, type Receipt, TemplatesDoc } from "./docs.ts";
-import { type BoardState, liveRows, restCount, waitingCounts } from "./job-board.ts";
+import {
+  type Bookmark,
+  BookmarkDoc,
+  JobBoardDoc,
+  type JobRow,
+  type Receipt,
+  TemplatesDoc,
+} from "./docs.ts";
+import {
+  type BoardState,
+  ENDED,
+  liveRows,
+  openQuestion,
+  restCount,
+  waitingCounts,
+} from "./job-board.ts";
 import { openReceipts } from "./receipts.ts";
-import type { JobTemplate } from "./release-defaults.ts";
+import { ESCALATION_LIMITS, type JobTemplate, LOOP_LIMIT } from "./release-defaults.ts";
 import { localTime } from "./reminder.ts";
 import { templatesOf } from "./templates.ts";
 
@@ -46,9 +60,41 @@ export function bookmarkSection(bookmark: Bookmark | null): string | undefined {
 }
 
 /**
- * The jobs section: the templates with their start tiers, each live job as
- * `#<n> <template> <tier>/<applied effort> <status> $<cost>/$<cap> <title>`, how many ended, and
- * what waits for the lead by kind. Results never enter the lead's conversation by themselves.
+ * What a job's line adds after its title: why it is paused, its open question, its review, who
+ * asked for it, and the escalations it used. Empty for a plain running job.
+ */
+export function jobStateDetails(row: JobRow): string {
+  const details: string[] = [];
+  if (row.status === "paused" && row.pause !== null) {
+    details.push(
+      row.pause.reason === "cap"
+        ? `paused: cap $${row.cost.toFixed(2)}/$${row.cap}`
+        : `paused: same step failed ${LOOP_LIMIT} times`,
+    );
+  }
+  const question = openQuestion(row);
+  if (question !== null) {
+    details.push(
+      `waiting: asks "${question.text}"${question.toPerson ? " (asked the person)" : ""}`,
+    );
+  }
+  if (row.review?.status === "running") details.push(`review running on ${row.review.model}`);
+  if (row.review?.status === "rejected") details.push(`review rejected: ${row.review.reason}`);
+  if (row.requestedBy !== null) details.push(`requested by job ${row.requestedBy}`);
+  const { raises, restarts } = row.attempts;
+  if (raises > 0 || restarts > 0) {
+    details.push(
+      `raises ${raises}/${ESCALATION_LIMITS.raises}, restarts ${restarts}/${ESCALATION_LIMITS.restarts}`,
+    );
+  }
+  return details.length === 0 ? "" : ` (${details.join("; ")})`;
+}
+
+/**
+ * The jobs section: the templates with their start tiers, each live job (and each whose result is
+ * under review) as `#<n> <template> <tier>/<applied effort> <status> $<cost>/$<cap> <title>` and
+ * its state details, how many ended, and what waits for the lead by kind. Results never enter the
+ * lead's conversation by themselves.
  */
 export function jobsSection(
   board: BoardState,
@@ -58,13 +104,16 @@ export function jobsSection(
   const lines = [
     `Job templates (start a job with start_job): ${templates.map((template) => `${template.name} (${template.tier})`).join(", ")}.`,
   ];
-  const live = liveRows(board);
+  const reviewing = Object.values(board.jobs).filter(
+    (row) => ENDED.has(row.status) && row.review?.status === "running",
+  );
+  const live = [...liveRows(board), ...reviewing].sort((a, b) => a.number - b.number);
   if (live.length === 0) lines.push("No live jobs.");
   else {
     lines.push("Live jobs:");
     for (const row of live) {
       lines.push(
-        `#${row.number} ${row.template} ${row.tier}/${row.effort.applied} ${row.status} $${row.cost.toFixed(2)}/$${row.cap} ${row.title}`,
+        `#${row.number} ${row.template} ${row.tier}/${row.effort.applied} ${row.status} $${row.cost.toFixed(2)}/$${row.cap} ${row.title}${jobStateDetails(row)}`,
       );
     }
   }

@@ -72,6 +72,65 @@ describe("the lead's prompt sections", () => {
     ).toBe(text);
   });
 
+  it("shows a pause, a question, a review, a request, and the escalations used", () => {
+    const question = {
+      number: 1,
+      from: "job" as const,
+      text: "Which airport?",
+      askedAt: 1,
+      toPerson: false,
+      personAskedAt: null,
+      answer: null,
+      answeredAt: null,
+      answeredBy: null,
+    };
+    const review = {
+      status: "running" as const,
+      model: "anthropic/claude-opus-5.5",
+      reason: "",
+      conversationId: null,
+      at: 1,
+    };
+    const board = {
+      nextNumber: 9,
+      byConversation: {},
+      jobs: {
+        "1": row(1, {
+          status: "paused",
+          cost: 0.24,
+          cap: 0.25,
+          pause: { reason: "cap", at: 1, detail: "" },
+        }),
+        "2": row(2, {
+          status: "paused",
+          pause: { reason: "loop", at: 1, detail: "" },
+          attempts: { raises: 1, restarts: 0 },
+        }),
+        "3": row(3, { status: "waiting", question }),
+        "4": row(4, { status: "waiting", question: { ...question, toPerson: true } }),
+        "5": row(5, { status: "done", endedAt: 2, result: { ...routine, kind: "risky" }, review }),
+        "6": row(6, {
+          status: "rejected",
+          result: { ...routine, kind: "risky" },
+          review: { ...review, status: "rejected", reason: "wrong dates" },
+        }),
+        "7": row(7, { status: "queued", requestedBy: 3, conversationId: null, taskId: null }),
+        "8": row(8, { attempts: { raises: 1, restarts: 1 } }),
+      },
+    };
+    const lines = jobsSection(board, templatesOf(), []).split("\n").slice(2, 10);
+    expect(lines).toEqual([
+      "#1 research mid/medium paused $0.24/$0.25 job title 1 (paused: cap $0.24/$0.25)",
+      "#2 research mid/medium paused $0.12/$1 job title 2 (paused: same step failed 3 times; raises 1/1, restarts 0/1)",
+      '#3 research mid/medium waiting $0.12/$1 job title 3 (waiting: asks "Which airport?")',
+      '#4 research mid/medium waiting $0.12/$1 job title 4 (waiting: asks "Which airport?" (asked the person))',
+      "#5 research mid/medium done $0.12/$1 job title 5 (review running on anthropic/claude-opus-5.5)",
+      "#6 research mid/medium rejected $0.12/$1 job title 6 (review rejected: wrong dates)",
+      "#7 research mid/medium queued $0.12/$1 job title 7 (requested by job 3)",
+      "#8 research mid/medium running $0.12/$1 job title 8 (raises 1/1, restarts 1/1)",
+    ]);
+  });
+
   it("says when no job is live and nothing waits", () => {
     expect(jobsSection({ nextNumber: 1, jobs: {}, byConversation: {} }, templatesOf(), [])).toBe(
       [
