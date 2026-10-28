@@ -6,6 +6,7 @@
 import { type ConversationId, type Tx, UsageDoc } from "@earendil-works/pi-durable";
 import {
   emptyJobExtras,
+  type JobBlock,
   JobBoardDoc,
   type JobPause,
   type JobPriority,
@@ -18,11 +19,16 @@ import {
   TierSettingsDoc,
 } from "./docs.ts";
 import { conversationTotal } from "./month-ledger.ts";
-import { ESCALATION_LIMITS, type JobEffort, type Tier } from "./release-defaults.ts";
+import {
+  ESCALATION_LIMITS,
+  type JobEffort,
+  type OutsideKind,
+  type Tier,
+} from "./release-defaults.ts";
 import { capOf } from "./templates.ts";
 
 /** Statuses of a job that no longer runs. */
-export const ENDED: ReadonlySet<JobStatus> = new Set(["done", "failed", "stopped"]);
+export const ENDED: ReadonlySet<JobStatus> = new Set(["done", "failed", "stopped", "blocked"]);
 
 export type BoardState = {
   readonly nextNumber: number;
@@ -322,6 +328,55 @@ export async function endRow(tx: Tx, n: number, status: JobStatus, at: number): 
   return row;
 }
 
+/**
+ * Marks that the job's current run read outside content through `tool`: each kind and tool is added
+ * once, and the first time is kept. A conversation of an earlier run marks nothing. True when the
+ * row is this run's.
+ */
+export async function markOutside(
+  tx: Tx,
+  n: number,
+  conversationId: ConversationId,
+  tool: string,
+  kind: OutsideKind,
+  at: number,
+): Promise<boolean> {
+  const row = await mustRow(tx, n);
+  if (row.conversationId !== conversationId) return false;
+  row.outside ??= { at, kinds: [], tools: [] };
+  if (!row.outside.kinds.includes(kind)) row.outside.kinds.push(kind);
+  if (!row.outside.tools.includes(tool)) row.outside.tools.push(tool);
+  return true;
+}
+
+/** The one reason line of a blocked job, in household words. */
+export function blockReason(block: JobBlock): string {
+  return block.cause === "hit"
+    ? `a ${block.kind} tried to give the agent orders; nothing from it was used`
+    : "the content check did not answer; stopped to be safe";
+}
+
+/**
+ * The content check stops the job's current run: the row is `blocked` with why, it ends at the
+ * block's time, and its result is a failure holding the reason line. Null when the row is not this
+ * run's or has already ended (a second block changes nothing).
+ */
+export async function blockRow(
+  tx: Tx,
+  n: number,
+  conversationId: ConversationId,
+  block: JobBlock,
+): Promise<JobRow | null> {
+  const row = await mustRow(tx, n);
+  if (row.conversationId !== conversationId || ENDED.has(row.status)) return null;
+  row.block = { ...block };
+  row.status = "blocked";
+  row.endedAt = block.at;
+  row.pause = null;
+  await storeResult(tx, n, "failure", blockReason(block), block.at);
+  return row;
+}
+
 /** The lead pulls a job's result: its first pull time is kept. Null when no result exists yet. */
 export async function pullResult(tx: Tx, n: number, at: number): Promise<JobResult | null> {
   const row = await mustRow(tx, n);
@@ -351,7 +406,7 @@ export function waitingCounts(
   return counts;
 }
 
-/** The jobs still live (not done, failed, or stopped), by number. */
+/** The jobs still live (not done, failed, stopped, or blocked), by number. */
 export function liveRows(board: BoardState): JobRow[] {
   return Object.values(board.jobs)
     .filter((row) => !ENDED.has(row.status))

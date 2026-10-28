@@ -14,7 +14,10 @@ import {
 import {
   answerQuestion,
   askQuestion,
+  blockReason,
+  blockRow,
   createJobRow,
+  ENDED,
   EXHAUSTED,
   endRow,
   escalate,
@@ -22,13 +25,14 @@ import {
   exhaust,
   isRisky,
   jobConversations,
+  liveRows,
+  markOutside,
   markRisky,
   pauseRow,
-  resumeRow,
-  liveRows,
   pullResult,
   recordCost,
   restCount,
+  resumeRow,
   setTierEffort,
   storeResult,
   waitingCounts,
@@ -468,5 +472,118 @@ describe("escalation bounds, questions, and risk on the board", () => {
       }),
     ).toEqual([id(9), id(3), id(11)]);
     expect(jobConversations({ conversationId: null, runs: [], review: null })).toEqual([]);
+  });
+});
+
+describe("outside content and blocks on the board", () => {
+  const ops = async <T>(change: (tx: Tx) => T | Promise<T>): Promise<T> => {
+    if (test === undefined) throw new Error("no cell");
+    return test.cell.harness.commit(async (tx) => change(tx), BACKGROUND_CONTEXT);
+  };
+  const job = async (n = 1) => (await test?.cell.board())?.jobs[String(n)];
+  const conversation = (n: number) => n as unknown as ConversationId;
+  const running = async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    await ops(async (tx) => {
+      const created = await createJobRow(tx, fields("a"));
+      created.status = "running";
+      created.conversationId = conversation(41);
+    });
+  };
+
+  it("gives the two blocked reason lines byte for byte, each fitting 80 columns indented", () => {
+    const hit = blockReason({ cause: "hit", kind: "page", tool: "t", chunk: 0, at: 1 });
+    expect(hit).toBe("a page tried to give the agent orders; nothing from it was used");
+    expect(blockReason({ cause: "hit", kind: "mail", tool: "t", chunk: 0, at: 1 })).toBe(
+      "a mail tried to give the agent orders; nothing from it was used",
+    );
+    expect(blockReason({ cause: "hit", kind: "file", tool: "t", chunk: 0, at: 1 })).toBe(
+      "a file tried to give the agent orders; nothing from it was used",
+    );
+    for (const cause of ["timeout", "error"] as const) {
+      expect(blockReason({ cause, kind: "page", tool: "t", chunk: null, at: 1 })).toBe(
+        "the content check did not answer; stopped to be safe",
+      );
+    }
+    for (const line of [hit, "the content check did not answer; stopped to be safe"]) {
+      expect(`      ${line}`.length).toBeLessThanOrEqual(80);
+      expect(line).not.toMatch(/threat|attack/i);
+    }
+  });
+
+  it("counts a blocked job as ended", () => {
+    expect(ENDED.has("blocked")).toBe(true);
+  });
+
+  it("marks the current run once per kind and tool, keeping the first time", async () => {
+    await running();
+    await ops((tx) => markOutside(tx, 1, conversation(41), "read_fixture_page", "page", 100));
+    await ops((tx) => markOutside(tx, 1, conversation(41), "read_fixture_page", "page", 200));
+    await ops((tx) => markOutside(tx, 1, conversation(41), "read_mail", "mail", 300));
+    expect((await job())?.outside).toEqual({
+      at: 100,
+      kinds: ["page", "mail"],
+      tools: ["read_fixture_page", "read_mail"],
+    });
+  });
+
+  it("ignores a mark from an old run's conversation", async () => {
+    await running();
+    const marked = await ops((tx) =>
+      markOutside(tx, 1, conversation(7), "read_fixture_page", "page", 100),
+    );
+    expect(marked).toBe(false);
+    expect((await job())?.outside).toBeNull();
+  });
+
+  it("blocks the current run once, with the reason as a failure result", async () => {
+    await running();
+    const block = {
+      cause: "hit",
+      kind: "page",
+      tool: "read_fixture_page",
+      chunk: 2,
+      at: 500,
+    } as const;
+    const first = await ops(
+      async (tx) => (await blockRow(tx, 1, conversation(41), block)) !== null,
+    );
+    expect(first).toBe(true);
+    expect(await job()).toMatchObject({ status: "blocked", endedAt: 500, block });
+    expect((await job())?.result).toEqual({
+      kind: "failure",
+      text: "a page tried to give the agent orders; nothing from it was used",
+      at: 500,
+      pulledAt: null,
+      wokeAt: null,
+    });
+    const second = await ops(
+      async (tx) =>
+        (await blockRow(tx, 1, conversation(41), { ...block, cause: "timeout", at: 900 })) !== null,
+    );
+    expect(second).toBe(false);
+    expect((await job())?.block).toEqual(block);
+    expect((await job())?.endedAt).toBe(500);
+  });
+
+  it("refuses to block an ended row or another run", async () => {
+    await running();
+    const block = {
+      cause: "error",
+      kind: "file",
+      tool: "read_file",
+      chunk: null,
+      at: 500,
+    } as const;
+    const blocked = (id: number) =>
+      ops(async (tx) => (await blockRow(tx, 1, conversation(id), block)) !== null);
+    expect(await blocked(7)).toBe(false);
+    await ops(async (tx) => {
+      await endRow(tx, 1, "done", 400);
+    });
+    expect(await blocked(41)).toBe(false);
+    expect((await job())?.status).toBe("done");
+    expect((await job())?.block).toBeNull();
   });
 });
