@@ -8,6 +8,9 @@ import {
   defineTool,
   type Extension,
   type Harness,
+  type ToolRegistration,
+  type Wrap,
+  wrapTool,
 } from "@earendil-works/pi-durable";
 import { JobBoardDoc } from "./docs.ts";
 import type { JobHolds } from "./job-holds.ts";
@@ -19,6 +22,35 @@ export interface JobToolsDeps {
   readonly harness: () => Harness;
   readonly holds: JobHolds;
   readonly now: () => number;
+  /** Every other tool a job conversation has: each call is recorded on the job's row. */
+  readonly wrapped: readonly string[];
+}
+
+/**
+ * Records a tool's name on the calling job's row, in the tool's own commit before the tool runs
+ * (a hook cannot write), so a risky tool marks the result even when the call fails or the cell
+ * stops right after it. A call from any other conversation runs unchanged.
+ */
+export function toolsUsedWraps(names: readonly string[]): Wrap[] {
+  return names.map((name) =>
+    // Only the name of the first argument is read: the wrapper decorates whichever tool won.
+    wrapTool({ name } as ToolRegistration, (inner) => ({
+      ...inner,
+      execute: async (args, api, context) => {
+        const n = await jobOf(api, api.conversationId, context);
+        if (n !== null) {
+          await api.commit(async (tx) => {
+            const row = (await tx.doc(JobBoardDoc)).jobs[String(n)];
+            if (row === undefined || String(row.conversationId) !== String(api.conversationId)) {
+              return;
+            }
+            if (!row.toolsUsed.includes(name)) row.toolsUsed.push(name);
+          }, context);
+        }
+        return inner.execute(args, api, context);
+      },
+    })),
+  );
 }
 
 const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
@@ -68,5 +100,10 @@ export function createJobToolsExtension(deps: JobToolsDeps): Extension {
       };
     },
   });
-  return defineExtension({ name: "secbot-job-tools", tools: [searchOldJob] });
+  const tools = [searchOldJob];
+  return defineExtension({
+    name: "secbot-job-tools",
+    tools,
+    wraps: toolsUsedWraps([...deps.wrapped, ...tools.map((tool) => tool.name)]),
+  });
 }

@@ -25,11 +25,19 @@ import { appendRecord } from "./activity.ts";
 import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
 import { JobBoardDoc, type JobRow, type ResultKind, RoleModelsDoc, TemplatesDoc } from "./docs.ts";
-import { ENDED, endRow, jobCost, recordCost, storeResult } from "./job-board.ts";
+import {
+  ENDED,
+  endRow,
+  isRisky,
+  jobCost,
+  markRisky,
+  recordCost,
+  storeResult,
+} from "./job-board.ts";
 import { doneRecord, jobRowLabel } from "./jobs.ts";
 import { modelRef } from "./model-map.ts";
 import { budgetOf } from "./month-ledger.ts";
-import { RESULT_WAKE_MS } from "./release-defaults.ts";
+import { RESULT_WAKE_MS, RISKY_TEMPLATES, RISKY_TOOLS } from "./release-defaults.ts";
 import { templatesOf, tierModelOf } from "./templates.ts";
 
 /** The job task's kind. */
@@ -40,6 +48,16 @@ export const QUEUED_LONG_MS = 10 * 60_000;
 
 /** A job's number and its attempt: 0 for the first run, then one more per restart. */
 export type JobInput = { number: number; attempt: number };
+
+/** Code's reasons a job's result is risky: each risky tool it used, and a risky template. */
+export function riskyReasons(row: Pick<JobRow, "toolsUsed" | "template">): string[] {
+  return [
+    ...row.toolsUsed
+      .filter((tool) => Object.hasOwn(RISKY_TOOLS, tool))
+      .map((tool) => `${tool} ${RISKY_TOOLS[tool]}`),
+    ...(RISKY_TEMPLATES.includes(row.template) ? [`${row.template} template`] : []),
+  ];
+}
 
 /** The first input of a restarted run: the lead's failure note, then the brief. */
 export const restartInput = (note: string, brief: string): string =>
@@ -315,8 +333,13 @@ export function createJobTask(deps: JobTaskDeps) {
               text = "the job answered with nothing";
             }
           }
+          // A risky result: a tool that acts, spends, or touches money; the template; the lead.
+          const before = await rowOf(tx, n);
+          const reasons = riskyReasons(before);
+          if (reasons.length > 0) await markRisky(tx, n, { code: reasons });
+          if (kind === "routine" && isRisky(before)) kind = "risky";
           // A failure a producer stored first (an escalation) ends the job failed too.
-          const prior = (await rowOf(tx, n)).result?.kind;
+          const prior = before.result?.kind;
           const status = kind === "failure" || prior === "failure" ? "failed" : "done";
           const row = await finish(
             tx,

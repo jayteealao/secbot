@@ -27,6 +27,7 @@ import {
   escalationsUsed,
   exhaust,
   jobCost,
+  markRisky,
   pullResult,
   resumeRow,
   setTierEffort,
@@ -518,6 +519,58 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     },
   });
 
+  const markRiskyTool = defineTool({
+    name: "mark_risky",
+    description:
+      "Mark a job's result risky so a reviewer on another model checks it before you use it. A mark cannot be removed, by you or anyone.",
+    parameters: Type.Object({
+      job: jobParameter,
+      reason: Type.String({ minLength: 1, maxLength: 200, description: "Why it needs a check." }),
+      risky: Type.Optional(Type.Boolean({ description: "Must be true; a mark is never removed." })),
+    }),
+    replay: "safe",
+    execute: async (args, api, context) => {
+      if (args.risky === false) {
+        const found = await api.commit(async (tx) => {
+          const row = await rowOrError(tx, args.job);
+          return "error" in row ? row : { code: row.risky.code.length, lead: row.risky.lead };
+        }, context);
+        if ("error" in found) return refusal(found.error);
+        const by = found.code > 0 ? "code" : found.lead !== null ? "you" : undefined;
+        return refusal(
+          by === undefined
+            ? `job ${args.job} is not marked risky; a mark can only be added.`
+            : `job ${args.job} is marked risky by ${by}; a mark cannot be removed.`,
+        );
+      }
+      const marked = await api.commit(async (tx) => {
+        const found = await rowOrError(tx, args.job);
+        if ("error" in found) return found;
+        const row = await markRisky(tx, args.job, { lead: args.reason });
+        // An unpulled routine result is reviewed before the lead uses it.
+        const result = row.result;
+        const review = result !== null && result.pulledAt === null && result.kind === "routine";
+        if (review) result.kind = "risky";
+        return { number: row.number, review };
+      }, context);
+      if ("error" in marked) return refusal(marked.error);
+      logEvent("job.risky_marked", {
+        cell: person,
+        job: marked.number,
+        by: "lead",
+        reasons: 1,
+      });
+      return {
+        ...text(
+          marked.review
+            ? `job ${marked.number} is marked risky; its result is checked by a reviewer before you get it.`
+            : `job ${marked.number} is marked risky.`,
+        ),
+        details: { job: marked.number },
+      };
+    },
+  });
+
   const ReceiptTask = createReceiptTask(deps.remote ?? { person, household: () => undefined });
   return {
     JobTask,
@@ -531,6 +584,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         setJob,
         restartJob,
         jobTranscript,
+        markRiskyTool,
         createReadResultTool(deps.now),
       ],
       wraps: remoteWraps(person, ReceiptTask, turnOf, deps.now),

@@ -684,8 +684,17 @@ export async function openCellHarness(
   // Paused and questioning jobs wait here; the job gate, the job tools, and the lead's tools share it.
   const holds = new JobHolds();
   const jobGate = createJobGate({ person, harness: current, holds, now });
-  // A job's own tools: search its earlier attempts (no tool that starts a subagent).
-  const jobTools = createJobToolsExtension({ person, harness: current, holds, now });
+  // A job's own tools: search its earlier attempts (no tool that starts a subagent); every tool
+  // a job calls is recorded on its row, so a result is marked risky by the tools it used.
+  const jobTools = createJobToolsExtension({
+    person,
+    harness: current,
+    holds,
+    now,
+    wrapped: [history, household, secrets, ...(options.extensions ?? [])].flatMap((extension) =>
+      (extension.tools ?? []).map((tool) => tool.name),
+    ),
+  });
   let jobList: readonly Extension[] = [];
   const jobs = createJobsExtension({
     person,
