@@ -145,6 +145,47 @@ turn (its number, the jobs and receipts it had open, and an optional note the le
 `note_bookmark`), and shows it in the lead's next requests until the lead calls `resume_work`.
 Lines from other sources, such as another cell, wait for the turn to end instead.
 
+## The stop
+
+`secbot stop` (and the owner's `secbot stop --all`) stops work, not the cell. In one commit the
+cell sets a stop lock and marks every unfinished job that has a running task: running, queued,
+paused, and waiting jobs alike. It then aborts each marked task and the lead's current turn, and
+waits for the tasks to end. A job ends `stopped` with who stopped it and when; its brief, board
+entry, transcript, and cost are kept. A job whose task ended some other way during the stop keeps
+that end.
+
+Routines, reminders, and reviews are not touched: the lead's turn is aborted without stopping its
+background work, so a reminder still fires at its time. While the lock is set, no job starts,
+restarts, or resumes, and the lead's tool answers say a stop is running. A stop that finds a
+marked task still running after the aborts logs a warning naming how many.
+
+## Resume by fork
+
+A stopped or blocked job restarts one way: from where it was. The cell forks the job's last run,
+so the new run's transcript holds every message of the stopped one, then adds one line telling the
+agent when it was stopped and that it is resumed now. The job keeps its number, brief, tier, and
+board entry, and its cost keeps counting across both runs. This is not the job's own restart (a
+fresh subagent the lead may use once when a job goes wrong), so the person's restart never uses
+it up. The person restarts a job with `secbot jobs restart`; the lead does it with `resume_job`
+only when the person asks. A blocked job's content is checked again when it reads it again.
+
+## Queue order
+
+The board keeps live jobs in a queue. A new job takes its place by priority (urgent first, then
+deadlines by date, then routine, then research), after the jobs already there with the same
+priority. The person can move a job: `urgent` puts it first, a deadline or none places it again by
+priority, and `move` puts it right before another job. The lead's jobs section lists live jobs in
+that order with their priority words, so the lead sees the person's order in its next request.
+
+## The hand-off note
+
+Before older messages of the lead's conversation are summarized, the lead's model writes a short
+note for itself from those messages and its previous note: open promises, pending questions, and
+the person's recent preferences. The note is committed once per compaction, shown in the lead's
+prompt after it (and after a restart), and its call is the lead's spend. Job state is never in
+the note: it is on the board. A failed note call keeps the previous note and never stops the
+compaction.
+
 ## Frozen specialists
 
 A cell opened before jobs keeps its four specialist conversations. No tool reaches them, and the

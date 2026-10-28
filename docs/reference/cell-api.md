@@ -34,6 +34,10 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | DELETE | `/secrets/grants` | `{"secret", "agent"}` | `{person, secret, agent, revoked}` | 200, 400, 413, 503 |
 | POST | `/approvals/{n}` | `{"answer": "allow" \| "always" \| "deny"}` (at most 16 KiB) | `{number, status, answer, agent, tool, summary, answeredBy, rule}` (`rule` is the person rule allow always added, or `null`) | 200, 400 (a bad body, or `refused: …`), 404 (`no held call #n`), 409 (`{"error": "lapsed"}` or `{"error": "answered"}`), 413 |
 | POST | `/jobs/{n}/answer` | `{"text": "<1 to 2000 characters>"}` (at most 16 KiB) | `{job, title}`: the person's answer to the question the lead put to them; a job waiting on it goes on, and the answer to a job that used its raise and its restart goes to the lead | 200, 400 (a bad body), 404 (`no job #n`), 409 (`job n has no question waiting`), 413 |
+| GET | `/jobs` | none | `BoardView`: the person's job board (below) | 200 |
+| POST | `/stop` | none | `{jobs, turn}`: every unfinished job with a running task (running, queued, paused, or waiting) and the lead's current turn stop, with their state kept; `jobs` is how many jobs stopped, `turn` whether the lead was in a turn. Routines, reminders, and reviews keep running. No job starts, restarts, or resumes until the stop is done | 200 |
+| POST | `/jobs/{n}/restart` | none | `{job, title}`: a stopped or blocked job resumes from its kept brief, board entry, and transcript; it does not use the job's own restart | 200, 404 (`{"error": "no stopped job #n", "reason": "no-job"}`), 409 (`reason` is `paused` with the job's `title`, `not-stopped`, or `locked` while a stop runs) |
+| POST | `/jobs/{n}/priority` | one of `{"urgent": true}`, `{"deadline": "YYYY-MM-DD" \| null}`, `{"before": <m>}` (at most 16 KiB) | `{job, title, priority, deadline, place, of, before?}`: the job's new place in the queue (1 is next) of `of` live jobs | 200, 400 (a bad body, or a date that is not a real day), 404 (`no job #n`, also for a missing `before` job), 409 (`job n has ended`), 413 |
 
 ### Spend and limits
 
@@ -208,6 +212,29 @@ Every cell starts in shadow mode: the decision model and the reviewer run and th
 they would have done, but the call runs. Rules, ask-first holds, and approvals enforce in both
 modes. The owner switches a cell to enforce with `PUT /ops/mode`.
 
+### The job board
+
+`GET /jobs` answers a `BoardView`:
+
+| Field | Meaning |
+| --- | --- |
+| `person` | Whose board it is (`household` for the household's shared jobs). |
+| `mode` | The cell's guard mode, `shadow` or `enforce`. |
+| `live` | Jobs that started and have not ended; a queued job is listed but not counted. |
+| `waiting` | Finished results the lead has not read yet, every kind. |
+| `rows` | Live jobs in queue order, each a `BoardRow`. |
+| `finished` | Jobs that ended in the last 24 hours, newest first. |
+| `shown` | How many rows both lists hold. |
+| `capacity` | `{jobsAtOnce, measured, at, on}` only when more jobs run at once than the cell was measured at (`on` is the day as `d Mon`); otherwise `null`. Nothing is held back. |
+| `templates` | `[{name, tier}]`: the job templates and the tier each starts on. |
+
+A `BoardRow` is `{number, title, priority, tier, effort, try, cost, cap, status, reason, shared?}`.
+`priority` is `urgent`, `due <d Mon>`, `routine`, or `research`; `effort` is the effort the model
+applied (`low`, `med`, `high`); `try` is raises and restarts used as `<raises>+<restarts>`; `cost`
+counts every run of the job against the `cap` of its current tier. `reason` is `{code, text}` for
+every status but `queued`, `running`, and `done`: the text the command line prints under the row,
+for example `stopped by you at 14:20; secbot jobs restart 14`. `shared` is a shared job's line.
+
 ## The session frames
 
 The client sends one frame type:
@@ -277,6 +304,8 @@ route here. A device key never opens them, and no device-key route changes the m
 | PUT | `/ops/limits?cell=<person>` | Body `{"limitUsd": <usd>}` (above 0, at most 10000, two decimals); `{person, limitUsd, previousUsd}`. The next check uses it; waiting work continues at once when it is now under. Logs `limit.set` and `ops.limits`. 400 for a bad amount. |
 | PUT | `/ops/limits?budget=developer` | Body `{"limitUsd": <usd>}`; `{timeZone, developerLimitUsd}`. A household setting: every person cell reads it again. 400 for a bad amount, 503 without a household cell. |
 | PUT | `/ops/time-zone` | Body `{"timeZone": "<IANA zone>"}`; `{timeZone, developerLimitUsd}`. Months follow it from the next month in each cell. 400 for a zone the runtime does not know. |
+| GET | `/ops/jobs?cell=<person\|household>` | That person's `BoardView` with `operator: true`, or the household's shared jobs. A cell another fleet serves is read through that fleet's `/internal/jobs`; 503 `cell <name> did not answer` when it does not. 400 without `?cell=`. |
+| POST | `/ops/stop` | The owner's stop of every cell: each person cell this fleet serves and the household cell when served, then the cells another fleet serves through its `/internal/stop` (three attempts). Answers `{cells: [{cell, jobs, turn, shared}], missing: [cell]}`; `missing` names each cell that did not answer or that no fleet address reaches. Every job stopped this way says it was the owner. Logs `ops.stop`. Safe to repeat. |
 
 `<person>` is `owner` or `second` (`person` also names the second cell). A route that needs
 `?cell=` answers 400 `send ?cell=<person>` without it. A cell this fleet does not serve answers 404
@@ -306,6 +335,17 @@ A `SpendReport` is `{opId, cell, month, timeZone, at, spentUsd, limitUsd, mode, 
 byLayer, byRole, developerUsd, developerLimitUsd, developerLines}`. Person cells report after their
 spend changes (at most every 5 seconds, at once when a line is reached). The board is a report of
 each cell's own ledger: a person's limit is decided in that person's cell only.
+
+## Job routes across fleets: `/internal/stop`, `/internal/jobs`
+
+Auth: the operator key. The owner's fleet calls these on the other fleet (at its private address)
+for `/ops/stop` and `/ops/jobs`. They serve only the cells of the fleet they run in and never call
+on to another fleet.
+
+| Method | Path | Request | Response | Statuses |
+| --- | --- | --- | --- | --- |
+| POST | `/internal/stop` | `{}` | `{cells: [{cell, jobs, turn, shared}], missing: [cell]}` for this fleet's cells | 200, 401 |
+| POST | `/internal/jobs` | `{"cell": "<person\|household>"}` | that cell's `BoardView` with `operator: true` | 200, 401, 404 (served by another fleet) |
 
 ## Secrets routes: `/internal/secrets/…`
 

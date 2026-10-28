@@ -33,6 +33,10 @@ device key is what proves the caller.
 | --- | --- |
 | `secbot chat` | A session with your lead. Answers stream in; a specialist's answer arrives later as `[from <name>] ...` while the session is open. `waiting for the model` means the model gateway is failing and your message is kept. |
 | `secbot missed` | Calls waiting for your answer first, under `HELD CALLS`, then limit notices this device has not seen, then lead messages this device has not seen yet, oldest first. |
+| `secbot jobs` | Your job board: live jobs in the order they run, then jobs that ended in the last 24 hours, each with its reason line. `--person <name>` (another person) and `--household` (shared jobs) use the operator key. |
+| `secbot jobs urgent\|deadline\|move` | Changes a live job's place in the queue: `urgent <#>`, `deadline <#> YYYY-MM-DD` (or `clear`), `move <#> --before <#>`. |
+| `secbot jobs restart <#>` | Restarts a stopped or blocked job from its kept brief and transcript. It does not use the job's own restart. |
+| `secbot stop [--all]` | Stops every running job and the lead's current turn now, with no prompt; their state is kept, and routines and reminders keep their schedule. `--all` is the owner's stop of every cell, with the operator key. |
 | `secbot cost` | Your month: spend against your limit, by layer (agent model, reviewer, decision model) and by role. `--person <name>` (another person) and `--owner` (the household) use the operator key. |
 | `secbot limits show \| set <person> <usd> \| developer <usd> \| zone <IANA>` | The owner's limits, with the operator key: each person's monthly limit, the household developer budget, and the time zone months follow. |
 | `secbot model list` | Each role's model and whether it is the release default or your change. The job tiers (`cheap`, `mid`, `frontier`) show their per-job cap, for example `cap $0.25 per job`. The last row is the guard's `reviewer`, which judges the calls the decision model marks. |
@@ -113,6 +117,62 @@ Answer with `/answer <job> <text>`, for example `/answer 11 home address`. The c
 waits with no time limit and no spend until you answer. A plain chat line never answers a job,
 and a line that only looks like an answer (`/answer eleven home`) is not sent at all. A question
 asked while no session was open is shown again the next time you open `secbot chat`.
+
+### Your job board
+
+```
+$ secbot jobs
+JOBS  sam  [ live: 4 ] [ results waiting: 3 ]  [ shadow ]
+------------------------------------------------------------------------------
+#   TITLE                     PRIORITY    TIER       TRY  COST/CAP   STATUS
+14  flights to Lisbon in May  urgent      mid/med    1+0  $0.41/$1   running
+12  compare broadband deals   research    mid/high   1+1  $1.00/$1   paused
+      cap reached; the lead asks you before going on
+FINISHED (last 24 h)
+9   bin day check             routine     cheap/low  0+0  $0.01/.25  done
+showing 3; older jobs: secbot activity
+```
+
+`TIER` is the tier and the effort the model applied, `TRY` the raises and restarts used (at most
+one of each), and `COST/CAP` the job's cost over every run against the cap of its tier. Every
+status but `queued`, `running`, and `done` has a reason line under the row. A title over 24
+characters ends in `...`. When more jobs run at once than the cell was measured at, a line above
+the column header says so; nothing is held back. Older jobs are in `secbot activity`.
+
+### Reorder a job
+
+```
+$ secbot jobs urgent 16
+[ urgent ] #16 council tax letter summary -> now 1st of 4 live jobs
+$ secbot jobs deadline 16 2026-10-12
+[ due 12 Oct ] #16 council tax letter summary -> now 2nd of 4 live jobs
+$ secbot jobs deadline 16 clear
+[ no deadline ] #16 council tax letter summary -> now 3rd of 4 live jobs
+$ secbot jobs move 16 --before 14
+[ moved ] #16 council tax letter summary -> now before #14, 1st of 4 live jobs
+```
+
+A number with no job prints `no job #<n>` (exit 1); an ended job prints `job <n> has ended`
+(exit 1). A malformed number or date prints the command's usage line (exit 2). The lead sees the
+new order in its next request.
+
+### Stop everything, then restart one job
+
+```
+$ secbot stop
+[ stopped ] 3 jobs and the lead's current turn. Their state is kept.
+  Routines and reminders keep their schedule.
+  Restart one: secbot jobs restart <#>
+$ secbot jobs restart 14
+[ restarted ] #14 flights to Lisbon in May, from its kept brief and transcript
+```
+
+When nothing runs, the stop prints `[ stopped ] nothing was running. Routines and reminders keep
+their schedule.` A paused job is the lead's to go on with: `secbot jobs restart` prints
+`[ restarted ] #12 compare broadband deals is paused, not stopped; ask the lead` (exit 1). A
+number with no stopped or blocked job prints `no stopped job #<n>` (exit 1). While a stop runs, a
+restart prints `secbot: a stop is running; try again` (exit 1). You can also ask the lead in chat
+to resume a stopped job.
 
 ### Your month's spend and limits
 
@@ -259,6 +319,26 @@ The operator routes serve the people of the fleet they run in. To read a person 
 other fleet, point `SECBOT_CELL_URL` at that fleet's address for the one command, for example
 `SECBOT_CELL_URL=$OTHER_FLEET_URL secbot activity --person <name>`, with `OTHER_FLEET_URL` set in
 your own shell.
+
+With the operator key, `secbot jobs --person <name>` reads another person's board (the header
+then says `(operator key)`), `secbot jobs --household` the household's shared jobs, and
+`secbot stop --all` stops every cell of the household, in both fleets:
+
+```
+$ secbot stop --all
+[ stopped ] household: 5 jobs and 2 lead turns. Their state is kept.
+  alex      3 jobs, lead turn
+  sam       1 job, lead turn
+  household 1 shared job
+```
+
+When a fleet does not answer, the cells that stopped are listed, and stderr says which did not
+(exit 1); running it again is safe:
+
+```
+secbot: stop incomplete: household did not answer; alex and sam stopped.
+  run secbot stop --all again
+```
 
 If the connection drops, `chat` reconnects and resends every line the cell has not acknowledged,
 under the same request id, so nothing is submitted twice. When a session opens, what the lead
