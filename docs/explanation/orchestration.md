@@ -86,6 +86,21 @@ The lead chooses what happens next; code only bounds it. Each job gets one raise
 A third move is refused and ends the job failed, with a question to the person about what should
 happen next. The lead asks them in its own words; their answer goes to the lead.
 
+## Blocked jobs
+
+A job whose content check finds an order in what it read, or cannot finish the check, is
+blocked: its run stops, nothing from that read is kept, and its result is a failure that says
+why, such as "a page tried to give the agent orders; nothing from it was used". The lead gets one
+notice, `[job <n> blocked: <reason>; read it with job_result]`, and its jobs section lists each
+blocked job with its reason until the lead pulls the result. A blocked job is ended, like a
+failed one.
+
+The lead tells the person in its own words. It restarts a blocked job only when the person asks:
+the content that stopped it was written by someone outside the household, and the person decides
+whether that source is worth another try. A restart is `restart_job` as for any job, and counts
+as the job's one restart. The new run reads the content again and the check runs again. The job
+keeps its mark for having read outside content, so its outside actions still go to the reviewer.
+
 ## Risky results and the reviewer
 
 A result is risky when its job used a tool that acts (`household_change`), spends
