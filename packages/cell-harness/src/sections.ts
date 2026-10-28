@@ -10,6 +10,7 @@ import { bookmarkText } from "./bookmark.ts";
 import {
   type Bookmark,
   BookmarkDoc,
+  HandoffNoteDoc,
   JobBoardDoc,
   type JobRow,
   type Receipt,
@@ -51,6 +52,22 @@ export function timeSection(now: number, timeZone: string): string {
   return [
     `Now: ${new Date(minute).toISOString().slice(0, 16)}Z (UTC); ${localTime(minute, timeZone)} in ${timeZone}, the person's time zone.`,
     "Read times the person gives in their time zone unless they name another one.",
+  ].join("\n");
+}
+
+/**
+ * The hand-off note section: the lead's note from before its last compaction, with when it was
+ * written; undefined while there is none. Job state is never in the note.
+ */
+export function handoffSection(
+  note: { readonly text: string; readonly at: number } | null,
+  timeZone: string,
+): string | undefined {
+  if (note === null) return undefined;
+  return [
+    `Your hand-off note from before your last compaction (${localTime(note.at, timeZone)}):`,
+    note.text,
+    "Job state is on the job board, not in this note.",
   ].join("\n");
 }
 
@@ -155,6 +172,12 @@ export function createLeadExtension(
         bookmarkSection((await input.read.snapshot(BookmarkDoc, context))?.bookmark ?? null),
       ),
       section("time", () => timeSection(clock.now(), clock.timeZone)),
+      section("handoff", async (input, context) =>
+        handoffSection(
+          (await input.read.snapshot(HandoffNoteDoc, context))?.note ?? null,
+          clock.timeZone,
+        ),
+      ),
       section("jobs", async (input, context) => {
         const board = (await input.read.snapshot(JobBoardDoc, context)) ?? {
           nextNumber: 1,

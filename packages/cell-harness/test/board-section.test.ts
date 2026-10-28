@@ -33,9 +33,9 @@ const row = (number: number, fields: Partial<JobRow> = {}): JobRow => ({
 const routine = { kind: "routine", text: "x", at: 1, pulledAt: null, wokeAt: null } as const;
 
 describe("the lead's prompt sections", () => {
-  it("puts the bookmark first, then the time, then the jobs", () => {
+  it("puts the bookmark first, then the time, the hand-off note, and the jobs", () => {
     const keys = (createLeadExtension().sections ?? []).map((section) => section.key);
-    expect(keys).toEqual(["bookmark", "time", "jobs"]);
+    expect(keys).toEqual(["bookmark", "time", "handoff", "jobs"]);
   });
 
   it("renders templates, live rows with applied effort and cost against the cap, the rest, and what waits", () => {

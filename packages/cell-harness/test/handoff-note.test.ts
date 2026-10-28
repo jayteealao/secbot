@@ -6,6 +6,8 @@ import { ROOT_CONVERSATION_ID, UsageDoc } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HandoffNoteDoc } from "../src/docs.ts";
 import { HANDOFF_USAGE_KEY } from "../src/release-defaults.ts";
+import { localTime } from "../src/reminder.ts";
+import { handoffSection } from "../src/sections.ts";
 import {
   createFauxGateway,
   defaultResponder,
@@ -108,4 +110,36 @@ describe("the hand-off note before compaction", () => {
     const view = await t.cell.cost();
     expect(view.byLayer.agent).toBeCloseTo(rootTotal, 9);
   }, 60_000);
+});
+
+describe("the hand-off note in the lead's prompt (AC-35)", () => {
+  const HEADER = "Your hand-off note from before your last compaction (";
+
+  it("shows the note after the compaction, and again after a restart", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(noteResponder(defaultResponder)) });
+    const t = test;
+    await (await t.cell.submit("hello", "before")).wait(BACKGROUND_CONTEXT);
+    expect(t.gateway.requests.at(-1)?.system).not.toContain(HEADER);
+    expect(await compactLead(t)).toBe("completed");
+    await (await t.cell.submit("what did I ask for?", "after")).wait(BACKGROUND_CONTEXT);
+    const system = t.gateway.requests.findLast((request) => request.role === "lead")?.system ?? "";
+    expect(system).toContain(HEADER);
+    expect(system).toContain(NOTE_TEXT);
+    expect(system).toContain("Job state is on the job board, not in this note.");
+    for (const heading of ["Open promises:", "Pending questions:", "Recent preferences:"]) {
+      expect(system).toContain(heading);
+    }
+    await t.reopen();
+    await (await t.cell.submit("and now?", "reopened")).wait(BACKGROUND_CONTEXT);
+    const again = t.gateway.requests.findLast((request) => request.role === "lead")?.system ?? "";
+    expect(again).toContain(NOTE_TEXT);
+  }, 60_000);
+
+  it("renders the section text with the note's local time", () => {
+    expect(handoffSection(null, "UTC")).toBeUndefined();
+    expect(handoffSection({ text: NOTE_TEXT, at: Date.UTC(2026, 9, 12, 9, 5) }, "UTC")).toBe(
+      `${HEADER}${localTime(Date.UTC(2026, 9, 12, 9, 5), "UTC")}):\n${NOTE_TEXT}\nJob state is on the job board, not in this note.`,
+    );
+  });
 });
