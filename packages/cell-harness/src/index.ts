@@ -100,6 +100,7 @@ export type {
   Receipt,
   ResultKind,
 } from "./docs.ts";
+export { BookmarkDoc, JobBoardDoc } from "./docs.ts";
 export { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 export {
   createGuardExtension,
