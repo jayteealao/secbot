@@ -1,5 +1,6 @@
 // The content check of outside content: every chunk asked, a few at a time; the first answer that
 // is not clean ends the rest; a timeout or any other failure fails closed; an outer abort is thrown.
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { JsonObject } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
 import { checkContent, chunkContent } from "../src/content-check.ts";
@@ -9,6 +10,11 @@ import {
   type DecisionFailureCause,
   type DecisionModel,
 } from "../src/decision-model.ts";
+import {
+  createFixtureReaderExtension,
+  isOutsideAction,
+  readingKindOf,
+} from "../src/outside-tools.ts";
 import {
   CONTENT_CHECK_MAX_BYTES,
   CONTENT_CHUNK_BYTES,
@@ -174,6 +180,49 @@ describe("checking every chunk", () => {
       outcome: "clean",
       chunks: 1,
       checkedText: "",
+    });
+  });
+});
+
+describe("the reading-tool registry and the fixture tool", () => {
+  it("knows the release reading tools and the ones a cell declares", () => {
+    expect(readingKindOf("read_fixture_page")).toBe("page");
+    expect(readingKindOf("read_mail")).toBeNull();
+    expect(readingKindOf("read_mail", { read_mail: "mail" })).toBe("mail");
+    expect(readingKindOf("household_read")).toBeNull();
+  });
+
+  it("knows the outside actions", () => {
+    expect(isOutsideAction("broker_call")).toBe(true);
+    expect(isOutsideAction("household_change")).toBe(false);
+    expect(isOutsideAction("read_fixture_page")).toBe(false);
+  });
+
+  const fixtureTool = () => {
+    const extension = createFixtureReaderExtension({ clean: "Ferries leave at 9:00.", other: "x" });
+    const tool = extension.tools?.find((each) => each.name === "read_fixture_page");
+    if (tool === undefined) throw new Error("no fixture tool");
+    return tool;
+  };
+  const calls: string[] = [];
+  const api = {
+    output: (chunk: string) => calls.push(`output ${chunk}`),
+    details: async () => calls.push("details"),
+  };
+
+  it("returns a page's text, read-only and safe to run again, with no progress output", async () => {
+    const tool = fixtureTool();
+    expect(tool.replay).toBe("safe");
+    const result = await tool.execute({ page: "clean" }, api as never, BACKGROUND_CONTEXT);
+    expect(result).toEqual({ content: [{ type: "text", text: "Ferries leave at 9:00." }] });
+    expect(calls).toEqual([]);
+  });
+
+  it("answers an unknown page with an error naming the known ones", async () => {
+    const result = await fixtureTool().execute({ page: "nope" }, api as never, BACKGROUND_CONTEXT);
+    expect(result).toEqual({
+      content: [{ type: "text", text: "No page named nope. Pages: clean, other." }],
+      isError: true,
     });
   });
 });
