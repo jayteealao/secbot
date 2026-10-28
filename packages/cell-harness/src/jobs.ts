@@ -49,6 +49,16 @@ export function jobLabel(what: string): string {
   return (space > head.length + 1 ? cut.slice(0, space) : cut.slice(0, LABEL_WIDTH)).trimEnd();
 }
 
+/** A board job's label: `job <n>: <title>`, cut to LABEL_WIDTH at a whole word. */
+export function jobRowLabel(n: number, title: string): string {
+  const head = `job ${n}`;
+  const label = `${head}: ${title.trim().split(/\s+/).join(" ")}`.trimEnd();
+  if (label.length <= LABEL_WIDTH) return label;
+  const cut = label.slice(0, LABEL_WIDTH + 1);
+  const space = cut.lastIndexOf(" ");
+  return (space > head.length + 1 ? cut.slice(0, space) : cut.slice(0, LABEL_WIDTH)).trimEnd();
+}
+
 /** The waiting-list text of a hand-off: `handoff <specialist> <first words of the brief>`. */
 export const handoffWhat = (specialist: string, brief: string) =>
   `handoff ${specialist} ${shortText(brief)}`;
