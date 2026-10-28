@@ -11,7 +11,16 @@ import {
   researchRequests,
   startPausedJob,
 } from "./escalation-helpers.ts";
-import { createFauxGateway, openTestCell, type TestCell, until } from "./fixtures.ts";
+import {
+  addJobSpend,
+  createFauxGateway,
+  fauxAssistantMessage,
+  fauxToolCall,
+  openTestCell,
+  type TestCell,
+  until,
+} from "./fixtures.ts";
+import { jobResponder, startJobLine } from "./responders.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -88,5 +97,96 @@ describe("bounded raises in set_job", () => {
     const requests = researchRequests(t);
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(researchRequests(t)).toBe(requests);
+  });
+});
+
+/** Waits until job 1 is paused again after `requests` research requests in all. */
+const pausedAfter = async (t: TestCell, requests: number) => {
+  await until(async () => researchRequests(t) === requests);
+  await until(async () => (await job(t))?.status === "paused");
+};
+
+const expectExhausted = async (t: TestCell) => {
+  await until(async () => (await job(t))?.status === "failed");
+  expect(await job(t)).toMatchObject({
+    attempts: { raises: 1, restarts: 1 },
+    result: { kind: "failure", text: "raise and restart used" },
+    question: { from: "escalation", toPerson: true, answer: null },
+  });
+};
+
+describe("bounds over both orders (AC-13)", () => {
+  const EXHAUSTED_LINE =
+    "Refused: job 1 has used its raise and its restart. It has stopped; ask the person in your own words what to do — the chat adds the /answer line.";
+
+  for (const third of [
+    { tool: "restart_job", args: { job: 1, note: "third try" } },
+    { tool: "set_job", args: { job: 1, effort: "high" } },
+  ]) {
+    it(`order A: restart, then raise; a third move (${third.tool}) is refused and asks the person`, async () => {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      test = await openTestCell({ gateway: createFauxGateway(failingResearch) });
+      const t = test;
+      await startPausedJob(t);
+      expect(
+        await leadCalls(t, "restart_job", { job: 1, note: "the list name was wrong" }),
+      ).toContain("restarts with a fresh subagent");
+      await pausedAfter(t, 6);
+      expect(await leadCalls(t, "set_job", { job: 1, tier: "frontier" })).toContain(
+        "It was paused and runs again.",
+      );
+      await pausedAfter(t, 9);
+      expect(await leadCalls(t, third.tool, third.args)).toBe(EXHAUSTED_LINE);
+      await expectExhausted(t);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(researchRequests(t)).toBe(9);
+    });
+  }
+
+  it("order B: raise, then restart; a third move is refused and asks the person", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(failingResearch) });
+    const t = test;
+    await startPausedJob(t);
+    expect(await leadCalls(t, "set_job", { job: 1, effort: "high" })).toContain("runs again");
+    await pausedAfter(t, 6);
+    expect(await leadCalls(t, "restart_job", { job: 1, note: "effort did not help" })).toContain(
+      "restarts with a fresh subagent",
+    );
+    await pausedAfter(t, 9);
+    expect(await leadCalls(t, "set_job", { job: 1, tier: "frontier" })).toBe(EXHAUSTED_LINE);
+    await expectExhausted(t);
+  });
+
+  it("a cap pause after both moves also ends in the question to the person", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    // A job that keeps working: no failing step, so only the cap can pause it.
+    test = await openTestCell({
+      gateway: createFauxGateway((request) =>
+        request.role === "research"
+          ? fauxAssistantMessage([fauxToolCall("search_history", { query: "flights" })], {
+              stopReason: "toolUse",
+            })
+          : jobResponder(request),
+      ),
+    });
+    const t = test;
+    await (
+      await t.cell.submit(
+        startJobLine({ title: "flights", brief: "find flights", template: "research" }),
+        "start-working",
+      )
+    ).wait(BACKGROUND_CONTEXT);
+    await until(async () => researchRequests(t) > 2);
+    await leadCalls(t, "restart_job", { job: 1, note: "start over" });
+    await until(async () => (await job(t))?.conversationId != null && researchRequests(t) > 5);
+    await leadCalls(t, "set_job", { job: 1, tier: "frontier" });
+    expect((await job(t))?.attempts).toEqual({ raises: 1, restarts: 1 });
+    // The job's spend reaches its $3 cap: the gate pauses it before its next step.
+    await addJobSpend(t.cell, 1, 3);
+    await until(async () => (await job(t))?.status === "paused");
+    expect((await job(t))?.pause?.reason).toBe("cap");
+    expect(await leadCalls(t, "restart_job", { job: 1, note: "again" })).toBe(EXHAUSTED_LINE);
+    await expectExhausted(t);
   });
 });
