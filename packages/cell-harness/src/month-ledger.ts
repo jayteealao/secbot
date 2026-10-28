@@ -399,8 +399,21 @@ export async function addGuardUsage(
   layer: Exclude<Layer, "agent">,
   usage: Usage,
 ): Promise<void> {
+  await addToolUsage(tx, conversationId, GUARD_USAGE_KEYS[layer], usage);
+}
+
+/**
+ * Adds one model call's usage to a conversation's `pi.usage` under a tool key. A key that is not a
+ * guard key counts as the conversation's own agent spend: the lead's hand-off note is booked this
+ * way on the lead's conversation, so it is in the person's month and their limits.
+ */
+export async function addToolUsage(
+  tx: Tx,
+  conversationId: ConversationId,
+  key: string,
+  usage: Usage,
+): Promise<void> {
   const tools = (await tx.doc(UsageDoc, conversationId)).tools as Record<string, Usage>;
-  const key = GUARD_USAGE_KEYS[layer];
   const known = Object.hasOwn(tools, key) ? tools[key] : undefined;
   if (known === undefined) {
     tools[key] = plainUsage(usage);

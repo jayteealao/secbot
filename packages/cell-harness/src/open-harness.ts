@@ -80,6 +80,7 @@ import {
   setGuardMode,
 } from "./guard-settings.ts";
 import { createLegacyHandoffExtension } from "./handoff.ts";
+import { createHandoffNoteExtension } from "./handoff-note.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import { createHistoryExtension } from "./history-search.ts";
 import { createHouseholdExtension, type HouseholdClient } from "./household-tools.ts";
@@ -776,6 +777,12 @@ export async function openCellHarness(
   const heartbeat = createHeartbeatRoutine(env, hooks, options.fetch);
   const reminders = createReminderRoutine(hooks);
   const lead = createLeadExtension({ now, timeZone });
+  const handoffNote = createHandoffNoteExtension({
+    person,
+    harness: current,
+    models: () => models,
+    now,
+  });
   const legacy = createLegacyHandoffExtension(person, () => gate, timeZone);
   const history = createHistoryExtension(current);
   const household = createHouseholdExtension(person, () => options.household);
@@ -919,6 +926,7 @@ export async function openCellHarness(
       lead,
       jobs.extension,
       bookmark,
+      handoffNote,
       history,
       household,
       secrets,

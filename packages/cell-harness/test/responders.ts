@@ -1,3 +1,4 @@
+import { HANDOFF_NOTE_PROMPT } from "../src/release-defaults.ts";
 import {
   type FauxRequest,
   fauxAssistantMessage,
@@ -162,4 +163,24 @@ export function monthChecker(request: FauxRequest): {
   return stray === undefined
     ? { verdict: "pass", reason: "the dates match the brief" }
     : { verdict: "reject", reason: `the brief asks for other dates; the result quotes ${stray}` };
+}
+
+/** The lead's hand-off note as the faux model writes it: the three headings with a line each. */
+export const NOTE_TEXT = [
+  "Open promises:",
+  "- send the flight list by Friday",
+  "Pending questions:",
+  "- which week works for Lisbon",
+  "Recent preferences:",
+  "- prefers morning flights",
+].join("\n");
+
+/** True for the lead's hand-off note request (its instructions start with the note's first line). */
+export const isNoteRequest = (request: FauxRequest): boolean =>
+  request.system.includes(HANDOFF_NOTE_PROMPT.split("\n")[0] as string);
+
+/** Answers the hand-off note request with the three headings, and every other request with `others`. */
+export function noteResponder(others: Responder = jobResponder): Responder {
+  return (request) =>
+    isNoteRequest(request) ? fauxAssistantMessage([fauxText(NOTE_TEXT)]) : others(request);
 }

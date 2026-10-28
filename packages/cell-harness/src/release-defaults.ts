@@ -367,6 +367,12 @@ export const GUARD_USAGE_KEYS = {
   reviewer: "secbot-guard:reviewer",
 } as const;
 
+/**
+ * The tool key under which the lead's hand-off note call is added to the lead's `pi.usage`: agent
+ * spend of the lead (a colon never appears in a model tool name).
+ */
+export const HANDOFF_USAGE_KEY = "secbot-handoff:note";
+
 /** A person cell reports its month to the household budget board at most this often. */
 export const SPEND_REPORT_MIN_MS = 5_000;
 
