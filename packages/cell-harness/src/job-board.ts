@@ -5,6 +5,7 @@
  */
 import type { Tx } from "@earendil-works/pi-durable";
 import {
+  emptyJobExtras,
   JobBoardDoc,
   type JobPriority,
   type JobResult,
@@ -77,6 +78,7 @@ export async function createJobRow(tx: Tx, fields: NewJob): Promise<JobRow> {
     createdAt: fields.createdAt,
     endedAt: null,
     result: null,
+    ...emptyJobExtras(),
   };
   return board.jobs[String(number)] as JobRow;
 }

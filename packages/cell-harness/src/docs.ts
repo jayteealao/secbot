@@ -7,6 +7,7 @@ import {
   defineDoc,
   defineDocFamily,
   type EntryId,
+  type JsonObject,
   type TaskId,
 } from "@earendil-works/pi-durable";
 import type { ActivityRecord } from "./activity.ts";
@@ -315,7 +316,19 @@ export const HouseholdBudgetDoc = defineDoc<{
 });
 
 export type JobPriority = "urgent" | "deadline" | "routine" | "research";
-export type JobStatus = "queued" | "running" | "waiting" | "done" | "failed" | "stopped";
+/**
+ * A job's status. `paused` waits for the lead's escalation move (cap or loop guard); `waiting`
+ * waits for an answer to its question; `rejected` is a risky result the reviewer turned down.
+ */
+export type JobStatus =
+  | "queued"
+  | "running"
+  | "paused"
+  | "waiting"
+  | "done"
+  | "failed"
+  | "rejected"
+  | "stopped";
 /** What a waiting result is: the inbox wakes the lead at once for every kind but `routine`. */
 export type ResultKind = "failure" | "question" | "risky" | "routine";
 
@@ -329,6 +342,60 @@ export type JobResult = {
   /** When a wake notice for it went to the lead; null when none did. */
   wokeAt: number | null;
 };
+
+/** Why a job paused before its next model step, when, and the numbers behind it. */
+export type JobPause = { reason: "cap" | "loop"; at: number; detail: string };
+
+/**
+ * A job's open or last question: one the job asked the lead (`job`), or the escalation question to
+ * the person after the job used its raise and its restart (`escalation`). The first answer wins.
+ */
+export type JobQuestion = {
+  /** Counts the job's questions, from 1. */
+  number: number;
+  from: "job" | "escalation";
+  text: string;
+  askedAt: number;
+  /** The lead handed it to the person (`ask_person`), or code did for an escalation. */
+  toPerson: boolean;
+  personAskedAt: number | null;
+  answer: string | null;
+  answeredAt: number | null;
+  answeredBy: "lead" | "person" | null;
+};
+
+/** One earlier run of a job, kept when the lead restarted it. */
+export type JobRun = {
+  conversationId: ConversationId | null;
+  taskId: TaskId | null;
+  startedAt: number;
+  endedAt: number;
+  /** The lead's failure note for the run after it. */
+  note: string;
+};
+
+/** The second-model review of a risky result. */
+export type JobReview = {
+  status: "running" | "passed" | "rejected";
+  model: string;
+  reason: string;
+  conversationId: ConversationId | null;
+  at: number;
+};
+
+/** The fields this slice adds to every row, empty (a new row, and a row of a version-1 board). */
+export const emptyJobExtras = (): Pick<
+  JobRow,
+  "pause" | "question" | "risky" | "toolsUsed" | "runs" | "review" | "requestedBy"
+> => ({
+  pause: null,
+  question: null,
+  risky: { code: [], lead: null },
+  toolsUsed: [],
+  runs: [],
+  review: null,
+  requestedBy: null,
+});
 
 /** One job on the board. Numbers grow per cell and are never reused. */
 export type JobRow = {
@@ -357,6 +424,18 @@ export type JobRow = {
   createdAt: number;
   endedAt: number | null;
   result: JobResult | null;
+  /** Why the job is paused; null while it is not. */
+  pause: JobPause | null;
+  question: JobQuestion | null;
+  /** Why the result is risky: code's reasons (tools, template) and the lead's reason, if any. */
+  risky: { code: string[]; lead: string | null };
+  /** The tools the current run called, by name, in first-use order. */
+  toolsUsed: string[];
+  /** Every earlier run of the job, oldest first. */
+  runs: JobRun[];
+  review: JobReview | null;
+  /** The job that asked the lead for this one (`request_job`), or null. */
+  requestedBy: number | null;
 };
 
 /**
@@ -369,10 +448,33 @@ export const JobBoardDoc = defineDoc<{
   byConversation: Record<string, number>;
 }>({
   kind: "secbot.job-board",
-  version: 1,
+  version: 2,
   scope: "session",
   initial: () => ({ nextNumber: 1, jobs: {}, byConversation: {} }),
+  migrate: (value) => migrateJobBoard(value),
 });
+
+/** A board of an earlier version: every row gains this version's fields, empty. */
+export function migrateJobBoard(value: JsonObject): {
+  nextNumber: number;
+  jobs: Record<string, JobRow>;
+  byConversation: Record<string, number>;
+} {
+  const old = value as unknown as {
+    nextNumber: number;
+    jobs: Record<string, Partial<JobRow>>;
+    byConversation: Record<string, number>;
+  };
+  const jobs: Record<string, JobRow> = {};
+  for (const [key, row] of Object.entries(old.jobs ?? {})) {
+    jobs[key] = { ...emptyJobExtras(), ...row } as JobRow;
+  }
+  return {
+    nextNumber: old.nextNumber ?? 1,
+    jobs,
+    byConversation: old.byConversation ?? {},
+  };
+}
 
 /** A lead tool call that runs in the background, and what it stored. */
 export type Receipt = {

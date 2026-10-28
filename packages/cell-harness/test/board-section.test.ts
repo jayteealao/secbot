@@ -2,7 +2,7 @@
 // section with templates, live rows, a count of the rest, and the results waiting by kind.
 import type { ConversationId, TaskId } from "@earendil-works/pi-durable";
 import { describe, expect, it } from "vitest";
-import type { JobRow } from "../src/docs.ts";
+import { emptyJobExtras, type JobRow } from "../src/docs.ts";
 import { bookmarkSection, createLeadExtension, jobsSection } from "../src/sections.ts";
 import { templatesOf } from "../src/templates.ts";
 
@@ -26,6 +26,7 @@ const row = (number: number, fields: Partial<JobRow> = {}): JobRow => ({
   createdAt: 0,
   endedAt: null,
   result: null,
+  ...emptyJobExtras(),
   ...fields,
 });
 

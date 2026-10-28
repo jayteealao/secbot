@@ -51,7 +51,85 @@ const row: JobRow = {
   createdAt: 1_000,
   endedAt: null,
   result: null,
+  pause: null,
+  question: null,
+  risky: { code: [], lead: null },
+  toolsUsed: [],
+  runs: [],
+  review: null,
+  requestedBy: null,
 };
+
+/** A row with every field this slice adds set. */
+const fullRow: JobRow = {
+  ...row,
+  // No live conversation: the reopen below creates ledgers only for real ones.
+  conversationId: null,
+  status: "paused",
+  pause: { reason: "cap", at: 2_000, detail: "$0.24 of $0.25" },
+  question: {
+    number: 2,
+    from: "job",
+    text: "Which address goes on the form?",
+    askedAt: 2_100,
+    toPerson: true,
+    personAskedAt: 2_200,
+    answer: "home",
+    answeredAt: 2_300,
+    answeredBy: "person",
+  },
+  risky: { code: ["household_change acts"], lead: "spends money" },
+  toolsUsed: ["household_read", "household_change"],
+  runs: [
+    {
+      conversationId: 5 as unknown as ConversationId,
+      taskId: 6 as unknown as TaskId,
+      startedAt: 1_000,
+      endedAt: 1_500,
+      note: "the search failed on the dates",
+    },
+  ],
+  review: {
+    status: "rejected",
+    model: "anthropic/claude-opus-5.5",
+    reason: "the prices are not for the brief's dates",
+    conversationId: 8 as unknown as ConversationId,
+    at: 2_400,
+  },
+  requestedBy: 4,
+};
+
+describe("the job board upgrade", () => {
+  it("is version 2 and migrates a version-1 board, field by field", () => {
+    expect(JobBoardDoc.definition.version).toBe(2);
+    const { pause, question, risky, toolsUsed, runs, review, requestedBy, ...v1 } = row;
+    const migrated = JobBoardDoc.definition.migrate?.(
+      { nextNumber: 2, jobs: { "1": v1 }, byConversation: { "7": 1 } } as never,
+      1,
+    );
+    const upgraded = migrated?.jobs["1"];
+    expect(upgraded?.pause).toBeNull();
+    expect(upgraded?.question).toBeNull();
+    expect(upgraded?.risky).toEqual({ code: [], lead: null });
+    expect(upgraded?.toolsUsed).toEqual([]);
+    expect(upgraded?.runs).toEqual([]);
+    expect(upgraded?.review).toBeNull();
+    expect(upgraded?.requestedBy).toBeNull();
+    expect(migrated).toEqual({ nextNumber: 2, jobs: { "1": row }, byConversation: { "7": 1 } });
+  });
+
+  it("round-trips every new field through a commit and a snapshot", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    const { harness } = test.cell;
+    await harness.commit(async (tx) => {
+      (await tx.doc(JobBoardDoc)).jobs["1"] = structuredClone(fullRow);
+    }, BACKGROUND_CONTEXT);
+    expect((await harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs["1"]).toEqual(fullRow);
+    await test.reopen();
+    expect((await test.cell.board()).jobs["1"]).toEqual(fullRow);
+  });
+});
 
 describe("the job documents", () => {
   it("round-trips every document through a commit and a snapshot", async () => {
