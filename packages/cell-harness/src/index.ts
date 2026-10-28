@@ -42,6 +42,7 @@ export {
   type SetTimer,
   USED_TEXT,
 } from "./approvals.ts";
+export type { BoardReason, BoardRow, BoardView } from "./board-view.ts";
 export { bookmarkText, recordInterruption } from "./bookmark.ts";
 export {
   BudgetGate,
@@ -111,7 +112,7 @@ export type {
   Receipt,
   ResultKind,
 } from "./docs.ts";
-export { BookmarkDoc, JobBoardDoc } from "./docs.ts";
+export { BookmarkDoc, JobBoardDoc, StopDoc } from "./docs.ts";
 export { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 export {
   createGuardExtension,
@@ -338,6 +339,7 @@ export {
   secretsReason,
 } from "./secret-tools.ts";
 export { FRAME_TYPES, type Frame, type SessionStream } from "./session-stream.ts";
+export type { StopAnswer } from "./stop.ts";
 export { capOf, isEffort, isTier, templatesOf, tierModelOf } from "./templates.ts";
 export {
   earliestTimer,

@@ -20,6 +20,7 @@ import { BACKGROUND_CONTEXT as cellContext } from "@earendil-works/chord/context
 import {
   AlwaysNotOffered,
   alarmVerdict,
+  type BoardView,
   CELL_NAME,
   CellAlarm,
   type CellEnv,
@@ -53,6 +54,7 @@ import {
   SecretsRefused,
   SecretsUnavailable,
   type SessionStream,
+  type StopAnswer,
 } from "@secbot/cell-harness";
 import {
   type CellDump,
@@ -242,6 +244,38 @@ const answerJson = <T>(
   status = 200,
   wrap: (value: T) => unknown = (v) => v,
 ) => (answer.ok ? json(wrap(answer.value), status) : json({ error: answer.error }, answer.status));
+
+const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** A real calendar day written YYYY-MM-DD. */
+export function isDay(text: string): boolean {
+  const parts = DAY.exec(text);
+  if (parts === null) return false;
+  const date = new Date(Date.UTC(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3])));
+  return date.toISOString().slice(0, 10) === text;
+}
+
+/** The reorder a priority body asks for; undefined when it asks for none or for two. */
+export function priorityChange(
+  body: Record<string, unknown>,
+):
+  | { readonly urgent: true }
+  | { readonly deadline: string | null }
+  | { readonly before: number }
+  | undefined {
+  const keys = Object.keys(body);
+  if (keys.length !== 1) return undefined;
+  if (body.urgent === true) return { urgent: true };
+  if ("deadline" in body) {
+    const { deadline } = body;
+    if (deadline === null) return { deadline: null };
+    return typeof deadline === "string" && isDay(deadline) ? { deadline } : undefined;
+  }
+  const { before } = body;
+  return typeof before === "number" && Number.isSafeInteger(before) && before > 0
+    ? { before }
+    : undefined;
+}
 
 /** Reads a JSON body of at most BODY_LIMIT characters; undefined when it is larger or not JSON. */
 async function readJson(request: Request): Promise<Record<string, unknown> | undefined> {
@@ -616,6 +650,22 @@ export class PersonCell {
       if (request.method === "POST" && approvalRoute !== null) {
         return this.answerRoute(request, cell, Number(approvalRoute[1]), device);
       }
+      if (request.method === "GET" && route === "/jobs") return json(await cell.jobsView());
+      if (request.method === "POST" && route === "/stop") {
+        const stopped = await cell.stop("person");
+        // Aborted work settles in the background; keep the cell up until it has.
+        this.keepBusy(cell);
+        this.rearmSoon(person);
+        return json(stopped);
+      }
+      const jobRestartRoute = /^\/jobs\/([1-9][0-9]{0,8})\/restart$/.exec(route);
+      if (request.method === "POST" && jobRestartRoute !== null) {
+        return this.jobRestartRoute(cell, Number(jobRestartRoute[1]));
+      }
+      const jobPriorityRoute = /^\/jobs\/([1-9][0-9]{0,8})\/priority$/.exec(route);
+      if (request.method === "POST" && jobPriorityRoute !== null) {
+        return this.jobPriorityRoute(request, cell, Number(jobPriorityRoute[1]));
+      }
       const jobAnswerRoute = /^\/jobs\/([1-9][0-9]{0,8})\/answer$/.exec(route);
       if (request.method === "POST" && jobAnswerRoute !== null) {
         return this.jobAnswerRoute(request, cell, Number(jobAnswerRoute[1]));
@@ -776,6 +826,73 @@ export class PersonCell {
     this.keepBusy(cell);
     this.rearmSoon(cell.person);
     return json({ job: answered.job, title: answered.title });
+  }
+
+  /**
+   * The person restarts a stopped or blocked job from its kept brief and transcript. It does not
+   * use the job's own restart.
+   */
+  private async jobRestartRoute(cell: CellHarness, n: number): Promise<Response> {
+    const resumed = await cell.resumeJob(n, "person");
+    if (!resumed.ok) {
+      const { reason } = resumed;
+      if (reason === "no-job") return json({ error: `no stopped job #${n}`, reason }, 404);
+      const error =
+        reason === "locked"
+          ? "a stop is running; try again"
+          : reason === "paused"
+            ? `job ${n} is paused, not stopped`
+            : `no stopped job #${n}`;
+      return json({ error, reason }, 409);
+    }
+    // The resumed job runs in this activation; keep the cell up while it does.
+    this.keepBusy(cell);
+    this.rearmSoon(cell.person);
+    return json({ job: resumed.job, title: resumed.title });
+  }
+
+  /**
+   * The person changes a live job's place in the queue: `{"urgent": true}`, `{"deadline":
+   * "YYYY-MM-DD" | null}`, or `{"before": <job>}`.
+   */
+  private async jobPriorityRoute(request: Request, cell: CellHarness, n: number) {
+    const body = await readJson(request);
+    if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+    const change = priorityChange(body);
+    if (change === undefined) {
+      return json(
+        { error: 'send {"urgent": true}, {"deadline": "YYYY-MM-DD" | null}, or {"before": <job>}' },
+        400,
+      );
+    }
+    const answer = await cell.reorderJob(n, change);
+    if (!answer.ok) {
+      return answer.reason === "no-job"
+        ? json({ error: `no job #${answer.job}`, reason: answer.reason, job: answer.job }, 404)
+        : json(
+            { error: `job ${answer.job} has ended`, reason: answer.reason, job: answer.job },
+            409,
+          );
+    }
+    const { ok: _ok, ...placed } = answer;
+    return json(placed);
+  }
+
+  /** RPC (operator routes): a person's job board, for the owner. */
+  async jobsOf(person: string): Promise<GuardAnswer<BoardView & { operator: true }>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => ({ ...(await cell.jobsView()), operator: true as const }));
+  }
+
+  /** RPC (operator routes): the owner's stop of this person's jobs and the lead's turn. */
+  async stopOf(person: string): Promise<GuardAnswer<StopAnswer>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => {
+      const stopped = await cell.stop("owner");
+      this.keepBusy(cell);
+      this.rearmSoon(person);
+      return stopped;
+    });
   }
 
   /** RPC (operator routes): both levels of a person's rules. */

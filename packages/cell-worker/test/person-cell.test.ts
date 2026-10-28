@@ -2,15 +2,15 @@
 // the version and its roles, the model, tier-cap, and template routes, chat input (which steers a
 // busy lead) and frames over a socket, missed messages, and the live job tasks.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type CellHarness, openCellHarness } from "@secbot/cell-harness";
+import { type CellHarness, JobBoardDoc, openCellHarness, StopDoc } from "@secbot/cell-harness";
 import {
   ALTERNATE_MODEL,
   createFauxGateway,
   FakeCelldStorage,
+  type FauxGateway,
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
-  type FauxGateway,
   loggedEvents,
   type Responder,
   until,
@@ -527,4 +527,165 @@ describe("PersonCell", () => {
       ["req-mail-0001", "followUp"],
     ]);
   });
+});
+
+describe("the job board, stop, restart, and reorder routes", () => {
+  /** Three research jobs, held by the model so they stay running. */
+  async function threeJobs() {
+    const hold = createHold();
+    const s = await setup(hold.wrap(jobResponder));
+    s.sockets.splice(0);
+    await call(s, "GET", "/v1/cells/owner/status");
+    const harness = s.opened[0];
+    if (harness === undefined) throw new Error("setup failed");
+    hold.hold("research");
+    for (const [index, title] of ["flights to Lisbon", "train times", "hotel list"].entries()) {
+      await (
+        await harness.submit(
+          startJobLine({ title, brief: `${title}, please.`, template: "research" }),
+          `route-job-${index}`,
+        )
+      ).wait(BACKGROUND_CONTEXT);
+    }
+    await until(() => hold.waiting("research") === 3);
+    return { s, harness, hold };
+  }
+  const priority = (s: Setup, n: number, body: unknown) =>
+    call(s, "POST", `/v1/cells/owner/jobs/${n}/priority`, body);
+
+  it("answers the board, reorders live jobs, and refuses a bad body, a missing job, and an ended one", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { s, harness, hold } = await threeJobs();
+    const board = await call(s, "GET", "/v1/cells/owner/jobs");
+    expect(board.status).toBe(200);
+    const view = (await board.json()) as { person: string; rows: { number: number }[] };
+    expect(view.person).toBe("owner");
+    expect(view.rows.map((row) => row.number)).toEqual([1, 2, 3]);
+
+    const urgent = await priority(s, 3, { urgent: true });
+    expect(urgent.status).toBe(200);
+    expect(await urgent.json()).toEqual({
+      job: 3,
+      title: "hotel list",
+      priority: "urgent",
+      deadline: null,
+      place: 1,
+      of: 3,
+    });
+    expect(await (await priority(s, 2, { deadline: "2026-10-12" })).json()).toMatchObject({
+      job: 2,
+      priority: "deadline",
+      deadline: "2026-10-12",
+      place: 2,
+      of: 3,
+    });
+    expect(await (await priority(s, 1, { before: 3 })).json()).toMatchObject({
+      job: 1,
+      place: 1,
+      of: 3,
+      before: 3,
+    });
+    expect(await (await priority(s, 2, { deadline: null })).json()).toMatchObject({
+      job: 2,
+      priority: "routine",
+      deadline: null,
+    });
+    for (const body of [
+      {},
+      { urgent: false },
+      { deadline: "2026-02-30" },
+      { deadline: "12/10/2026" },
+      { before: 0 },
+      { before: "1" },
+      { urgent: true, before: 1 },
+    ]) {
+      expect((await priority(s, 1, body)).status).toBe(400);
+    }
+    const missing = await priority(s, 9, { urgent: true });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "no job #9", reason: "no-job", job: 9 });
+    const missingTarget = await priority(s, 1, { before: 9 });
+    expect(missingTarget.status).toBe(404);
+    expect(await missingTarget.json()).toMatchObject({ error: "no job #9" });
+
+    // The stop ends every job: a reorder of one is refused.
+    const stopping = call(s, "POST", "/v1/cells/owner/stop");
+    await until(
+      async () => (await harness.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.active != null,
+    );
+    hold.release("research");
+    const stopped = await stopping;
+    expect(stopped.status).toBe(200);
+    expect(await stopped.json()).toEqual({ jobs: 3, turn: false });
+    const ended = await priority(s, 1, { urgent: true });
+    expect(ended.status).toBe(409);
+    expect(await ended.json()).toEqual({ error: "job 1 has ended", reason: "ended", job: 1 });
+  }, 60_000);
+
+  it("restarts a stopped job and refuses a missing, a running, and a paused one, and during a stop", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { s, harness, hold } = await threeJobs();
+    const stopping = call(s, "POST", "/v1/cells/owner/stop");
+    await until(
+      async () => (await harness.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.active != null,
+    );
+    hold.release("research");
+    await stopping;
+    const restart = (n: number) => call(s, "POST", `/v1/cells/owner/jobs/${n}/restart`);
+
+    const missing = await restart(9);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "no stopped job #9", reason: "no-job" });
+
+    const restarted = await restart(1);
+    expect(restarted.status).toBe(200);
+    expect(await restarted.json()).toEqual({ job: 1, title: "flights to Lisbon" });
+    await until(async () => (await harness.board()).jobs["1"]?.status === "done");
+    const again = await restart(1);
+    expect(again.status).toBe(409);
+    expect(await again.json()).toEqual({ error: "no stopped job #1", reason: "not-stopped" });
+
+    await harness.harness.commit(async (tx) => {
+      const board = await tx.doc(JobBoardDoc);
+      const row = board.jobs["2"];
+      if (row === undefined) throw new Error("no job 2");
+      row.status = "paused";
+      row.pause = { reason: "cap", at: 1, detail: "" };
+    }, BACKGROUND_CONTEXT);
+    const paused = await restart(2);
+    expect(paused.status).toBe(409);
+    expect(await paused.json()).toEqual({
+      error: "job 2 is paused, not stopped",
+      reason: "paused",
+    });
+
+    await harness.harness.commit(async (tx) => {
+      (await tx.doc(StopDoc)).active = { at: 1, by: "person" };
+    }, BACKGROUND_CONTEXT);
+    const locked = await restart(3);
+    expect(locked.status).toBe(409);
+    expect(await locked.json()).toEqual({
+      error: "a stop is running; try again",
+      reason: "locked",
+    });
+  }, 60_000);
+
+  it("answers the owner's board and stop through RPC", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { s, harness, hold } = await threeJobs();
+    const cell = s.cells.get("owner");
+    if (cell === undefined) throw new Error("setup failed");
+    const view = await cell.jobsOf("owner");
+    expect(view).toMatchObject({ ok: true, value: { person: "owner", operator: true, live: 3 } });
+    const stopping = cell.stopOf("owner");
+    await until(
+      async () => (await harness.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.active != null,
+    );
+    hold.release("research");
+    expect(await stopping).toEqual({ ok: true, value: { jobs: 3, turn: false } });
+    expect((await harness.board()).jobs["1"]).toMatchObject({
+      status: "stopped",
+      stop: { by: "owner" },
+    });
+  }, 60_000);
 });
