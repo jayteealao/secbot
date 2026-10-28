@@ -166,6 +166,7 @@ const CASES: readonly (readonly [string, Record<string, unknown>])[] = [
   ["answer_job", { job: 1, answer: "the morning train" }],
   ["ask_person", { job: 1 }],
   ["restart_job", { job: 9, note: "No job 9: the round still ends with a refusal." }],
+  ["resume_job", { job: 9 }],
   ["read_result", { receipt: "r1" }],
   ["note_bookmark", { sentence: "I was checking the tools." }],
   ["resume_work", {}],

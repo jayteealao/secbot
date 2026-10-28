@@ -39,11 +39,12 @@ import {
   markRisky,
   openQuestion,
   pullResult,
+  type ResumeRefusal,
   resumeRow,
   setTierEffort,
 } from "./job-board.ts";
 import type { JobHolds } from "./job-holds.ts";
-import { configureJob, createJobTask, type JobTask } from "./job-task.ts";
+import { configureJob, createJobTask, type JobTask, resumeJobTask } from "./job-task.ts";
 import { budgetOf } from "./month-ledger.ts";
 import {
   createReadResultTool,
@@ -192,6 +193,20 @@ export function transcriptText(entries: readonly EntryRecord[], max: number): st
     size += line.length + 1;
   }
   return kept.reverse().join("\n");
+}
+
+/** What the lead hears when a resume is refused. */
+export function resumeRefusalText(n: number, reason: ResumeRefusal, status = ""): string {
+  switch (reason) {
+    case "no-job":
+      return `No job ${n} on the board.`;
+    case "locked":
+      return STOP_RUNNING;
+    case "paused":
+      return `job ${n} is paused, not stopped: raise it with set_job or restart it with restart_job.`;
+    default:
+      return `job ${n} is ${status || "not stopped"}; only a stopped or blocked job resumes.`;
+  }
 }
 
 /** The lead's refusal when a job has used both escalations: the job has stopped. */
@@ -634,6 +649,40 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     },
   });
 
+  const resumeJob = defineTool({
+    name: "resume_job",
+    description:
+      "Resume a job the person stopped, or one the content check blocked, from its kept brief and transcript. Only when the person asks. It does not use the job's restart.",
+    parameters: Type.Object({ job: jobParameter }),
+    // A crash mid-call gives the model an interrupted result instead of a second resume.
+    replay: "unsafe",
+    execute: async (args, api, context) => {
+      const answer = await api.commit(async (tx) => {
+        const resumed = await resumeJobTask(tx, JobTask, args.job, deps.now(), "lead");
+        if ("refused" in resumed) {
+          const row = (await tx.doc(JobBoardDoc)).jobs[String(args.job)];
+          return { ...resumed, status: row?.status ?? "" };
+        }
+        return { number: resumed.ok.number, resumes: resumed.ok.resumes };
+      }, context);
+      if ("refused" in answer) {
+        return refusal(resumeRefusalText(args.job, answer.refused, answer.status));
+      }
+      logEvent("job.resumed", {
+        cell: person,
+        job: answer.number,
+        by: "lead",
+        resumes: answer.resumes,
+      });
+      return {
+        ...text(
+          `job ${answer.number} resumes from its kept brief and transcript; this does not use its restart.`,
+        ),
+        details: { job: answer.number },
+      };
+    },
+  });
+
   const markRiskyTool = defineTool({
     name: "mark_risky",
     description:
@@ -768,6 +817,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         jobResult,
         setJob,
         restartJob,
+        resumeJob,
         jobTranscript,
         markRiskyTool,
         answerJob,

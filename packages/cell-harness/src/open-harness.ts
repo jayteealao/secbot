@@ -83,10 +83,10 @@ import { createLegacyHandoffExtension } from "./handoff.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import { createHistoryExtension } from "./history-search.ts";
 import { createHouseholdExtension, type HouseholdClient } from "./household-tools.ts";
-import { answerQuestion, ENDED, openQuestion } from "./job-board.ts";
+import { answerQuestion, ENDED, openQuestion, type ResumeRefusal } from "./job-board.ts";
 import { createJobGate } from "./job-gate.ts";
 import { JobHolds } from "./job-holds.ts";
-import type { JobTask } from "./job-task.ts";
+import { type JobTask, resumeJobTask } from "./job-task.ts";
 import { createJobToolsExtension } from "./job-tools.ts";
 import { liveJobs } from "./jobs.ts";
 import { createJobsExtension } from "./lead-tools.ts";
@@ -309,6 +309,37 @@ export class CellHarness implements CellParts {
       answer_chars: answer.length,
     });
     return { ok: true, job: n, title: done.title };
+  }
+
+  /**
+   * The person resumes stopped or blocked job `n` from its kept brief, board entry, and
+   * transcript (`by` "lead" when the lead does it on the person's ask). It does not use the job's
+   * restart. Refused for a missing number, a paused job, any other status, and while a stop runs.
+   */
+  async resumeJob(
+    n: number,
+    by: "person" | "lead" = "person",
+    context: Context = BACKGROUND_CONTEXT,
+  ): Promise<
+    | { readonly ok: true; readonly job: number; readonly title: string }
+    | { readonly ok: false; readonly reason: ResumeRefusal }
+  > {
+    const task = this.tasks?.job;
+    if (task === undefined) throw new Error("the job task is not registered");
+    const done = await this.harness.commit(async (tx) => {
+      const resumed = await resumeJobTask(tx, task, n, this.now(), by);
+      return "refused" in resumed
+        ? ({ ok: false, reason: resumed.refused } as const)
+        : ({
+            ok: true,
+            job: resumed.ok.number,
+            title: resumed.ok.title,
+            resumes: resumed.ok.resumes,
+          } as const);
+    }, context);
+    if (!done.ok) return done;
+    logEvent("job.resumed", { cell: this.person, job: n, by, resumes: done.resumes });
+    return { ok: true, job: done.job, title: done.title };
   }
 
   /** The questions put to the person that wait for their answer, oldest first. */

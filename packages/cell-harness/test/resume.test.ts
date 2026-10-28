@@ -3,13 +3,25 @@
 // job's cost counts every run (AC-30, harness half).
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { UsageDoc } from "@earendil-works/pi-durable";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createDecisionModels } from "../src/decision-model.ts";
 import { resumeJobTask } from "../src/job-task.ts";
 import { conversationTotal } from "../src/month-ledger.ts";
 import { stopJobs } from "../src/stop.ts";
-import { addJobSpend, createFauxGateway, openTestCell, type TestCell, until } from "./fixtures.ts";
+import { failingResearch, leadCalls, startPausedJob } from "./escalation-helpers.ts";
+import {
+  addJobSpend,
+  createFauxGateway,
+  fauxAssistantMessage,
+  fauxToolCall,
+  openTestCell,
+  type TestCell,
+  until,
+} from "./fixtures.ts";
+import { FIXTURE_PAGES, standInDecide } from "./injection-fixtures.ts";
 import { entriesOf, entryRole, entryText } from "./job-helpers.ts";
-import { createHold, jobResponder, startJobLine } from "./responders.ts";
+import { createHold, jobResponder, RESEARCH_JOB, startJobLine } from "./responders.ts";
+import { type StubOpenRouter, startStubOpenRouter } from "./stub-openrouter.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -93,5 +105,99 @@ describe("the resumed run", () => {
     const usage = await t.cell.harness.snapshot(UsageDoc, id, BACKGROUND_CONTEXT);
     expect(usage === undefined ? 0 : conversationTotal(usage)).toBe(0);
     expect(row?.cost).toBeCloseTo(0.3, 6);
+  });
+});
+
+describe("the person's restart of a stopped job (AC-30)", () => {
+  it("resumes with its kept brief, board entry, and transcript, without using its restart", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const t = await stoppedJob();
+    const before = await job(t);
+    expect(await t.cell.resumeJob(1)).toEqual({ ok: true, job: 1, title: "flights" });
+    await until(async () => (await job(t))?.status === "done");
+    const after = await job(t);
+    expect(after).toMatchObject({
+      number: 1,
+      title: before?.title,
+      brief: "find flights",
+      template: before?.template,
+      tier: before?.tier,
+      attempts: { raises: 0, restarts: 0 },
+      resumes: 1,
+      runs: [
+        {
+          conversationId: before?.conversationId,
+          note: "stopped by the person; resumed by the person",
+        },
+      ],
+    });
+    // A done job does not resume again.
+    expect(await t.cell.resumeJob(1)).toEqual({ ok: false, reason: "not-stopped" });
+  });
+
+  it("refuses a paused job and a missing number", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(failingResearch) });
+    const t = test;
+    await startPausedJob(t);
+    expect(await t.cell.resumeJob(1)).toEqual({ ok: false, reason: "paused" });
+    expect(await t.cell.resumeJob(22)).toEqual({ ok: false, reason: "no-job" });
+    expect((await job(t))?.status).toBe("paused");
+  });
+
+  it("lets the lead resume it on the person's ask, with its own refusals", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const t = await stoppedJob();
+    expect(await leadCalls(t, "resume_job", { job: 22 })).toBe("No job 22 on the board.");
+    expect(await leadCalls(t, "resume_job", { job: 1 })).toBe(
+      "job 1 resumes from its kept brief and transcript; this does not use its restart.",
+    );
+    await until(async () => (await job(t))?.status === "done");
+    expect((await job(t))?.runs.at(-1)?.note).toBe("stopped by the person; resumed by the lead");
+    expect(await leadCalls(t, "resume_job", { job: 1 })).toBe(
+      "job 1 is done; only a stopped or blocked job resumes.",
+    );
+  });
+});
+
+describe("the person's restart of a blocked job", () => {
+  let stub: StubOpenRouter;
+  beforeEach(async () => {
+    stub = await startStubOpenRouter();
+    stub.decide = standInDecide;
+  });
+  afterEach(async () => {
+    await stub.close();
+  });
+
+  it("reads the injected page again, is checked again, and is blocked again", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    test = await openTestCell({
+      gateway: createFauxGateway((request) =>
+        request.role === "research" && request.last?.role !== "toolResult"
+          ? fauxAssistantMessage([fauxToolCall("read_fixture_page", { page: "injected" })], {
+              stopReason: "toolUse",
+            })
+          : jobResponder(request),
+      ),
+      fixturePages: FIXTURE_PAGES,
+      guard: {
+        decision: createDecisionModels({ apiKey: "decisions-test-key-0000", baseUrl: stub.origin }), // gitleaks:allow (fake test key)
+      },
+    });
+    const t = test;
+    await (await t.cell.submit(RESEARCH_JOB, "read-injected")).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await job(t))?.status === "blocked");
+    const firstChecks = stub.seen.length;
+    expect(await t.cell.resumeJob(1)).toEqual({ ok: true, job: 1, title: expect.any(String) });
+    await until(async () => (await job(t))?.status === "blocked" && (await job(t))?.resumes === 1);
+    expect(stub.seen.length).toBeGreaterThan(firstChecks);
+    expect(await job(t)).toMatchObject({
+      status: "blocked",
+      block: { cause: "hit", kind: "page" },
+      attempts: { raises: 0, restarts: 0 },
+      runs: [{ note: "blocked; resumed by the person" }],
+    });
   });
 });
