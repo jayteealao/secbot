@@ -14,6 +14,15 @@ import {
   TIER_MODELS,
   TIERS,
 } from "../src/release-defaults.ts";
+import {
+  appliedEffort,
+  capOf,
+  isEffort,
+  isTier,
+  templateNamed,
+  templatesOf,
+  tierModelOf,
+} from "../src/templates.ts";
 
 describe("release defaults of the job model", () => {
   it("names three tiers with their models and caps", () => {
@@ -74,5 +83,59 @@ describe("release defaults of the job model", () => {
       tool: "handoff",
       verdict: "permit",
     });
+  });
+});
+
+describe("template and tier resolution", () => {
+  const clamping = {
+    getModel: (_provider: string, id: string) =>
+      id === "clamps/low"
+        ? ({ id, reasoning: true, thinkingLevelMap: { low: null } } as never)
+        : id === "plain/model"
+          ? ({ id, reasoning: true } as never)
+          : undefined,
+  };
+
+  it("merges custom templates after the release ones, never replacing one", () => {
+    const templates = templatesOf({
+      travel: { instruction: "You are the travel specialist.", tier: "cheap" },
+      research: { instruction: "ignored", tier: "frontier" },
+    });
+    expect(templates.map((template) => template.name)).toEqual([
+      "household",
+      "research",
+      "health",
+      "developer",
+      "travel",
+    ]);
+    expect(templates.find((each) => each.name === "research")?.tier).toBe("mid");
+  });
+
+  it("refuses an unknown template with the valid names", () => {
+    expect(templateNamed(templatesOf(), "astrology")).toEqual({
+      error: "No template named astrology. Templates: household, research, health, developer.",
+    });
+    expect(templateNamed(templatesOf(), "health")).toMatchObject({ name: "health", tier: "mid" });
+  });
+
+  it("reads a tier's model and cap from the owner's changes, else the release", () => {
+    expect(tierModelOf("mid")).toBe("anthropic/claude-sonnet-5.5");
+    expect(tierModelOf("mid", { mid: "openai/gpt-5" })).toBe("openai/gpt-5");
+    expect(capOf("cheap")).toBe(0.25);
+    expect(capOf("frontier", { frontier: 5 })).toBe(5);
+  });
+
+  it("applies the effort the model supports: low clamps up to medium", () => {
+    expect(appliedEffort(clamping, "clamps/low", "low")).toBe("medium");
+    expect(appliedEffort(clamping, "clamps/low", "high")).toBe("high");
+    expect(appliedEffort(clamping, "plain/model", "low")).toBe("low");
+    expect(appliedEffort(clamping, "unknown/model", "high")).toBe("high");
+  });
+
+  it("knows tiers and efforts", () => {
+    expect(isTier("mid")).toBe(true);
+    expect(isTier("huge")).toBe(false);
+    expect(isEffort("low")).toBe(true);
+    expect(isEffort("max")).toBe(false);
   });
 });
