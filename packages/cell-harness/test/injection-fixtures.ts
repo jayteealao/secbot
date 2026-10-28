@@ -3,7 +3,7 @@
  * finds the fixture order phrase in a chunk's content (a test double for the decision model, not
  * a detector).
  */
-import { cleanAt, injectionAt, type StubDecision } from "./stub-openrouter.ts";
+import { cleanAt, injectionAt, routineAt, type StubDecision } from "./stub-openrouter.ts";
 
 /** The order every injected fixture page hides, addressed to the agent. */
 export const FIXTURE_ORDER =
@@ -55,8 +55,13 @@ export const FIXTURE_PAGES = {
   "over-max": overMax,
 } as const;
 
-/** The stub's answer for one decisions request: injection when the chunk holds the order. */
+/**
+ * The stub's answer for one decisions request: for the content question, injection when the chunk
+ * holds the order; for the tool-call question, a routine call.
+ */
 export function standInDecide(body: Record<string, unknown>): StubDecision {
+  const questions = (body.questions ?? {}) as Record<string, unknown>;
+  if (!Object.hasOwn(questions, "injection")) return routineAt(0.05);
   const state = body.state as { content?: unknown } | undefined;
   return String(state?.content ?? "").includes(FIXTURE_ORDER) ? injectionAt(0.92) : cleanAt(0.04);
 }
