@@ -100,10 +100,10 @@ import {
   waitingList,
 } from "./limits.ts";
 import { ModelHealthMonitor } from "./model-health.ts";
-import { listRoleModels, type RoleModel, setRoleModel } from "./model-map.ts";
+import { listRoleModels, type RoleModel, setRoleModel, setTierCap } from "./model-map.ts";
 import { ledgerConversations } from "./month-ledger.ts";
 import type { ReceiptTask } from "./receipts.ts";
-import type { DecisionAdapter, } from "./release-defaults.ts";
+import type { DecisionAdapter } from "./release-defaults.ts";
 import {
   createReminderExtension,
   createReminderRoutine,
@@ -473,6 +473,11 @@ export class CellHarness implements CellParts {
 
   setRoleModel(role: string, modelId: string, context: Context = BACKGROUND_CONTEXT) {
     return setRoleModel(this, role, modelId, context);
+  }
+
+  /** Changes a tier's per-job cap (the owner's `secbot model cap`). */
+  setTierCap(tier: string, usd: unknown, context: Context = BACKGROUND_CONTEXT) {
+    return setTierCap(this, tier, usd, context);
   }
 
   addSpecialist(

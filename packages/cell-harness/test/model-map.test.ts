@@ -14,8 +14,10 @@ import {
   openTestCell,
   reviewerResponder,
   type TestCell,
+  until,
   verdictJson,
 } from "./fixtures.ts";
+import { jobResponder, startJobLine } from "./responders.ts";
 
 /** A decision model that marks every call for the reviewer. */
 const markingDecision: DecisionModels = (adapter) => ({
@@ -50,9 +52,22 @@ describe("role-to-model map", () => {
       model: "anthropic/claude-opus-5.5",
       source: "release default",
     });
-    expect(map.slice(1, 5).map((entry) => entry.model)).toEqual(
-      Array(4).fill("anthropic/claude-haiku-4.5"),
-    );
+    // The three job tiers, with their per-job caps.
+    expect(map.slice(1, 4)).toEqual([
+      {
+        role: "cheap",
+        model: "anthropic/claude-haiku-4.5",
+        source: "release default",
+        capUsd: 0.25,
+      },
+      { role: "mid", model: "anthropic/claude-sonnet-5.5", source: "release default", capUsd: 1 },
+      {
+        role: "frontier",
+        model: "anthropic/claude-opus-5.5",
+        source: "release default",
+        capUsd: 3,
+      },
+    ]);
     // The guard's reviewer comes last, with its own default.
     expect(map.at(-1)).toEqual({
       role: "reviewer",
@@ -122,16 +137,45 @@ describe("role-to-model map", () => {
     expect((await t.cell.listRoleModels())[0]?.source).toBe("changed");
   });
 
-  it("changes a specialist's model", async () => {
+  it("changes a tier's model for the next job on it, and keeps a running job's", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    test = await openTestCell();
-    await test.cell.setRoleModel("research", ALTERNATE_MODEL);
-    const map = await test.cell.listRoleModels();
-    expect(map.find((entry) => entry.role === "research")).toEqual({
-      role: "research",
+    test = await openTestCell({ gateway: createFauxGateway(jobResponder) });
+    const t = test;
+    await t.cell.setRoleModel("mid", ALTERNATE_MODEL);
+    expect((await t.cell.listRoleModels()).find((entry) => entry.role === "mid")).toEqual({
+      role: "mid",
       model: ALTERNATE_MODEL,
       source: "changed",
+      capUsd: 1,
     });
+    await (
+      await t.cell.submit(startJobLine({ title: "a", brief: "look", template: "research" }), "j1")
+    ).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await t.cell.board()).jobs["1"]?.result != null);
+    expect(t.gateway.requests.find((request) => request.role === "research")?.modelId).toBe(
+      ALTERNATE_MODEL,
+    );
+  });
+
+  it("changes a tier's cap for new jobs and refuses a bad cap or tier", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(jobResponder) });
+    const t = test;
+    expect(await t.cell.setTierCap("mid", 2.5)).toEqual({ tier: "mid", capUsd: 2.5 });
+    expect((await t.cell.listRoleModels()).find((entry) => entry.role === "mid")?.capUsd).toBe(2.5);
+    await (
+      await t.cell.submit(startJobLine({ title: "a", brief: "look", template: "research" }), "j1")
+    ).wait(BACKGROUND_CONTEXT);
+    expect((await t.cell.board()).jobs["1"]?.cap).toBe(2.5);
+    await expect(t.cell.setTierCap("mid", 0)).rejects.toThrow(/a cap is a dollar amount/);
+    await expect(t.cell.setTierCap("mid", 1.234)).rejects.toThrow(RefusedChange);
+    await expect(t.cell.setTierCap("mid", 1_000_000)).rejects.toThrow(RefusedChange);
+    await expect(t.cell.setTierCap("huge", 1)).rejects.toThrow(/unknown tier/);
+    expect((await t.cell.listRoleModels()).find((entry) => entry.role === "mid")?.capUsd).toBe(2.5);
+    expect(lines(log).filter((line) => line.event === "tier.cap_changed")).toEqual([
+      expect.objectContaining({ tier: "mid", from_usd: 1, to_usd: 2.5, outcome: "changed" }),
+      ...Array(4).fill(expect.objectContaining({ outcome: "refused" })),
+    ]);
   });
 
   it("refuses an unresolvable id or an unknown role and leaves the map unchanged", async () => {
