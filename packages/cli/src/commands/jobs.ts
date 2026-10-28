@@ -255,3 +255,45 @@ export async function jobsReorder(
   else io.stderr(`secbot: ${plain(String(answer.body.error ?? answer.status))}\n`);
   return 1;
 }
+
+/**
+ * `secbot jobs restart <#>`: a stopped or blocked job starts again from its kept brief and
+ * transcript. It does not use the job's own restart. A paused job is the lead's to go on with.
+ */
+export async function jobsRestart(
+  client: CellClient,
+  io: Io,
+  args: readonly (string | undefined)[],
+): Promise<number> {
+  const [number, extra] = args;
+  if (number === undefined || extra !== undefined || !NUMBER.test(number)) {
+    io.stderr(`${JOBS_USAGE.restart}\n`);
+    return 2;
+  }
+  const answer = await client.answer<{ job: number; title: string }>(
+    "POST",
+    `/jobs/${number}/restart`,
+  );
+  if (answer.ok) {
+    io.stdout(
+      `[ restarted ] #${answer.value.job} ${plain(answer.value.title)}, from its kept brief and transcript\n`,
+    );
+    return 0;
+  }
+  const { reason } = answer.body;
+  if (reason === "paused") {
+    const title = typeof answer.body.title === "string" ? answer.body.title : "";
+    io.stdout(`[ restarted ] #${number} ${plain(title)} is paused, not stopped; ask the lead\n`);
+    return 1;
+  }
+  if (reason === "locked") {
+    io.stderr("secbot: a stop is running; try again\n");
+    return 1;
+  }
+  if (reason === "no-job" || reason === "not-stopped") {
+    io.stderr(`no stopped job #${number}\n`);
+    return 1;
+  }
+  io.stderr(`secbot: ${plain(String(answer.body.error ?? answer.status))}\n`);
+  return 1;
+}

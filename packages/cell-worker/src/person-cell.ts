@@ -847,7 +847,10 @@ export class PersonCell {
           : reason === "paused"
             ? `job ${n} is paused, not stopped`
             : `no stopped job #${n}`;
-      return json({ error, reason }, 409);
+      if (reason !== "paused") return json({ error, reason }, 409);
+      // A paused job is the lead's to go on with; the answer names it for the person.
+      const title = (await cell.board()).jobs[String(n)]?.title ?? "";
+      return json({ error, reason, job: n, title }, 409);
     }
     // The resumed job runs in this activation; keep the cell up while it does.
     this.keepBusy(cell);

@@ -657,6 +657,8 @@ describe("the job board, stop, restart, and reorder routes", () => {
     expect(await paused.json()).toEqual({
       error: "job 2 is paused, not stopped",
       reason: "paused",
+      job: 2,
+      title: "train times",
     });
 
     await harness.harness.commit(async (tx) => {
