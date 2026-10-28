@@ -723,7 +723,10 @@ describe("the queue order and the person's reorder", () => {
 
   it("orders by priority: urgent, deadlines by date, routine, research", () => {
     expect(priorityKey({ priority: "urgent", deadline: null })).toEqual([0, ""]);
-    expect(priorityKey({ priority: "deadline", deadline: "2026-10-12" })).toEqual([1, "2026-10-12"]);
+    expect(priorityKey({ priority: "deadline", deadline: "2026-10-12" })).toEqual([
+      1,
+      "2026-10-12",
+    ]);
     expect(priorityKey({ priority: "routine", deadline: null })).toEqual([2, ""]);
     expect(priorityKey({ priority: "research", deadline: null })).toEqual([3, ""]);
   });
@@ -745,7 +748,10 @@ describe("the queue order and the person's reorder", () => {
 
     const due = await ops((tx) => setDeadline(tx, 4, "2026-10-12"));
     expect(due).toMatchObject({ ok: true, place: 2, of: 4 });
-    expect((await board()).jobs["4"]).toMatchObject({ priority: "deadline", deadline: "2026-10-12" });
+    expect((await board()).jobs["4"]).toMatchObject({
+      priority: "deadline",
+      deadline: "2026-10-12",
+    });
     expect(await order()).toEqual([1, 4, 2, 3]);
 
     const cleared = await ops((tx) => setDeadline(tx, 4, null));
