@@ -1,6 +1,6 @@
 // The person cell's routes over the node:sqlite stand-in and a scripted model: status up with
-// the version and five roles, the model and specialist routes, chat
-// input and frames over a socket, and missed messages.
+// the version and its roles, the model, tier-cap, and template routes, chat input (which steers a
+// busy lead) and frames over a socket, missed messages, and the live job tasks.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type CellHarness, openCellHarness } from "@secbot/cell-harness";
 import {
@@ -8,8 +8,11 @@ import {
   createFauxGateway,
   FakeCelldStorage,
   type FauxGateway,
+  loggedEvents,
+  type Responder,
   until,
 } from "@secbot/cell-harness/testing";
+import { createHold, jobResponder, startJobLine } from "@secbot/cell-harness/testing/responders";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "../src/device-auth.ts";
 import { PersonCell, type SocketLike } from "../src/person-cell.ts";
@@ -43,8 +46,8 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function setup(): Promise<Setup> {
-  const gateway = createFauxGateway();
+async function setup(respond?: Responder): Promise<Setup> {
+  const gateway = createFauxGateway(respond);
   const sockets: FakeSocket[] = [];
   const opened: CellHarness[] = [];
   const cells = new Map<string, PersonCell>();
@@ -100,7 +103,7 @@ const call = (s: Setup, method: string, path: string, body?: unknown) =>
   );
 
 describe("PersonCell", () => {
-  it("reports up with the version and the five roles, alone and through /health", async () => {
+  it("reports up with the version and its roles, alone and through /health", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = await setup();
     const status = await call(s, "GET", "/v1/cells/owner/status");
@@ -108,7 +111,7 @@ describe("PersonCell", () => {
       status: "up",
       person: "owner",
       version: "v0.0.0-test",
-      roles: ["lead", "household", "developer", "research", "health"],
+      roles: ["lead", "household", "research", "health", "developer"],
     });
     const health = await route(
       new Request(`http://${HOST}/health?cells=owner,second,ghost`),
@@ -123,7 +126,7 @@ describe("PersonCell", () => {
     });
   });
 
-  it("changes a model, refuses an unknown one, and adds a specialist", async () => {
+  it("changes a model and a tier cap, refuses bad ones, and adds a template", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = await setup();
     const refused = await call(s, "PUT", "/v1/cells/owner/models/lead", { model: "openai/nope" });
@@ -145,10 +148,25 @@ describe("PersonCell", () => {
       instruction: "Again.",
     });
     expect(duplicate.status).toBe(400);
+    const withModel = await call(s, "POST", "/v1/cells/owner/specialists", {
+      name: "tax",
+      instruction: "Forms.",
+      model: ALTERNATE_MODEL,
+    });
+    expect(withModel.status).toBe(400);
+    expect(((await withModel.json()) as { error: string }).error).toContain("starts on a tier");
+    expect((await (await call(s, "GET", "/v1/cells/owner/status")).json()) as object).toMatchObject(
+      { roles: expect.arrayContaining(["garden"]) },
+    );
+    const cap = await call(s, "PUT", "/v1/cells/owner/tiers/mid/cap", { usd: 2.5 });
+    expect(await cap.json()).toEqual({ tier: "mid", capUsd: 2.5 });
+    expect((await call(s, "PUT", "/v1/cells/owner/tiers/mid/cap", { usd: 0 })).status).toBe(400);
+    expect((await call(s, "PUT", "/v1/cells/owner/tiers/huge/cap", { usd: 1 })).status).toBe(400);
+    expect((await call(s, "PUT", "/v1/cells/owner/tiers/mid/cap", {})).status).toBe(400);
     const models = (await (await call(s, "GET", "/v1/cells/owner/models")).json()) as {
-      roles: { role: string }[];
+      roles: { role: string; capUsd?: number }[];
     };
-    expect(models.roles.map((entry) => entry.role)).toContain("garden");
+    expect(models.roles.find((entry) => entry.role === "mid")?.capUsd).toBe(2.5);
     expect((await call(s, "PUT", "/v1/cells/owner/models/lead", {})).status).toBe(400);
     expect((await call(s, "GET", "/v1/cells/owner/nothing")).status).toBe(404);
   });
@@ -408,12 +426,45 @@ describe("PersonCell", () => {
     expect(s.opened).toHaveLength(1);
   });
 
-  it("shows live tasks with the hand-off brief on request", async () => {
+  it("shows live job tasks with their input on request", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const s = await setup();
+    const hold = createHold();
+    hold.hold("research");
+    const s = await setup(hold.wrap(jobResponder));
+    await call(s, "GET", "/v1/cells/owner/status");
+    const cell = s.cells.get("owner");
+    if (cell === undefined) throw new Error("setup failed");
+    await cell.submitInput(
+      "owner",
+      startJobLine({ title: "a", brief: "look", template: "research" }),
+      "req-job-0001",
+    );
+    await until(() => hold.waiting("research") === 1);
     const body = (await (await call(s, "GET", "/v1/cells/owner/status?tasks=1")).json()) as {
-      tasks: unknown[];
+      tasks: { kind: string; input?: unknown }[];
     };
-    expect(Array.isArray(body.tasks)).toBe(true);
+    expect(body.tasks.find((task) => task.kind === "secbot.job")).toMatchObject({
+      input: { number: 1 },
+    });
+    hold.release("research");
+  });
+
+  it("steers a busy lead with a chat line; an RPC input waits for the turn unless told", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const s = await setup(jobResponder);
+    await call(s, "GET", "/v1/cells/owner/status");
+    const cell = s.cells.get("owner");
+    const socket = s.sockets[0];
+    if (cell === undefined || socket === undefined) throw new Error("setup failed");
+    await cell.webSocketMessage(
+      socket,
+      JSON.stringify({ type: "input", text: "hello lead", requestId: "req-00000002" }),
+    );
+    await cell.submitInput("owner", "from mail", "req-mail-0001");
+    const steered = loggedEvents(log.mock.calls).filter((e) => e.event === "input.steered");
+    expect(steered.map((e) => [e.request_id, e.when_busy])).toEqual([
+      ["req-00000002", "steer"],
+      ["req-mail-0001", "followUp"],
+    ]);
   });
 });

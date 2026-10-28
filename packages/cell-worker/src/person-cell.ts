@@ -37,6 +37,7 @@ import {
   heartbeatState,
   isDecisionAdapter,
   isGuardMode,
+  JOB_KIND,
   logEvent,
   logName,
   MONTH,
@@ -554,7 +555,9 @@ export class PersonCell {
           conversationId: record.conversationId,
           background: record.background ?? false,
           state: state.kind,
-          ...(record.kind === "secbot.handoff-reporter" ? { input: record.input } : {}),
+          ...(record.kind === "secbot.handoff-reporter" || record.kind === JOB_KIND
+            ? { input: record.input }
+            : {}),
           ...(record.kind.startsWith("secbot.routine:") &&
           record.state.status !== "terminal" &&
           record.state.status !== "completing"
@@ -580,6 +583,15 @@ export class PersonCell {
         if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
         if (typeof body.model !== "string") return json({ error: 'send {"model": "<id>"}' }, 400);
         return json(await cell.setRoleModel(modelRoute[1] ?? "", body.model));
+      }
+      const capRoute = /^\/tiers\/([a-z][a-z0-9-]{0,31})\/cap$/.exec(route);
+      if (request.method === "PUT" && capRoute !== null) {
+        const body = await readJson(request);
+        if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+        if (typeof body.usd !== "number" && typeof body.usd !== "string") {
+          return json({ error: 'send {"usd": <amount>}' }, 400);
+        }
+        return json(await cell.setTierCap(capRoute[1] ?? "", body.usd));
       }
       if (request.method === "POST" && route === "/specialists") {
         const body = await readJson(request);
@@ -952,7 +964,8 @@ export class PersonCell {
     try {
       const cell = await this.cell(person);
       await this.ensureStream(cell);
-      const { submissionId } = await this.submitInput(person, input.text, input.requestId);
+      // The person's line steers a busy lead: it is answered first, and the turn is bookmarked.
+      const { submissionId } = await this.submitInput(person, input.text, input.requestId, "steer");
       logEvent("input.submitted", {
         cell: person,
         device,
@@ -996,14 +1009,18 @@ export class PersonCell {
     }
   }
 
-  /** RPC for other cells and later inputs (such as mail): submit into the lead, unchanged. */
+  /**
+   * RPC for other cells and later inputs (such as mail): submit into the lead, unchanged. Such an
+   * input waits for a busy lead's turn to end unless the caller asks it to steer.
+   */
   async submitInput(
     person: string,
     text: string,
     requestId: string,
+    whenBusy: "steer" | "followUp" = "followUp",
   ): Promise<{ submissionId: number }> {
     const cell = await this.cell(person);
-    const submission = await cell.submit(text, requestId);
+    const submission = await cell.submit(text, requestId, { whenBusy });
     this.keepBusy(cell);
     return { submissionId: Number(submission.id) };
   }
