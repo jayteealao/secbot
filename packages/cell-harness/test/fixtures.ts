@@ -41,6 +41,7 @@ import {
   TIER_MODELS,
 } from "../src/release-defaults.ts";
 import { REVIEWER_FIRST_LINE } from "../src/reviewer.ts";
+import type { SecretsClient } from "../src/secret-tools.ts";
 
 export { FakeCelldStorage, fauxAssistantMessage, fauxText, fauxToolCall };
 
@@ -193,6 +194,7 @@ export async function openTestCell(
     readonly now?: () => number;
     readonly fetch?: typeof fetch;
     readonly household?: HouseholdClient;
+    readonly secrets?: SecretsClient;
     readonly onWakeChange?: () => void;
     readonly routines?: OpenCellOptions["routines"];
     readonly storage?: FakeCelldStorage;
@@ -211,6 +213,7 @@ export async function openTestCell(
       ...(options.now === undefined ? {} : { now: options.now }),
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       ...(options.household === undefined ? {} : { household: options.household }),
+      ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
       ...(options.onWakeChange === undefined ? {} : { onWakeChange: options.onWakeChange }),
       ...(options.routines === undefined ? {} : { routines: options.routines }),
       ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
