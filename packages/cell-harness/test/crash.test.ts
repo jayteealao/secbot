@@ -17,7 +17,7 @@ import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts"
 import { type HeldCall, heldSection } from "../../cli/src/commands/held.ts";
 import { CellAlarm } from "../src/alarm.ts";
 import { leadMessageOf } from "../src/delivery.ts";
-import { ApprovalDoc, ApprovalsDoc, RosterDoc } from "../src/docs.ts";
+import { ApprovalDoc, ApprovalsDoc } from "../src/docs.ts";
 import { messageText } from "../src/history-search.ts";
 import { routineWake } from "../src/routines.ts";
 import { approvalCrashResponder, CRASH_BRIEF } from "./approval-crash-script.ts";
@@ -31,7 +31,7 @@ import {
   probeResponder,
   type ReplayPolicy,
 } from "./hook-crash-probe.ts";
-import { handoffResponder } from "./responders.ts";
+import { PULL_JOB_1, researchResponder } from "./responders.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -117,7 +117,7 @@ describe("a SIGKILL with a running job, an open transaction, and a pending timer
       .all();
     expect(marker).toEqual([]);
 
-    const gateway = createFauxGateway(handoffResponder);
+    const gateway = createFauxGateway(researchResponder);
     test = await openTestCell({ storage, gateway });
     const t = test;
 
@@ -138,8 +138,10 @@ describe("a SIGKILL with a running job, an open transaction, and a pending timer
       routineWake(reminder?.state.status === "terminal" ? undefined : reminder?.state.checkpoint),
     ).toBe(ready.reminderAt);
 
-    // The cut-off model call runs again and the turn completes: the specialist's answer returns
-    // to the lead, which relays it.
+    // The cut-off model call runs again and the job completes: its result waits on the board, and
+    // the lead pulls it and relays it.
+    await until(async () => (await t.cell.board()).jobs["1"]?.result != null, 30_000);
+    await (await t.cell.submit(PULL_JOB_1, "req-crash-pull")).wait(BACKGROUND_CONTEXT);
     await until(async () => {
       const page = await t.cell.root.entries({}, 100, undefined, BACKGROUND_CONTEXT);
       return page.items.some((entry) => leadMessageOf(entry)?.text.startsWith("Research says"));
@@ -152,14 +154,19 @@ describe("a SIGKILL with a running job, an open transaction, and a pending timer
     await alarms.rearm(t.cell);
     const { summary } = await t.cell.wakes();
     expect(await storage.getAlarm()).toBe(summary.wakes[0]?.at);
-    expect(summary.wakes.map((wake) => wake.source).sort()).toEqual(["heartbeat", "reminder"]);
+    // The finished job keeps its 30-minute wake until it ends, as stored work with a time.
+    expect(summary.wakes.map((wake) => wake.source).sort()).toEqual([
+      "heartbeat",
+      "reminder",
+      "secbot.job",
+    ]);
     expect((await alarms.report(t.cell)).ok).toBe(true);
   }, 120_000);
 });
 
-// A SIGKILL while a call is held for the person. The child holds the lead's hand-off and is
-// killed; the reopened cell lists the held call in missed, asks no second time, and the answer runs
-// the hand-off exactly once.
+// A SIGKILL while a call is held for the person. The child holds the lead's job start and is
+// killed; the reopened cell lists the held call in missed, asks no second time, and the answer
+// starts the job exactly once.
 describe("a SIGKILL while a call is held for the person", () => {
   it("lists the held call after the restart, asks no second time, and runs it once on the answer", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -185,7 +192,7 @@ describe("a SIGKILL while a call is held for the person", () => {
     const shown = heldSection(missed.held as HeldCall[]);
     expect(shown.slice(0, 2)).toEqual(["HELD CALLS", "-".repeat(78)]);
     expect(shown[2]).toMatch(
-      /^#1 {2}lead {2}handoff -> research {2}your rule: ask first +lapses in 2[34] h \d+ m$/,
+      /^#1 {2}lead {2}start_job -> research {2}your rule: ask first +lapses in 2[34] h \d+ m$/,
     );
     expect(shown[3]).toBe("answer in secbot chat: /allow 1, /always 1, /deny 1");
 
@@ -194,19 +201,18 @@ describe("a SIGKILL while a call is held for the person", () => {
     expect(loggedEvents(log.mock.calls).filter((e) => e.event === "approval.held")).toEqual([]);
     expect((await t.cell.harness.snapshot(ApprovalsDoc, BACKGROUND_CONTEXT))?.nextNumber).toBe(2);
 
-    // The answer runs the hand-off exactly once.
+    // The answer starts the job exactly once.
     await t.cell.answer(1, "allow", { device: "laptop" });
     const briefs = () =>
       gateway.requests.filter((r) => r.role === "research" && r.lastText === CRASH_BRIEF).length;
     await until(() => briefs() === 1, 30_000);
     await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
     expect(briefs()).toBe(1);
-    const roster = await t.cell.harness.snapshot(RosterDoc, BACKGROUND_CONTEXT);
-    expect(Object.keys(roster?.reporters ?? {})).toHaveLength(1);
+    expect(Object.keys((await t.cell.board()).jobs)).toEqual(["1"]);
     const record = await t.cell.harness.snapshot(ApprovalDoc, "1", BACKGROUND_CONTEXT);
     expect(record?.call?.status).toBe("allowed");
     expect(record?.call?.consumedBy).toBe(record?.call?.callKey);
-    // The hand-off ran from the rerun of the same call; still one record and no second prompt.
+    // The job started from the rerun of the same call; still one record and no second prompt.
     const numbers = (await t.cell.harness.snapshot(ApprovalsDoc, BACKGROUND_CONTEXT))?.nextNumber;
     expect(numbers).toBe(2);
     const prompts = loggedEvents(log.mock.calls).filter((e) => e.event === "approval.held");

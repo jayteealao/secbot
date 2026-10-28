@@ -13,6 +13,7 @@ import {
   fauxToolCall,
   openTestCell,
   type TestCell,
+  until,
 } from "./fixtures.ts";
 
 let test: TestCell | undefined;
@@ -37,7 +38,7 @@ const textOf = (result: { content?: readonly { type: string; text?: string }[] }
   (result.content ?? []).map((part) => part.text ?? "").join("");
 
 describe("household tools", () => {
-  it("a specialist's call adds an item that the lead's read then lists", async () => {
+  it("the lead's change runs on a receipt and adds an item that its next read lists", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const household = createHouseholdStub();
     const gateway = createFauxGateway((request) => {
@@ -55,15 +56,27 @@ describe("household tools", () => {
           stopReason: "toolUse",
         });
       }
+      if (request.role === "lead" && request.lastText.startsWith("read ")) {
+        return fauxAssistantMessage(
+          [fauxToolCall("read_result", { receipt: request.lastText.slice(5) })],
+          { stopReason: "toolUse" },
+        );
+      }
       return fauxAssistantMessage([fauxText("ok")]);
     });
     test = await openTestCell({ gateway, household });
     await (await test.cell.submit("add milk", "req-house-1")).wait(BACKGROUND_CONTEXT);
-    expect(household.changes).toHaveLength(1);
+    expect(gateway.requests.at(-1)?.lastText).toContain("receipt r1");
+    await until(() => household.changes.length === 1);
     expect(household.changes[0]?.opId).toMatch(/^owner:\d+:/);
     expect(household.changes[0]?.fromCell).toBe("owner");
     await (await test.cell.submit("what is on the list", "req-house-2")).wait(BACKGROUND_CONTEXT);
-    expect(gateway.requests.at(-1)?.lastText).toContain("milk");
+    expect(gateway.requests.at(-1)?.lastText).toContain("receipt r2");
+    const t = test;
+    await until(async () => {
+      await (await t.cell.submit("read r2", `req-read-${Date.now()}`)).wait(BACKGROUND_CONTEXT);
+      return (gateway.requests.at(-1)?.lastText ?? "").includes("milk");
+    });
   });
 
   it("sends the same operation id when the same call runs again, and the change applies once", async () => {

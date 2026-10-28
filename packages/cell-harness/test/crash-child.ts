@@ -1,5 +1,5 @@
 // The process crash.test.ts kills with SIGKILL. It opens a person cell's harness on a file-backed
-// stand-in and sets up three things in flight: a specialist hand-off whose model call is cut off
+// stand-in and sets up three things in flight: a research job whose model call is cut off
 // (it hangs in this process), a reminder ten minutes ahead, and an open transaction holding a
 // marker row. Then it prints one READY line and waits to be killed.
 //   node --experimental-transform-types --no-warnings test/crash-child.ts <database file>
@@ -8,7 +8,7 @@ import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts"
 import { openCellHarness } from "../src/open-harness.ts";
 import { scheduleReminder } from "../src/reminder.ts";
 import { createFauxGateway, type FauxRequest } from "./fixtures.ts";
-import { handoffResponder } from "./responders.ts";
+import { researchResponder } from "./responders.ts";
 
 const file = process.argv[2];
 if (file === undefined) throw new Error("usage: crash-child.ts <database file>");
@@ -20,7 +20,7 @@ const gateway = createFauxGateway(async (request: FauxRequest) => {
     // The cut-off call: it never answers in this process.
     await new Promise(() => {});
   }
-  return handoffResponder(request);
+  return researchResponder(request);
 });
 const log = console.log;
 console.log = () => {};

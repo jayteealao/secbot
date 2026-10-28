@@ -15,7 +15,6 @@ import {
 } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ActivityRecord, listActivity } from "../src/activity.ts";
-import { RosterDoc } from "../src/docs.ts";
 import { createGuardExtension, GUARD_FAILED } from "../src/guard.ts";
 import {
   createFauxGateway,
@@ -39,7 +38,7 @@ interface Made {
 
 /**
  * A message whose text starts with `CALL` lists tool calls, one per line: `CALL <tool> <json>`.
- * The role that receives it (the lead from a chat line, a specialist from its brief) makes those
+ * The role that receives it (the lead from a chat line, a job from its brief) makes those
  * calls in one message; after the results it answers in plain text.
  */
 function scripted(made: Made[]) {
@@ -72,7 +71,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-/** The guard's records (a finished hand-off also writes a job record, not counted here). */
+/** The guard's records (a finished job also writes a job record, not counted here). */
 async function records(t: TestCell): Promise<ActivityRecord[]> {
   return (await t.cell.activity({ limit: 200 })).records.filter((record) => record.kind !== "job");
 }
@@ -122,23 +121,26 @@ describe("the guard", () => {
     const t = test;
     await t.cell.addRule("person", {
       agent: "lead",
-      tool: "handoff",
+      tool: "start_job",
       verdict: "prohibit",
-      match: { kind: "exact", field: "specialist", value: "research" },
+      match: { kind: "exact", field: "template", value: "research" },
     });
-    await chat(t, CALL("handoff", { specialist: "research", brief: "Find trains." }), "r-1");
+    await chat(
+      t,
+      CALL("start_job", { title: "trains", brief: "Find trains.", template: "research" }),
+      "r-1",
+    );
     await until(() => lastToolResult(t) !== "");
-    const reason = "your rule: lead handoff (specialist = research) -> prohibit";
+    const reason = "your rule: lead start_job (template = research) -> prohibit";
     expect(lastToolResult(t)).toContain(`Tool call blocked: ${reason}`);
-    // Nothing reached the specialist: no hand-off reporter, no research request.
-    const roster = await t.cell.harness.snapshot(RosterDoc, BACKGROUND_CONTEXT);
-    expect(Object.keys(roster?.reporters ?? {})).toEqual([]);
+    // Nothing started: no job on the board, no research request.
+    expect((await t.cell.board()).jobs).toEqual({});
     expect(t.gateway.requests.filter((r) => r.role === "research")).toEqual([]);
-    expect(loggedEvents(log.mock.calls).some((e) => e.event === "handoff.started")).toBe(false);
+    expect(loggedEvents(log.mock.calls).some((e) => e.event === "job.started")).toBe(false);
     const [record] = await records(t);
     expect(record).toMatchObject({
       agent: "lead",
-      tool: "handoff",
+      tool: "start_job",
       verdict: "refused",
       layer: "rule",
       reason,
@@ -157,8 +159,13 @@ describe("the guard", () => {
     await t.cell.addRule("person", { agent: "lead", tool: "household_read", verdict: "permit" });
     await chat(t, CALL("household_read", {}), "r-2");
     await until(() => lastToolResult(t) !== "");
-    expect(lastToolResult(t)).toContain("The list is empty.");
-    const [record] = await records(t);
+    // The lead's read runs on a receipt; its result is the read's normal result.
+    expect(lastToolResult(t)).toContain("receipt r1");
+    await until(async () => {
+      await chat(t, CALL("read_result", { receipt: "r1" }), `r-2-${Date.now()}`);
+      return lastToolResult(t).includes("The list is empty.");
+    });
+    const [record] = (await records(t)).filter((each) => each.tool === "household_read");
     expect(record).toMatchObject({
       tool: "household_read",
       verdict: "allowed",
@@ -214,7 +221,7 @@ describe("the guard", () => {
     expect(lastToolResult(t)).toContain("Tool call blocked: denied by owner");
   });
 
-  it("records every tool call of the lead and of every specialist, one added after start included", async () => {
+  it("records every tool call of the lead and of a job from every template, one added after start included", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const made: Made[] = [];
     test = await open(made);
@@ -223,8 +230,7 @@ describe("the guard", () => {
       name: "garden",
       instruction: "You are the garden specialist: you look after the plants.",
     });
-    const roster = await t.cell.harness.snapshot(RosterDoc, BACKGROUND_CONTEXT);
-    const specialists = Object.keys(roster?.specialists ?? {});
+    const specialists = (await t.cell.status()).roles.filter((role) => role !== "lead");
     expect(specialists).toHaveLength(5);
     const brief = [
       CALL("household_read", {}),
@@ -232,14 +238,14 @@ describe("the guard", () => {
       CALL("search_history", { query: "seeds" }),
     ].join("\n");
     const leadCalls = [
-      ...specialists.map((name) => CALL("handoff", { specialist: name, brief })),
+      ...specialists.map((name) => CALL("start_job", { title: name, brief, template: name })),
       CALL("household_read", {}),
       CALL("household_change", { op: "add", text: "milk" }),
       CALL("search_history", { query: "milk" }),
       CALL("set_reminder", { at: "2030-01-01T09:00:00Z", text: "milk" }),
     ];
     await chat(t, leadCalls.join("\n"), "sweep");
-    // Every role: the lead's four tools and the hand-off, each specialist's three tools.
+    // Every role: the lead's four tools and the job starts, each job's three tools.
     const expected = 4 + specialists.length + specialists.length * 3;
     await until(async () => made.length === expected && (await records(t)).length === expected);
 
@@ -257,8 +263,10 @@ describe("the guard", () => {
     const conversations = [
       t.cell.root,
       ...(await Promise.all(
-        Object.values(roster?.specialists ?? {}).map((record) =>
-          t.cell.harness.conversation(record.conversationId, BACKGROUND_CONTEXT),
+        Object.values((await t.cell.board()).jobs).flatMap((row) =>
+          row.conversationId === null
+            ? []
+            : [t.cell.harness.conversation(row.conversationId, BACKGROUND_CONTEXT)],
         ),
       )),
     ];
@@ -277,7 +285,11 @@ describe("the guard", () => {
     const t = test;
     await chat(
       t,
-      CALL("handoff", { specialist: "household", brief: CALL("pay_test", { amount: 5 }) }),
+      CALL("start_job", {
+        title: "pay",
+        brief: CALL("pay_test", { amount: 5 }),
+        template: "household",
+      }),
       "pay-1",
     );
     await chat(t, CALL("pay_test", { amount: 5 }), "pay-2");

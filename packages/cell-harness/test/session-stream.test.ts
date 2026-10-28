@@ -1,6 +1,6 @@
-// Local stand-in for the live session: the lead's answer streams in parts, and a follow-up that
-// arrives while the session is open is sent without a new request; the delivered callback lets the
-// cell advance the device's cursor.
+// Local stand-in for the live session: the lead's answer streams in parts, and an answer the lead
+// gives on a job's wake notice while the session is open is sent without a new request from the
+// person; the delivered callback lets the cell advance the device's cursor.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Frame } from "../src/session-stream.ts";
@@ -12,7 +12,7 @@ import {
   type TestCell,
   until,
 } from "./fixtures.ts";
-import { handoffResponder } from "./responders.ts";
+import { researchResponder } from "./responders.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -22,9 +22,16 @@ afterEach(async () => {
 });
 
 describe("session frames", () => {
-  it("streams the answer in parts, then relays a follow-up with no new request", async () => {
+  it("streams the answer in parts, then sends the lead's answer to a wake notice with no new request", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const gateway = createFauxGateway(handoffResponder, { tokensPerSecond: 8 });
+    // The research job answers with nothing: a failed job wakes the lead at once.
+    const gateway = createFauxGateway(
+      (request) =>
+        request.role === "research"
+          ? fauxAssistantMessage([fauxText("")])
+          : researchResponder(request),
+      { tokensPerSecond: 8 },
+    );
     test = await openTestCell({ gateway });
     const frames: Frame[] = [];
     const delivered: number[] = [];
@@ -45,13 +52,17 @@ describe("session frames", () => {
     const kinds = frames.map((frame) => frame.type);
     expect(kinds).toContain("delta");
     const answers = frames.filter((frame) => frame.type === "answer" || frame.type === "followup");
-    expect(answers.map((frame) => frame.type)).toEqual(["answer", "followup", "answer"]);
+    // The wake notice is the lead's input, not a message to the person.
+    expect(answers.map((frame) => frame.type)).toEqual(["answer", "answer"]);
     expect(answers[1]).toMatchObject({
-      from: "research",
-      text: "research finding: evidence is mixed.",
+      text: "Research says: the job answered with nothing",
     });
-    expect(delivered).toHaveLength(3);
-    expect((await test.cell.missed("never-connected")).messages).toHaveLength(3);
+    expect(
+      gateway.requests.filter((request) => request.role === "lead" && request.last?.role === "user")
+        .length,
+    ).toBe(2);
+    expect(delivered).toHaveLength(2);
+    expect((await test.cell.missed("never-connected")).messages).toHaveLength(2);
   }, 30_000);
 
   it("sends a long answer as several parts that add up to the answer", async () => {

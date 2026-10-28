@@ -18,13 +18,15 @@ import {
   type Message,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
-import { UsageDoc } from "@earendil-works/pi-durable";
+import { ROOT_CONVERSATION_ID, UsageDoc } from "@earendil-works/pi-durable";
 import { CelldSqliteDatabase } from "../../cell-storage/src/index.ts";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
 import { BudgetBoardStore } from "../../household-cell/src/budget-board.ts";
 import { ChangeLog } from "../../household-cell/src/change-log.ts";
 import { withCreditPause } from "../src/credit-pause.ts";
 import type { DecisionModels } from "../src/decision-model.ts";
+import { RosterDoc } from "../src/docs.ts";
+import { Anchor } from "../src/handoff.ts";
 import type { HouseholdChange, HouseholdClient } from "../src/household-tools.ts";
 import { addGuardUsage, costOnlyUsage, ledgerConversations } from "../src/month-ledger.ts";
 import {
@@ -275,9 +277,13 @@ export async function addSpend(
   options: { readonly role?: string; readonly layer?: "agent" | "decision" | "reviewer" } = {},
 ): Promise<void> {
   const role = options.role ?? "lead";
-  const conversation = (await ledgerConversations(cell.harness, BACKGROUND_CONTEXT)).find(
-    (each) => each.role === role,
-  );
+  const find = async () =>
+    (await ledgerConversations(cell.harness, BACKGROUND_CONTEXT)).find(
+      (each) => each.role === role,
+    );
+  // A role with no conversation of its own (a template with no job yet) gets a frozen one.
+  if ((await find()) === undefined && role !== "lead") await addFrozenSpecialist(cell, role);
+  const conversation = await find();
   if (conversation === undefined) throw new Error(`no conversation for ${role}`);
   const layer = options.layer ?? "agent";
   await cell.harness.commit(async (tx) => {
@@ -289,6 +295,37 @@ export async function addSpend(
     const known = models["test/spend"];
     if (known === undefined) models["test/spend"] = costOnlyUsage(usd);
     else known.cost.total += usd;
+  }, BACKGROUND_CONTEXT);
+}
+
+/**
+ * Adds a specialist conversation as a cell opened before jobs had it: anchored, idle, on the
+ * roster. Its spend counts under its name, as a frozen specialist's does.
+ */
+export async function addFrozenSpecialist(
+  cell: CellHarness,
+  name: string,
+  instruction = `You are the ${name} specialist.`,
+  builtIn = true,
+): Promise<void> {
+  await cell.harness.commit(async (tx) => {
+    const roster = await tx.doc(RosterDoc);
+    if (Object.hasOwn(roster.specialists, name)) return;
+    const anchorTaskId = await tx.createTask(Anchor, null, {
+      ownership: { kind: "conversation" },
+      conversationId: ROOT_CONVERSATION_ID,
+      background: true,
+    });
+    const child = await tx.createConversation({
+      ownership: { kind: "task", taskId: anchorTaskId },
+    });
+    roster.specialists[name] = {
+      conversationId: child.id,
+      instruction,
+      anchorTaskId,
+      builtIn,
+      reported: [],
+    };
   }, BACKGROUND_CONTEXT);
 }
 

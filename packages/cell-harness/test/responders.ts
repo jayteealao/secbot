@@ -10,20 +10,42 @@ export const BRIEF =
   "Summarize what is known about intermittent fasting and sleep, with the uncertainty.";
 
 /**
- * A scripted lead that hands fasting questions to research by calling the tool, and relays the
- * report. It stands in for the model's decision; the live check on the test cell uses the real one.
+ * A scripted lead that starts a research job for fasting questions, pulls a result when a wake
+ * notice arrives or a `CALL job_result` line asks (a routine result waits for the lead), and
+ * relays it as `Research says: <result>`. It stands in for the model's decision; the live check on
+ * the test cell uses the real one.
  */
-export function handoffResponder(request: FauxRequest) {
+export function researchResponder(request: FauxRequest) {
   if (request.role === "lead") {
     if (request.last?.role === "toolResult") {
+      const pulled = /\nResult:\n([\s\S]*)$/.exec(request.lastText)?.[1];
+      if (pulled !== undefined) return fauxAssistantMessage([fauxText(`Research says: ${pulled}`)]);
       return fauxAssistantMessage([fauxText("I asked research.")]);
     }
-    if (request.lastText.startsWith("[handoff research answered]")) {
-      return fauxAssistantMessage([fauxText(`Research says: ${request.lastText.slice(28)}`)]);
+    const wake = /^\[job (\d+) [a-z]+(?: [a-z0-9 ]+)?: pull it with job_result\]/.exec(
+      request.lastText,
+    );
+    if (wake !== null) {
+      return fauxAssistantMessage([fauxToolCall("job_result", { job: Number(wake[1]) })], {
+        stopReason: "toolUse",
+      });
+    }
+    const calls = scriptedCalls(request.lastText);
+    if (calls.length > 0) {
+      return fauxAssistantMessage(
+        calls.map((call) => fauxToolCall(call.name, call.args)),
+        { stopReason: "toolUse" },
+      );
     }
     if (request.lastText.includes("fasting")) {
       return fauxAssistantMessage(
-        [fauxToolCall("handoff", { specialist: "research", brief: BRIEF })],
+        [
+          fauxToolCall("start_job", {
+            title: "fasting and sleep",
+            brief: BRIEF,
+            template: "research",
+          }),
+        ],
         { stopReason: "toolUse" },
       );
     }
@@ -31,6 +53,9 @@ export function handoffResponder(request: FauxRequest) {
   }
   return fauxAssistantMessage([fauxText(`${request.role} finding: evidence is mixed.`)]);
 }
+
+/** The person's line that makes a scripted lead pull job 1's result. */
+export const PULL_JOB_1 = 'CALL job_result {"job":1}';
 
 /** A research brief the scripted lead sends with start_job. */
 export const JOB_BRIEF = "Compare direct flights to Lisbon in May and list the cheapest three.";

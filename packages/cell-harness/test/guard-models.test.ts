@@ -164,12 +164,15 @@ describe("decision model then reviewer (enforce mode)", () => {
   it("holds an ask-first match for the person even when both models would allow it", async () => {
     spies();
     const t = await open({ enforce: true });
-    await t.cell.addRule("person", { agent: "lead", tool: "handoff", verdict: "ask-first" });
+    await t.cell.addRule("person", { agent: "lead", tool: "start_job", verdict: "ask-first" });
     stub.decision = routineAt(0.01);
-    await t.cell.submit('CALL handoff {"specialist":"research","brief":"trains"}', "ac10-1");
+    await t.cell.submit(
+      'CALL start_job {"title":"trains","brief":"trains","template":"research"}',
+      "ac10-1",
+    );
     await until(async () => (await t.cell.heldCalls()).length === 1);
     expect((await t.cell.heldCalls())[0]).toMatchObject({
-      reason: "your rule: lead handoff (any) -> ask first",
+      reason: "your rule: lead start_job (any) -> ask first",
       reasonSource: "your-rule",
     });
     expect(decisionRequests()).toHaveLength(0);
@@ -325,8 +328,11 @@ describe("shadow mode", () => {
     });
     await call(t, "search_history", { query: "bank" }, 2);
     expect(await newest(t)).toMatchObject({ verdict: "refused", layer: "rule", mode: "shadow" });
-    await t.cell.addRule("person", { agent: "lead", tool: "handoff", verdict: "ask-first" });
-    await t.cell.submit('CALL handoff {"specialist":"research","brief":"x"}', "shadow-3");
+    await t.cell.addRule("person", { agent: "lead", tool: "start_job", verdict: "ask-first" });
+    await t.cell.submit(
+      'CALL start_job {"title":"x","brief":"x","template":"research"}',
+      "shadow-3",
+    );
     await until(async () => (await t.cell.heldCalls()).length === 1);
     expect(reviews(t)).toHaveLength(1);
   });

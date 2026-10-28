@@ -1,7 +1,7 @@
 // Limits on the wired paths of a cell on the stand-in. The month's spend by layer and role equals
 // what the provider billed for each model response (a failed attempt included), each decision-model
-// answer, and each reviewer answer; above the limit a hand-off's brief, a reminder, a routine run,
-// and a specialist's next model request wait while chat with the lead is answered, a wait survives a
+// answer, and each reviewer answer; above the limit a job's start, a reminder, a routine run,
+// and a running job's next model request wait while chat with the lead is answered, a wait survives a
 // reopen, and each continues once after a raise or the month reset; and a 402 or 403 to a guard call
 // puts the cell in the credit pause without a crash.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -13,7 +13,7 @@ import type { SetTimer } from "../src/approvals.ts";
 import type { BudgetWaiter } from "../src/budget-gate.ts";
 import { createDecisionModels, type DecisionModels } from "../src/decision-model.ts";
 import { leadMessageOf } from "../src/delivery.ts";
-import { WAITS_NOTE } from "../src/handoff.ts";
+import { JOB_WAITS_NOTE } from "../src/lead-tools.ts";
 import { costOnlyUsage } from "../src/month-ledger.ts";
 import { defineRoutine } from "../src/routines.ts";
 import {
@@ -34,7 +34,7 @@ import {
   verdictJson,
 } from "./fixtures.ts";
 import { ALERT_ENV, incidentStub } from "./outage-fixtures.ts";
-import { BRIEF, handoffResponder } from "./responders.ts";
+import { PULL_JOB_1, researchResponder } from "./responders.ts";
 import { riskyAt, startStubOpenRouter } from "./stub-openrouter.ts";
 
 const KEY = "decisions-test-key-0000"; // gitleaks:allow (fake test key)
@@ -54,6 +54,13 @@ async function leadTexts(t: TestCell): Promise<string[]> {
     .reverse()
     .map((entry: EntryRecord) => leadMessageOf(entry)?.text)
     .filter((text): text is string => text !== undefined);
+}
+
+/** Waits for job 1's result, has the lead pull it, and waits for the relayed answer. */
+async function pullResearch(t: TestCell): Promise<void> {
+  await until(async () => (await t.cell.board()).jobs["1"]?.result != null);
+  await (await t.cell.submit(PULL_JOB_1, `pull-${Date.now()}`)).wait(BACKGROUND_CONTEXT);
+  await until(async () => (await leadTexts(t)).some((text) => text.startsWith("Research says")));
 }
 
 const requestsOf = (gateway: FauxGateway, role: string) =>
@@ -143,15 +150,14 @@ describe("the month's spend from the ledger", () => {
             errorMessage: "503 Service Unavailable",
           });
         }
-        if (request.last?.role === "toolResult") return fauxAssistantMessage([fauxText("done")]);
-        if (request.lastText.startsWith("CALL ")) {
+        if (request.last?.role !== "toolResult" && request.lastText.startsWith("CALL search")) {
           return fauxAssistantMessage([fauxToolCall("search_history", { query: "kale" })], {
             stopReason: "toolUse",
           });
         }
-        return handoffResponder(request);
+        return researchResponder(request);
       }
-      return handoffResponder(request);
+      return researchResponder(request);
     };
     const gateway = createFauxGateway();
     test = await openTestCell({ gateway, guard: { decision: marking, reviewerTimeoutMs: 2_000 } });
@@ -166,7 +172,7 @@ describe("the month's spend from the ledger", () => {
     await (await t.cell.submit("Find out about fasting for me", "ledger-2")).wait(
       BACKGROUND_CONTEXT,
     );
-    await until(async () => (await leadTexts(t)).some((text) => text.startsWith("Research says")));
+    await pullResearch(t);
     await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
 
     expect(tally.failed).toBeCloseTo(0.02, 10);
@@ -181,7 +187,7 @@ describe("the month's spend from the ledger", () => {
     const activity = await t.cell.activity();
     const guardByRole: Record<string, number> = {};
     for (const item of activity.records) {
-      // A job record carries the specialist's spend for the job, not a guard cost.
+      // A job record carries the job's spend, not a guard cost.
       if (item.kind === "job") continue;
       guardByRole[item.agent] = (guardByRole[item.agent] ?? 0) + item.cost;
     }
@@ -200,9 +206,9 @@ describe("the month's spend from the ledger", () => {
 });
 
 describe("above the limit only chat runs", () => {
-  it("holds a hand-off's brief, answers chat, keeps the wait across a reopen, and delivers once after a raise", async () => {
+  it("holds a job's start, answers chat, keeps the wait across a reopen, and delivers once after a raise", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    test = await openTestCell({ gateway: createFauxGateway(handoffResponder) });
+    test = await openTestCell({ gateway: createFauxGateway(researchResponder) });
     const t = test;
     await t.cell.setLimit(1, "owner");
     await addSpend(t.cell, 1.2);
@@ -210,12 +216,12 @@ describe("above the limit only chat runs", () => {
     const toolResult = t.gateway.requests.find(
       (request) => request.role === "lead" && request.last?.role === "toolResult",
     );
-    expect(toolResult?.lastText).toContain(WAITS_NOTE.slice(2));
+    expect(toolResult?.lastText).toContain(JOB_WAITS_NOTE.trim());
     await until(async () => (await t.cell.waiting()).length === 1);
     expect(await t.cell.waiting()).toEqual([
       expect.objectContaining({
         budget: "person",
-        what: `handoff research ${BRIEF.slice(0, 30).trimEnd()}`,
+        what: "job 1 research",
       }),
     ]);
     expect(requestsOf(t.gateway, "research")).toHaveLength(0);
@@ -230,7 +236,7 @@ describe("above the limit only chat runs", () => {
     expect(requestsOf(t.gateway, "research")).toHaveLength(0);
 
     await t.cell.setLimit(5, "owner");
-    await until(async () => (await leadTexts(t)).some((text) => text.startsWith("Research says")));
+    await pullResearch(t);
     await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
     expect(requestsOf(t.gateway, "research")).toHaveLength(1);
     expect(await t.cell.waiting()).toEqual([]);
@@ -296,7 +302,7 @@ describe("above the limit only chat runs", () => {
     expect(reminders()).toHaveLength(1);
   }, 30_000);
 
-  it("lets a specialist's running job finish its step, then waits before its next request", async () => {
+  it("lets a running job finish its step, then waits before its next request", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     let release: () => void = () => {};
     const released = new Promise<void>((resolve) => {
@@ -312,17 +318,19 @@ describe("above the limit only chat runs", () => {
           stopReason: "toolUse",
         });
       }
-      return handoffResponder(request);
+      return researchResponder(request);
     };
     test = await openTestCell({ gateway: createFauxGateway(responder) });
     const t = test;
     await t.cell.setLimit(1, "owner");
     await (await t.cell.submit("Find out about fasting for me", "job-1")).wait(BACKGROUND_CONTEXT);
     await until(() => requestsOf(t.gateway, "research").length === 1);
-    // The person goes over the limit while the specialist's first request runs.
+    // The person goes over the limit while the job's first request runs.
     await addSpend(t.cell, 1.2);
     release();
-    await until(async () => (await t.cell.waiting()).some((item) => item.what === "job research"));
+    await until(async () =>
+      (await t.cell.waiting()).some((item) => item.what === "job 1 research"),
+    );
     const activity = await t.cell.activity();
     expect(
       activity.records.some((item) => item.agent === "research" && item.tool === "search_history"),
@@ -330,7 +338,7 @@ describe("above the limit only chat runs", () => {
     expect(requestsOf(t.gateway, "research")).toHaveLength(1);
 
     await t.cell.setLimit(5, "owner");
-    await until(async () => (await leadTexts(t)).some((text) => text.startsWith("Research says")));
+    await pullResearch(t);
     const research = requestsOf(t.gateway, "research");
     expect(research).toHaveLength(2);
     expect(research[1]?.last?.role).toBe("toolResult");
@@ -345,7 +353,7 @@ describe("above the limit only chat runs", () => {
       return () => timers.delete(fire);
     };
     test = await openTestCell({
-      gateway: createFauxGateway(handoffResponder),
+      gateway: createFauxGateway(researchResponder),
       env: { SECBOT_TIME_ZONE: "Europe/London" },
       now: () => clock,
       guard: { budgetTimer },
@@ -365,7 +373,7 @@ describe("above the limit only chat runs", () => {
 
     clock = Date.UTC(2026, 10, 1, 0, 1);
     for (const fire of [...timers]) fire();
-    await until(async () => (await leadTexts(t)).some((text) => text.startsWith("Research says")));
+    await pullResearch(t);
     expect((await t.cell.budgetState()).person.spentUsd).toBe(0);
     expect(requestsOf(t.gateway, "research")).toHaveLength(1);
     expect(await t.cell.waiting()).toEqual([]);
