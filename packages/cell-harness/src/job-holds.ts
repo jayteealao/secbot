@@ -9,9 +9,12 @@ import type { Context } from "@earendil-works/chord";
 
 export class JobHolds {
   private readonly waiters = new Map<number, Set<() => void>>();
+  /** Wakes per job, so a wake that lands while a check reads the row is not lost. */
+  private readonly wakes = new Map<number, number>();
 
   /** Something about job `n` changed (a lead move, an answer): each of its waits checks again. */
   wake(n: number): void {
+    this.wakes.set(n, (this.wakes.get(n) ?? 0) + 1);
     const waiting = this.waiters.get(n);
     if (waiting === undefined) return;
     this.waiters.delete(n);
@@ -27,7 +30,10 @@ export class JobHolds {
   async waitWhile(n: number, check: () => Promise<boolean>, context: Context): Promise<void> {
     for (;;) {
       context.abortSignal?.throwIfAborted();
+      const seen = this.wakes.get(n) ?? 0;
       if (!(await check())) return;
+      // A wake during the check: check again instead of waiting for the next one.
+      if ((this.wakes.get(n) ?? 0) !== seen) continue;
       await this.pause(n, context);
     }
   }
