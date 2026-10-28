@@ -1,11 +1,11 @@
 // In the dispatch code (the CLI and the cell worker), no flag, keyword, pattern, or
-// specialist name routes a message; routing exists only as the lead's handoff tool. The scan reads
+// template name routes a message; routing exists only as the lead's start_job tool. The scan reads
 // every source file of both packages; planted samples prove each rule can fail.
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { STARTER_SPECIALISTS } from "../src/release-defaults.ts";
+import { JOB_TEMPLATES } from "../src/release-defaults.ts";
 
 const packages = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const DISPATCH_DIRS = [join(packages, "cli", "src"), join(packages, "cell-worker", "src")];
@@ -30,17 +30,17 @@ const NOT_DISPATCH = new Set([
   "secret-kinds.ts",
 ]);
 
-const names = STARTER_SPECIALISTS.map((specialist) => specialist.name).join("|");
+const names = JOB_TEMPLATES.map((template) => template.name).join("|");
 const MESSAGE = "text|message|content|line|input|prompt|brief";
 
 export const RULES: readonly { readonly name: string; readonly pattern: RegExp }[] = [
   {
-    name: "a specialist name in dispatch code",
+    name: "a template name in dispatch code",
     pattern: new RegExp(`["'\`](${names})["'\`]`),
   },
   {
     name: "a CLI option that chooses a target",
-    pattern: /\b(to|specialist|route|agent|target|via|handoff)\s*:\s*\{\s*type\s*:/,
+    pattern: /\b(to|specialist|template|job|route|agent|target|via|handoff)\s*:\s*\{\s*type\s*:/,
   },
   {
     name: "a keyword or pattern test on message text",
@@ -72,7 +72,7 @@ async function sourceFiles(directory: string): Promise<string[]> {
     .map((entry) => join(entry.parentPath, entry.name));
 }
 
-describe("routing is only the lead's handoff tool", () => {
+describe("routing is only the lead's start_job tool", () => {
   it("finds no routing in the CLI or the cell worker", async () => {
     const files = (await Promise.all(DISPATCH_DIRS.map(sourceFiles))).flat();
     expect(files.length).toBeGreaterThan(8);
@@ -88,6 +88,7 @@ describe("routing is only the lead's handoff tool", () => {
     ['if (text.includes("recipe")) target = "household";', "keyword"],
     ["const ROUTE = /tax|invoice/; if (ROUTE.test(message)) send(1);", "pattern"],
     ['options: { to: { type: "string" } }', "flag"],
+    ['options: { template: { type: "string" } }', "template flag"],
     ['await cell.submitTo("research", line);', "name"],
     ["await harness.conversation(roster.specialists[name].conversationId).submit(x);", "direct"],
     ["if (input.startsWith('/research')) forward();", "slash command"],

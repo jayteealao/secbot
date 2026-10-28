@@ -34,7 +34,13 @@ afterEach(async () => {
   await stub.close();
 });
 
-const state = { tool: "handoff", agent: "lead", rule: "none", note: UNTRUSTED_NOTE, arguments: {} };
+const state = {
+  tool: "start_job",
+  agent: "lead",
+  rule: "none",
+  note: UNTRUSTED_NOTE,
+  arguments: {},
+};
 
 describe("the Decisions API client", () => {
   it.each([
@@ -44,7 +50,7 @@ describe("the Decisions API client", () => {
     "the %s adapter posts its model id to the decisions path with the key",
     async (adapter, id) => {
       const model = createDecisionModel(adapter, { apiKey: KEY, baseUrl: stub.origin });
-      const answer = await model.ask(state, "handoff");
+      const answer = await model.ask(state, "start_job");
       expect(stub.seen).toHaveLength(1);
       const [request] = stub.seen;
       expect(request?.path).toBe(DECISIONS_ROUTE);
@@ -64,9 +70,9 @@ describe("the Decisions API client", () => {
   it("marks a call at or above the tool's threshold", async () => {
     stub.decision = riskyAt(0.5);
     const model = createDecisionModel("clef", { apiKey: KEY, baseUrl: stub.origin });
-    expect((await model.ask(state, "handoff")).outcome).toBe("mark");
+    expect((await model.ask(state, "start_job")).outcome).toBe("mark");
     stub.decision = riskyAt(0.49);
-    expect((await model.ask(state, "handoff")).outcome).toBe("pass");
+    expect((await model.ask(state, "start_job")).outcome).toBe("pass");
   });
 
   const failures: [StubMode, string][] = [
@@ -85,7 +91,7 @@ describe("the Decisions API client", () => {
         baseUrl: stub.origin,
         timeoutMs: 300,
       });
-      const failure = await model.ask(state, "handoff").catch((error: unknown) => error);
+      const failure = await model.ask(state, "start_job").catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(DecisionFailure);
       expect((failure as DecisionFailure).cause).toBe(cause);
       expect(stub.seen).toHaveLength(1);
@@ -94,7 +100,7 @@ describe("the Decisions API client", () => {
 
   it("fails with no-key and sends nothing when the cell has no key", async () => {
     const model = createDecisionModel("clef", { apiKey: undefined, baseUrl: stub.origin });
-    const failure = await model.ask(state, "handoff").catch((error: unknown) => error);
+    const failure = await model.ask(state, "start_job").catch((error: unknown) => error);
     expect((failure as DecisionFailure).cause).toBe("no-key");
     expect(stub.seen).toHaveLength(0);
   });
@@ -112,7 +118,7 @@ describe("the threshold caps (test cell only)", () => {
     expect(reminder.score).toBe(0);
     expect(reminder.outcome).toBe("mark");
     // Another tool keeps its release threshold.
-    expect((await capped.ask(state, "handoff")).outcome).toBe("pass");
+    expect((await capped.ask(state, "start_job")).outcome).toBe("pass");
     stub.decision = riskyAt(0.6);
     const loose = createDecisionModel("clef", {
       apiKey: KEY,
@@ -124,9 +130,9 @@ describe("the threshold caps (test cell only)", () => {
   });
 
   it("parses a JSON object of tool to 0..1 and ignores anything else", () => {
-    expect(parseThresholdCaps('{"set_reminder":0,"handoff":0.25}')).toEqual({
+    expect(parseThresholdCaps('{"set_reminder":0,"start_job":0.25}')).toEqual({
       set_reminder: 0,
-      handoff: 0.25,
+      start_job: 0.25,
     });
     expect(parseThresholdCaps('{"a":"x","b":-1,"c":2,"d":0.5}')).toEqual({ d: 0.5 });
     for (const bad of [undefined, "", "  ", "x", "{not json", "[0.1]", "null", "3"]) {
@@ -140,25 +146,25 @@ describe("the decision state", () => {
     const secret = "sk-test-0123456789abcdefghijklmnop"; // gitleaks:allow (fake test token)
     const built = buildDecisionState(
       {
-        tool: "handoff",
+        tool: "start_job",
         role: "lead",
         arguments: {
-          specialist: "research",
+          template: "research",
           brief: "x".repeat(20_000),
           api_key: secret,
           note: `call me back, token ${secret}`,
         },
       },
-      "your rule: lead handoff (specialist = research) -> permit",
-      ["specialist"],
+      "your rule: lead start_job (template = research) -> permit",
+      ["template"],
     );
     const text = JSON.stringify(built);
     expect(new TextEncoder().encode(text).length).toBeLessThan(DECISION_STATE_LIMIT);
     expect(built).toMatchObject({
-      tool: "handoff",
+      tool: "start_job",
       agent: "lead",
       note: UNTRUSTED_NOTE,
-      arguments: { specialist: "research", api_key: "[redacted]", "…dropped": ["brief"] },
+      arguments: { template: "research", api_key: "[redacted]", "…dropped": ["brief"] },
     });
     expect(text).not.toContain(secret);
   });
