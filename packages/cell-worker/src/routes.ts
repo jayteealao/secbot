@@ -24,7 +24,15 @@ import {
 import { checkDevice, type DeviceEnv } from "./device-auth.ts";
 import { type CellHealth, health, releaseVersion } from "./health.ts";
 import { type HouseholdClientEnv, householdClientOf } from "./household-client.ts";
-import { type GuardStub, hasOperatorKey, type OpsEnv, ops, type SnapshotStub } from "./ops.ts";
+import {
+  type GuardStub,
+  hasOperatorKey,
+  internalJobs,
+  type OpsDeps,
+  type OpsEnv,
+  ops,
+  type SnapshotStub,
+} from "./ops.ts";
 import {
   activityQuery,
   DEVICE_HEADER,
@@ -288,6 +296,32 @@ async function internalSecrets(request: Request, env: WorkerEnv): Promise<Respon
   }
 }
 
+/** What the operator and internal routes reach in this fleet, and the other fleet's address. */
+function opsDepsOf(env: WorkerEnv): OpsDeps {
+  const lab = env.LAB?.get(env.LAB.idFromName("lab"));
+  const served = fleetCells(env);
+  const url = env.SECBOT_HOUSEHOLD_URL ?? "";
+  return {
+    cells: served,
+    stubOf: (cell) => snapshotStubOf(env, cell),
+    guardOf: (cell) => guardStubOf(env, cell),
+    activityQuery,
+    household: () => householdClientOf(env),
+    secrets: () => secretsClientOf(env),
+    householdJobs: () => (served.includes(HOUSEHOLD) ? householdOf(env) : undefined),
+    elsewhere: ALL_CELLS.filter((cell) => cell !== SECRETS && !served.includes(cell)),
+    remote: () =>
+      url === ""
+        ? undefined
+        : {
+            url,
+            key: env.SECBOT_OPERATOR_KEY ?? "",
+            fetcher: (input, init) => fetch(input, init),
+          },
+    ...(lab?.writeOne === undefined ? {} : { write: () => lab.writeOne?.() ?? Promise.resolve() }),
+  };
+}
+
 const CELL_ROUTE = /^\/v1\/cells\/([a-z][a-z0-9-]{0,31})\//;
 
 /** Every route except the test cell's conformance and lab routes. */
@@ -307,19 +341,9 @@ export async function route(request: Request, env: WorkerEnv): Promise<Response>
     return health(url, (person) => cellStatus(env, person));
   }
   if (request.method === "GET" && url.pathname === "/alarms") return alarms(url, env);
-  if (url.pathname.startsWith("/ops/")) {
-    const lab = env.LAB?.get(env.LAB.idFromName("lab"));
-    return ops(request, env, {
-      cells: fleetCells(env),
-      stubOf: (cell) => snapshotStubOf(env, cell),
-      guardOf: (cell) => guardStubOf(env, cell),
-      activityQuery,
-      household: () => householdClientOf(env),
-      secrets: () => secretsClientOf(env),
-      ...(lab?.writeOne === undefined
-        ? {}
-        : { write: () => lab.writeOne?.() ?? Promise.resolve() }),
-    });
+  if (url.pathname.startsWith("/ops/")) return ops(request, env, opsDepsOf(env));
+  if (url.pathname === "/internal/stop" || url.pathname === "/internal/jobs") {
+    return internalJobs(request, env, opsDepsOf(env));
   }
   if (url.pathname.startsWith("/internal/household/")) return internalHousehold(request, env);
   if (url.pathname.startsWith("/internal/secrets/")) return internalSecrets(request, env);

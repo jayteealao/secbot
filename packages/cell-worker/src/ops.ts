@@ -22,6 +22,8 @@
  *   GET|PUT /ops/secrets?cell=           a person's secrets (never values); store one (value in body)
  *   PUT|DELETE /ops/secrets/allowlist?cell=  the owner's allowlist; removing an entry revokes its grant
  *   POST /ops/secrets/rotate             the next master key becomes current; records are re-wrapped
+ *   POST /ops/stop                       every cell's jobs and lead turn stop, in every fleet
+ *   GET  /ops/jobs?cell=                 a person's job board, or the household's shared jobs
  *
  * The secrets cell is never snapshotted, wiped, or restored: the default cell set of those routes
  * leaves it out, and naming it is refused.
@@ -52,11 +54,11 @@ import {
   SecretsUnavailable,
 } from "@secbot/cell-harness";
 import type { CellDump } from "@secbot/cell-storage";
-import { isRefusedHouseholdChange } from "@secbot/household-cell";
+import { HOUSEHOLD_CELL_NAME, isRefusedHouseholdChange } from "@secbot/household-cell";
 import { sameHex, sha256Hex } from "./device-auth.ts";
 import { contractStep } from "./health.ts";
 import { HouseholdCallError } from "./household-client.ts";
-import { OPERATOR_HEADER } from "./internal-rpc.ts";
+import { INTERNAL_ATTEMPTS, OPERATOR_HEADER, postInternal } from "./internal-rpc.ts";
 
 /** What the operator routes need from a cell's stub (celld JS RPC). */
 export interface SnapshotStub {
@@ -104,6 +106,22 @@ export interface GuardStub {
   costOf?(person: string): Promise<Answer<CostView>>;
   setLimitOf?(person: string, usd: unknown): Promise<Answer<unknown>>;
   refreshBudget?(person: string): Promise<void>;
+  /** The job board and the owner's stop; absent on a stub built before them. */
+  jobsOf?(person: string): Promise<Answer<unknown>>;
+  stopOf?(person: string): Promise<Answer<{ jobs: number; turn: boolean }>>;
+}
+
+/** The household cell's shared-jobs board and stop, when this fleet serves it. */
+export interface HouseholdJobsStub {
+  jobs?(): Promise<unknown>;
+  stopJobs?(): Promise<{ jobs: number; turn: boolean }>;
+}
+
+/** Another fleet's private address and the operator key, for the routes that reach every cell. */
+export interface RemoteFleet {
+  readonly url: string;
+  readonly key: string;
+  readonly fetcher: typeof fetch;
 }
 
 export interface OpsDeps {
@@ -123,6 +141,175 @@ export interface OpsDeps {
   household?(): HouseholdClient | undefined;
   /** The secrets cell's client, or undefined when this fleet reaches none. */
   secrets?(): SecretsClient | undefined;
+  /** The household cell's jobs RPC, when this fleet serves the household cell. */
+  householdJobs?(): HouseholdJobsStub | undefined;
+  /** The cells another fleet serves (the secrets cell aside). */
+  readonly elsewhere?: readonly string[];
+  /** That fleet's address, or undefined when this fleet has none. */
+  remote?(): RemoteFleet | undefined;
+}
+
+/** One cell's part of the owner's stop: jobs stopped, whether a lead turn was, shared jobs. */
+export type CellStop = {
+  readonly cell: string;
+  readonly jobs: number;
+  readonly turn: boolean;
+  readonly shared: boolean;
+};
+
+/** How long the owner's stop waits for another fleet to answer. */
+export const REMOTE_STOP_TIMEOUT_MS = 30_000;
+/** How long a board read waits for another fleet to answer. */
+export const REMOTE_JOBS_TIMEOUT_MS = 10_000;
+
+/**
+ * Stops the cells this fleet serves: each person cell's jobs and lead turn (by the owner), then
+ * the household cell's shared jobs. A cell that fails to answer is in `missing`.
+ */
+export async function stopServed(deps: OpsDeps): Promise<{ cells: CellStop[]; missing: string[] }> {
+  const cells: CellStop[] = [];
+  const missing: string[] = [];
+  for (const cell of deps.cells) {
+    if (cell === SECRETS_CELL) continue;
+    try {
+      if (cell === HOUSEHOLD_CELL_NAME) {
+        const household = deps.householdJobs?.();
+        if (household?.stopJobs === undefined) {
+          missing.push(cell);
+          continue;
+        }
+        const stopped = await household.stopJobs();
+        cells.push({ cell, jobs: stopped.jobs, turn: stopped.turn, shared: true });
+        continue;
+      }
+      const guard = deps.guardOf?.(cell);
+      if (guard?.stopOf === undefined) {
+        missing.push(cell);
+        continue;
+      }
+      const answer = await guard.stopOf(cell);
+      if (answer.ok) {
+        cells.push({ cell, jobs: answer.value.jobs, turn: answer.value.turn, shared: false });
+      } else missing.push(cell);
+    } catch (error) {
+      logEvent("ops.stop_failed", { cell, ...errorFields(error) }, "warn");
+      missing.push(cell);
+    }
+  }
+  return { cells, missing };
+}
+
+/** A served cell's board, for the owner: a person's view, or the household's shared jobs. */
+export async function jobsServed(deps: OpsDeps, cell: string): Promise<Response> {
+  if (cell === HOUSEHOLD_CELL_NAME) {
+    const household = deps.householdJobs?.();
+    if (household?.jobs === undefined) return json({ error: "no household binding" }, 503);
+    return json({ ...((await household.jobs()) as object), operator: true });
+  }
+  const guard = deps.guardOf?.(cell);
+  if (guard?.jobsOf === undefined) return json({ error: `${cell} has no job board` }, 404);
+  const answer = await guard.jobsOf(cell);
+  return answer.ok ? json(answer.value) : json({ error: answer.error }, answer.status);
+}
+
+/**
+ * The owner's stop across the household: this fleet's cells, then the cells another fleet serves
+ * through its `/internal/stop` (a stop is safe to repeat, so the call is retried). A cell that
+ * did not answer, or that no fleet address reaches, is in `missing`.
+ */
+async function stopRoute(deps: OpsDeps): Promise<Response> {
+  const here = await stopServed(deps);
+  const cells = [...here.cells];
+  const missing = [...here.missing];
+  const elsewhere = (deps.elsewhere ?? []).filter((cell) => cell !== SECRETS_CELL);
+  if (elsewhere.length > 0) {
+    const remote = deps.remote?.();
+    if (remote === undefined) missing.push(...elsewhere);
+    else {
+      const outcome = await postInternal<{ cells: CellStop[]; missing: string[] }>({
+        url: remote.url,
+        key: remote.key,
+        path: "/internal/stop",
+        body: {},
+        attempts: INTERNAL_ATTEMPTS,
+        timeoutMs: REMOTE_STOP_TIMEOUT_MS,
+        fetcher: remote.fetcher,
+      });
+      if (outcome.kind === "ok") {
+        cells.push(...outcome.value.cells);
+        missing.push(...outcome.value.missing);
+      } else {
+        logEvent(
+          "ops.stop_unanswered",
+          { status: outcome.status, attempts: outcome.attempts, ...errorFields(outcome.cause) },
+          "warn",
+        );
+        missing.push(...elsewhere);
+      }
+    }
+  }
+  logEvent("ops.stop", { cells: cells.map((each) => each.cell), missing });
+  return json({ cells, missing });
+}
+
+/** A person's board, or the household's shared jobs; another fleet's cell through its route. */
+async function jobsRoute(url: URL, deps: OpsDeps): Promise<Response> {
+  const raw = url.searchParams.get("cell");
+  if (raw === null || raw === "") return json({ error: "send ?cell=<person|household>" }, 400);
+  const cell = raw === "person" ? "second" : raw;
+  if (cell === SECRETS_CELL) return json({ error: `${cell} has no job board` }, 404);
+  if (deps.cells.includes(cell)) return jobsServed(deps, cell);
+  if (!(deps.elsewhere ?? []).includes(cell))
+    return json({ error: `${cell} has no job board` }, 404);
+  const remote = deps.remote?.();
+  if (remote === undefined) return json({ error: `cell ${cell} is served by another fleet` }, 404);
+  const outcome = await postInternal<Record<string, unknown>>({
+    url: remote.url,
+    key: remote.key,
+    path: "/internal/jobs",
+    body: { cell },
+    attempts: INTERNAL_ATTEMPTS,
+    timeoutMs: REMOTE_JOBS_TIMEOUT_MS,
+    fetcher: remote.fetcher,
+  });
+  if (outcome.kind === "ok") return json(outcome.value);
+  if (outcome.kind === "refused") {
+    return json({ error: outcome.message ?? "refused" }, outcome.status ?? 400);
+  }
+  return json({ error: `cell ${cell} did not answer` }, 503);
+}
+
+/**
+ * POST /internal/stop and POST /internal/jobs: the owner's stop and board for the cells this
+ * fleet serves, called by the owner's fleet with the operator key. They never reach on to
+ * another fleet.
+ */
+export async function internalJobs(
+  request: Request,
+  env: OpsEnv,
+  deps: OpsDeps,
+): Promise<Response> {
+  const url = new URL(request.url);
+  if (!(await hasOperatorKey(request, env))) return refuse(url.pathname, "operator_key", 401);
+  if (request.method !== "POST") return json({ error: "not found" }, 404);
+  if (url.pathname === "/internal/stop") {
+    const stopped = await stopServed(deps);
+    logEvent("ops.stop", {
+      cells: stopped.cells.map((each) => each.cell),
+      missing: stopped.missing,
+      forwarded: true,
+    });
+    return json(stopped);
+  }
+  if (url.pathname === "/internal/jobs") {
+    const body = await readBody(request);
+    const cell = typeof body?.cell === "string" ? body.cell : "";
+    if (!deps.cells.includes(cell) || cell === SECRETS_CELL) {
+      return json({ error: `cell ${cell} is served by another fleet` }, 404);
+    }
+    return jobsServed(deps, cell);
+  }
+  return json({ error: "not found" }, 404);
 }
 
 /** The secrets cell: never in a snapshot, wipe, digest, or heartbeat set of these routes. */
@@ -457,6 +644,9 @@ export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise
   ) {
     return budgetRoute(request, url, deps);
   }
+
+  if (route === "POST /ops/stop") return stopRoute(deps);
+  if (route === "GET /ops/jobs") return jobsRoute(url, deps);
 
   if (route === "POST /ops/write") {
     if (deps.write === undefined) return json({ error: "no write probe in this bundle" }, 404);

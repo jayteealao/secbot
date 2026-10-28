@@ -311,3 +311,120 @@ describe("operator routes", () => {
     expect((taken.snapshots as { cell: string }[]).map((item) => item.cell)).toEqual(["owner"]);
   });
 });
+
+describe("the owner's stop and board across fleets", () => {
+  const fleetB = () => setup({ SECBOT_FLEET_CELLS: "second,household" });
+  /** Fleet A serves the owner and reaches fleet B at its address. */
+  const fleetA = (b: Setup, answer?: () => Response) => {
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) =>
+      answer !== undefined ? answer() : route(new Request(input, init), b.env),
+    );
+    return setup({
+      SECBOT_FLEET_CELLS: "owner",
+      SECBOT_HOUSEHOLD_URL: "http://fleet-b.internal:8080",
+    });
+  };
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("stops every cell of one fleet and answers each board", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const s = setup();
+    const stopped = await call(s, "POST", "/ops/stop");
+    expect(stopped.status).toBe(200);
+    expect(await body(stopped)).toEqual({
+      cells: [
+        { cell: "owner", jobs: 0, turn: false, shared: false },
+        { cell: "second", jobs: 0, turn: false, shared: false },
+        { cell: "household", jobs: 0, turn: false, shared: true },
+      ],
+      missing: [],
+    });
+    expect(loggedEvents(log.mock.calls).find((line) => line.event === "ops.stop")).toEqual({
+      event: "ops.stop",
+      level: "info",
+      cells: ["owner", "second", "household"],
+      missing: [],
+    });
+    const owner = await call(s, "GET", "/ops/jobs?cell=owner");
+    expect(owner.status).toBe(200);
+    expect(await body(owner)).toMatchObject({ person: "owner", operator: true, live: 0, rows: [] });
+    expect(await body(await call(s, "GET", "/ops/jobs?cell=person"))).toMatchObject({
+      person: "second",
+      operator: true,
+    });
+    expect(await body(await call(s, "GET", "/ops/jobs?cell=household"))).toMatchObject({
+      person: "household",
+      operator: true,
+      rows: [],
+    });
+    expect((await call(s, "GET", "/ops/jobs")).status).toBe(400);
+    expect((await call(s, "GET", "/ops/jobs?cell=secrets")).status).toBe(404);
+  });
+
+  it("reaches the other fleet's cells through its internal routes", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const b = fleetB();
+    const a = fleetA(b);
+    expect(await body(await call(a, "POST", "/ops/stop"))).toEqual({
+      cells: [
+        { cell: "owner", jobs: 0, turn: false, shared: false },
+        { cell: "second", jobs: 0, turn: false, shared: false },
+        { cell: "household", jobs: 0, turn: false, shared: true },
+      ],
+      missing: [],
+    });
+    const second = await call(a, "GET", "/ops/jobs?cell=second");
+    expect(second.status).toBe(200);
+    expect(await body(second)).toMatchObject({ person: "second", operator: true });
+    expect(await body(await call(a, "GET", "/ops/jobs?cell=household"))).toMatchObject({
+      person: "household",
+    });
+    // The other fleet serves only its own cells.
+    const foreign = await route(
+      new Request("http://cell/internal/jobs", {
+        method: "POST",
+        headers: { [OPERATOR_HEADER]: KEY },
+        body: JSON.stringify({ cell: "owner" }),
+      }),
+      b.env,
+    );
+    expect(foreign.status).toBe(404);
+  });
+
+  it("names the cells of a fleet that does not answer, and still stops its own", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const b = fleetB();
+    const a = fleetA(b, () => Response.json({ error: "unavailable" }, { status: 503 }));
+    const stopped = await call(a, "POST", "/ops/stop");
+    expect(stopped.status).toBe(200);
+    expect(await body(stopped)).toEqual({
+      cells: [{ cell: "owner", jobs: 0, turn: false, shared: false }],
+      missing: ["second", "household"],
+    });
+    expect(
+      loggedEvents(warn.mock.calls).find((line) => line.event === "ops.stop_unanswered"),
+    ).toMatchObject({
+      status: 503,
+      attempts: 3,
+    });
+    expect((await call(a, "GET", "/ops/jobs?cell=second")).status).toBe(503);
+    // With no address for the other fleet, its cells are missing too.
+    const alone = setup({ SECBOT_FLEET_CELLS: "owner" });
+    expect((await body(await call(alone, "POST", "/ops/stop"))).missing).toEqual([
+      "second",
+      "household",
+    ]);
+  });
+
+  it("refuses all four routes without the operator key", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const s = setup();
+    expect((await call(s, "POST", "/ops/stop", null)).status).toBe(401);
+    expect((await call(s, "GET", "/ops/jobs?cell=owner", null)).status).toBe(401);
+    expect((await call(s, "POST", "/internal/stop", null)).status).toBe(401);
+    expect((await call(s, "POST", "/internal/jobs", "wrong")).status).toBe(401);
+  });
+});
