@@ -35,6 +35,9 @@ import { templatesOf, tierModelOf } from "./templates.ts";
 /** The job task's kind. */
 export const JOB_KIND = "secbot.job";
 
+/** How long a job may wait to start before it logs `job.queued_long`. */
+export const QUEUED_LONG_MS = 10 * 60_000;
+
 export type JobInput = { number: number };
 export type JobState =
   | { phase: "open" }
@@ -221,14 +224,33 @@ export function createJobTask(deps: JobTaskDeps) {
           }, context);
           return;
         }
-        await deps.gate()?.waitUntilUnder(
-          {
-            budget: budgetOf(row.template),
-            taskId: String(job.id),
-            what: `job ${n} ${row.template}`,
-          },
-          context,
-        );
+        // A job still waiting to start 10 minutes after it was created logs one warning.
+        let warned = false;
+        const queuedLong = () => {
+          if (warned) return;
+          warned = true;
+          logEvent(
+            "job.queued_long",
+            { cell: person, job: n, queued_ms: Math.max(0, runtime.now() - row.createdAt) },
+            "warn",
+          );
+        };
+        const left = row.createdAt + QUEUED_LONG_MS - runtime.now();
+        const timer = left > 0 ? setTimeout(queuedLong, left) : undefined;
+        timer?.unref?.();
+        try {
+          await deps.gate()?.waitUntilUnder(
+            {
+              budget: budgetOf(row.template),
+              taskId: String(job.id),
+              what: `job ${n} ${row.template}`,
+            },
+            context,
+          );
+        } finally {
+          clearTimeout(timer);
+        }
+        if (runtime.now() - row.createdAt >= QUEUED_LONG_MS) queuedLong();
         const conversation = await runtime.conversation(row.conversationId, context);
         if (conversation === undefined) throw new Error(`job ${n}: its conversation is missing`);
         const submission = await conversation.submit(

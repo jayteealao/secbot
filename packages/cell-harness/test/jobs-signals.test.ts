@@ -3,7 +3,11 @@
 // start and finish, the bookmark's record and resume, and the steered input. No line carries a
 // brief, a result, a note, or a secret's value.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { JobBoardDoc } from "../src/docs.ts";
+import { createJobRow } from "../src/job-board.ts";
+import { QUEUED_LONG_MS } from "../src/job-task.ts";
 import {
   createFauxGateway,
   createHouseholdStub,
@@ -184,4 +188,50 @@ describe("the job signals", () => {
       expect(everything).not.toContain(text);
     }
   }, 30_000);
+
+  it("warns once when a job starts more than 10 minutes after it was created, and not otherwise", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(jobResponder) });
+    const { harness } = test.cell;
+    const JobTask = test.cell.tasks?.job;
+    if (JobTask === undefined) throw new Error("no job task");
+    const startAt = async (createdAt: number) =>
+      harness.commit(async (tx) => {
+        const row = await createJobRow(tx, {
+          title: "late",
+          brief: BRIEF,
+          priority: "routine",
+          deadline: null,
+          template: "research",
+          tier: "mid",
+          effort: { requested: "medium", applied: "medium" },
+          owner: "owner",
+          turn: null,
+          createdAt,
+        });
+        await tx.createTask(
+          JobTask,
+          { number: row.number },
+          {
+            ownership: { kind: "conversation" },
+            conversationId: ROOT_CONVERSATION_ID,
+            background: true,
+          },
+        );
+        return row.number;
+      }, BACKGROUND_CONTEXT);
+    const late = await startAt(Date.now() - QUEUED_LONG_MS - 60_000);
+    const fresh = await startAt(Date.now());
+    const done = async (n: number) =>
+      (await harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs[String(n)]?.result != null;
+    await until(async () => (await done(late)) && (await done(fresh)));
+    const queued = loggedEvents(warn.mock.calls).filter(
+      (event) => event.event === "job.queued_long",
+    );
+    expect(queued).toHaveLength(1);
+    expect(queued[0]).toMatchObject({ cell: "owner", job: late, level: "warn" });
+    expect(queued[0]?.queued_ms).toBeGreaterThanOrEqual(QUEUED_LONG_MS);
+    expect(JSON.stringify(queued)).not.toContain("kale-7731");
+  });
 });
