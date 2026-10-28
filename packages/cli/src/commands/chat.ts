@@ -33,6 +33,34 @@ export type Frame =
   | { type: "notice"; notice: Notice; waiting: Waiting[] }
   | { type: "question"; job: number; title: string };
 
+/** The widest line a missed message prints at; longer ones continue indented by two spaces. */
+const MISSED_WIDTH = 79;
+
+/**
+ * `prefix` and one line of `text` as it fits in MISSED_WIDTH columns, the rest on lines indented
+ * by two spaces. A line that fits, or text with line breaks of its own, prints unchanged.
+ */
+export function wrapped(prefix: string, text: string): string {
+  const whole = prefix + text;
+  if (whole.length <= MISSED_WIDTH || text.includes("\n")) return whole;
+  const lines: string[] = [];
+  let line = prefix;
+  // No word on the line yet: the next one goes on it whatever its length.
+  let empty = true;
+  for (const word of text.split(" ").filter((each) => each !== "")) {
+    const next = empty ? line + word : `${line} ${word}`;
+    if (empty || next.length <= MISSED_WIDTH) {
+      line = next;
+    } else {
+      lines.push(line);
+      line = `  ${word}`;
+    }
+    empty = false;
+  }
+  lines.push(line);
+  return lines.join("\n");
+}
+
 /** The longest line the cell accepts, in characters. */
 export const INPUT_LIMIT = 20_000;
 
@@ -86,9 +114,7 @@ export function frameRenderer(
         print(frame.on ? "waiting for the model\n" : "the model is answering again\n");
         break;
       case "missed":
-        print(
-          frame.from === null ? `lead: ${frame.text}\n` : `[from ${frame.from}] ${frame.text}\n`,
-        );
+        print(`${wrapped(frame.from === null ? "lead: " : `[from ${frame.from}] `, frame.text)}\n`);
         if (frame.remaining > 0 && !noted) {
           noted = true;
           print(`${frame.remaining} more missed message(s); run "secbot missed"\n`);

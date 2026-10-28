@@ -197,10 +197,10 @@ export async function openSessionStream(
         if (message === undefined) continue;
         if (message.kind === "answer") {
           send({ type: "answer", entryId: message.entryId, text: message.text });
+          // A question the lead just put to the person follows the lead's own words directly.
+          await askQuestions();
           // The answer's own cost is in the same commit as its entry, so the line includes it.
           if (usage !== undefined) send({ type: "usage", usage: await usage.usage() });
-          // A question the lead just put to the person follows the lead's own words.
-          await askQuestions();
         } else {
           send({
             type: "followup",
