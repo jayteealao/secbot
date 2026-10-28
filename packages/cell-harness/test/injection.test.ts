@@ -6,7 +6,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Usage } from "@earendil-works/pi-ai";
 import { type Conversation, UsageDoc } from "@earendil-works/pi-durable";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chunkContent } from "../src/content-check.ts";
+import { chunkContent, WITHHELD_TEXT } from "../src/content-check.ts";
 import { createDecisionModels } from "../src/decision-model.ts";
 import { readGuardMode } from "../src/guard-settings.ts";
 import {
@@ -15,6 +15,7 @@ import {
   CONTENT_CHUNK_OVERLAP_BYTES,
   GUARD_USAGE_KEYS,
 } from "../src/release-defaults.ts";
+import { leadCalls } from "./escalation-helpers.ts";
 import {
   createFauxGateway,
   fauxAssistantMessage,
@@ -26,7 +27,7 @@ import {
   until,
 } from "./fixtures.ts";
 import { FIXTURE_PAGES, standInDecide } from "./injection-fixtures.ts";
-import { toolResultsOf } from "./job-helpers.ts";
+import { entriesOf, toolResultsOf, wakeNoticesOf } from "./job-helpers.ts";
 import { jobResponder, RESEARCH_JOB } from "./responders.ts";
 import { DECISIONS_ROUTE, type StubOpenRouter, startStubOpenRouter } from "./stub-openrouter.ts";
 
@@ -130,5 +131,68 @@ describe("clean content is kept and the job goes on (AC-24)", () => {
     ];
     expect(decision?.input).toBe(400 * (1 + asked.length));
     expect(decision?.cost.total).toBeGreaterThan(0);
+  });
+});
+
+const research = (t: TestCell) =>
+  t.gateway.requests.filter((request) => request.role === "research");
+
+/** Every entry of the job conversation, as stored. */
+const storedText = async (t: TestCell) =>
+  (await entriesOf(await jobConversation(t))).map((entry) => JSON.stringify(entry)).join("\n");
+
+/** Waits for the stop, then checks everything a stop must leave behind. */
+async function expectStopped(
+  t: TestCell,
+  page: Page,
+  cause: "hit" | "timeout" | "error",
+  reason: string,
+) {
+  await until(async () => (await row(t))?.status === "blocked");
+  const blocked = await row(t);
+  expect(blocked).toMatchObject({
+    status: "blocked",
+    block: { cause, kind: "page", tool: "read_fixture_page" },
+    result: { kind: "failure", text: reason },
+  });
+  const taskId = blocked?.taskId;
+  if (taskId == null) throw new Error("no job task");
+  const settled = await t.cell.harness.waitForTask(taskId, BACKGROUND_CONTEXT);
+  expect(settled.state.outcome.status).toBe("aborted");
+  // Nothing of the page was kept: not in any entry of the job's conversation.
+  const stored = await storedText(t);
+  for (const line of FIXTURE_PAGES[page].split("\n")) expect(stored).not.toContain(line);
+  expect(await toolResultsOf(await jobConversation(t))).toEqual([WITHHELD_TEXT]);
+  // The read was the job's last model step.
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(research(t)).toHaveLength(1);
+  // The lead was told once, and reads the reason with job_result.
+  await until(async () => (await wakeNoticesOf(t.cell.root)).length > 0);
+  expect(await wakeNoticesOf(t.cell.root)).toEqual([
+    `[job 1 blocked: ${reason}; read it with job_result]`,
+  ]);
+  expect(await leadCalls(t, "job_result", { job: 1 })).toContain(`Result:\n${reason}`);
+}
+
+const HIT = "a page tried to give the agent orders; nothing from it was used";
+const NO_ANSWER = "the content check did not answer; stopped to be safe";
+
+describe("an order, a timeout, or an error stops the job in shadow mode (AC-25)", () => {
+  it("stops on a page with an injected order", async () => {
+    const t = await readJob("injected");
+    await expectStopped(t, "injected", "hit", HIT);
+    expect((await row(t))?.block?.chunk).toBe(0);
+  });
+
+  it("stops when the check times out", async () => {
+    stub.delayMs = 300;
+    const t = await readJob("clean", 100);
+    await expectStopped(t, "clean", "timeout", NO_ANSWER);
+  });
+
+  it("stops when the check fails", async () => {
+    stub.mode = 500;
+    const t = await readJob("clean");
+    await expectStopped(t, "clean", "error", NO_ANSWER);
   });
 });
