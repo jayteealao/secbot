@@ -67,7 +67,7 @@ export type HeldCall = {
   conversationId: string;
   agent: string;
   tool: string;
-  /** `handoff -> research`, or the tool name. */
+  /** `start_job -> research` (or an old `handoff -> research`), or the tool name. */
   summary: string;
   /** The arguments after redaction, for display. */
   arguments: JsonValue;
@@ -199,12 +199,14 @@ export async function argumentDigest(args: Readonly<Record<string, JsonValue>>):
   return [...new Uint8Array(hash)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-/** `handoff -> research` for a hand-off, otherwise the tool name. */
+/**
+ * `start_job -> research` for a job start, `handoff -> research` for a hand-off held before jobs,
+ * otherwise the tool name.
+ */
 export function summaryOf(tool: string, args: Readonly<Record<string, JsonValue>>): string {
-  const specialist = args.specialist;
-  return tool === "handoff" && typeof specialist === "string" && specialist !== ""
-    ? `handoff -> ${specialist}`
-    : tool;
+  const target =
+    tool === "start_job" ? args.template : tool === "handoff" ? args.specialist : undefined;
+  return typeof target === "string" && target !== "" ? `${tool} -> ${target}` : tool;
 }
 
 /**

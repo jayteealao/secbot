@@ -18,6 +18,7 @@ import {
   LAPSED_TEXT,
   NOT_OFFERED_OWNER,
   type SetTimer,
+  summaryOf,
   USED_TEXT,
 } from "../src/approvals.ts";
 import { ApprovalDoc, ApprovalsDoc, RosterDoc } from "../src/docs.ts";
@@ -593,3 +594,14 @@ function hookApi(t: TestCell, taskId: string): HookApi {
     memo: (() => Promise.resolve(undefined)) as HookApi["memo"],
   } as HookApi;
 }
+
+describe("held-call labels", () => {
+  it("names a job start by its template, and an old hand-off by its specialist", () => {
+    expect(summaryOf("start_job", { template: "research", title: "trains" })).toBe(
+      "start_job -> research",
+    );
+    expect(summaryOf("handoff", { specialist: "research" })).toBe("handoff -> research");
+    expect(summaryOf("start_job", {})).toBe("start_job");
+    expect(summaryOf("set_reminder", { template: "x" })).toBe("set_reminder");
+  });
+});
