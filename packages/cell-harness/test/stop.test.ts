@@ -189,3 +189,73 @@ describe("the stop", () => {
     expect(jobs).toEqual([]);
   });
 });
+
+describe("the cell's stop, board view, and reorder", () => {
+  it("stops through the cell and shows the stopped row with its reason", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const hold = createHold();
+    test = await openTestCell({
+      gateway: createFauxGateway(hold.wrap(jobResponder)),
+      env: { SECBOT_TIME_ZONE: "UTC" },
+    });
+    const t = test;
+    hold.hold("research");
+    await lead(t, start("flights to Lisbon", "research"));
+    await until(() => hold.waiting("research") === 1);
+    const before = await t.cell.jobsView();
+    expect(before).toMatchObject({ person: "owner", mode: "shadow", live: 1, waiting: 0 });
+    expect(before.rows[0]).toMatchObject({ number: 1, status: "running", reason: null });
+    const stopping = t.cell.stop();
+    await until(async () => (await job(t, 1))?.stop != null);
+    hold.release("research");
+    expect(await stopping).toEqual({ jobs: 1, turn: false });
+    const view = await t.cell.jobsView();
+    expect(view.rows).toEqual([]);
+    const stopped = view.finished[0];
+    expect(stopped).toMatchObject({ number: 1, status: "stopped", title: "flights to Lisbon" });
+    expect(stopped?.reason?.text).toMatch(/^stopped by you at \d\d:\d\d; secbot jobs restart 1$/);
+  });
+
+  it("reorders through the cell and refuses a missing or ended job", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const hold = createHold();
+    test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
+    const t = test;
+    hold.hold("research");
+    for (const title of ["one", "two", "three", "four"]) await lead(t, start(title, "research"));
+    expect(await t.cell.reorderJob(4, { urgent: true })).toEqual({
+      ok: true,
+      job: 4,
+      title: "four",
+      priority: "urgent",
+      deadline: null,
+      place: 1,
+      of: 4,
+    });
+    expect(await t.cell.reorderJob(4, { deadline: "2026-10-12" })).toMatchObject({
+      priority: "deadline",
+      deadline: "2026-10-12",
+      place: 1,
+    });
+    expect(await t.cell.reorderJob(4, { deadline: null })).toMatchObject({
+      priority: "routine",
+      place: 4,
+    });
+    expect(await t.cell.reorderJob(4, { before: 2 })).toMatchObject({ place: 2, before: 2 });
+    expect(await t.cell.reorderJob(22, { urgent: true })).toEqual({
+      ok: false,
+      reason: "no-job",
+      job: 22,
+    });
+    const stopping = t.cell.stop();
+    await until(async () => (await job(t, 1))?.stop != null);
+    hold.release("research");
+    await stopping;
+    expect(await t.cell.reorderJob(1, { urgent: true })).toEqual({
+      ok: false,
+      reason: "ended",
+      job: 1,
+    });
+    expect((await t.cell.jobsView()).rows).toEqual([]);
+  });
+});

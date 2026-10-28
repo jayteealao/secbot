@@ -43,6 +43,7 @@ import {
   listHeld,
   type SetTimer,
 } from "./approvals.ts";
+import { type BoardView, boardView, budgetJobs } from "./board-view.ts";
 import { createBookmarkExtension, recordInterruption } from "./bookmark.ts";
 import { BudgetGate, createBudgetExtension } from "./budget-gate.ts";
 import { type CellParts, errorFields, logEvent } from "./cell-parts.ts";
@@ -53,11 +54,14 @@ import {
   ApprovalsDoc,
   BookmarkDoc,
   BudgetWaitsDoc,
+  CapacityDoc,
   DecisionModelDoc,
   type GuardMode,
   GuardModeDoc,
+  HandoffNoteDoc,
   HouseholdBudgetDoc,
   JobBoardDoc,
+  type JobStop,
   JobsDoc,
   type LimitNotice,
   LimitNoticesDoc,
@@ -67,6 +71,7 @@ import {
   NoticeDeliveryDoc,
   ReceiptsDoc,
   RosterDoc,
+  StopDoc,
   TemplatesDoc,
   TierSettingsDoc,
 } from "./docs.ts";
@@ -84,7 +89,16 @@ import { createHandoffNoteExtension } from "./handoff-note.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import { createHistoryExtension } from "./history-search.ts";
 import { createHouseholdExtension, type HouseholdClient } from "./household-tools.ts";
-import { answerQuestion, ENDED, openQuestion, type ResumeRefusal } from "./job-board.ts";
+import {
+  answerQuestion,
+  ENDED,
+  markUrgent,
+  moveBefore,
+  openQuestion,
+  type ResumeRefusal,
+  setDeadline,
+  waitingCounts,
+} from "./job-board.ts";
 import { createJobGate } from "./job-gate.ts";
 import { JobHolds } from "./job-holds.ts";
 import { type JobTask, resumeJobTask } from "./job-task.ts";
@@ -108,7 +122,7 @@ import { ModelHealthMonitor } from "./model-health.ts";
 import { listRoleModels, type RoleModel, setRoleModel, setTierCap } from "./model-map.ts";
 import { ledgerConversations } from "./month-ledger.ts";
 import { createFixtureReaderExtension, outsideReviewOf } from "./outside-tools.ts";
-import type { ReceiptTask } from "./receipts.ts";
+import { openReceipts, type ReceiptTask } from "./receipts.ts";
 import type { DecisionAdapter, OutsideKind } from "./release-defaults.ts";
 import {
   createReminderExtension,
@@ -132,7 +146,9 @@ import { createSecretsExtension, redactionLoader, type SecretsClient } from "./s
 import { createLeadExtension, type TimeEnv, timeZoneOf } from "./sections.ts";
 import { type Frame, openSessionStream, type SessionStream } from "./session-stream.ts";
 import { cellSettings } from "./settings.ts";
+import { type StopAnswer, stopJobs } from "./stop.ts";
 import { agentNames, createTelemetryExtension } from "./telemetry.ts";
+import { templatesOf } from "./templates.ts";
 import {
   type NextWake,
   nextWake,
@@ -341,6 +357,105 @@ export class CellHarness implements CellParts {
     if (!done.ok) return done;
     logEvent("job.resumed", { cell: this.person, job: n, by, resumes: done.resumes });
     return { ok: true, job: done.job, title: done.title };
+  }
+
+  /**
+   * The person's board view: live jobs in queue order, then those that ended in the last 24 hours,
+   * each with its reason line; the guard mode, the results waiting for the lead, and the capacity
+   * warning when more jobs run than the cell was measured at.
+   */
+  async jobsView(context: Context = BACKGROUND_CONTEXT): Promise<BoardView> {
+    const board = await this.board(context);
+    const waits = (await this.harness.snapshot(BudgetWaitsDoc, context))?.tasks ?? {};
+    const { mode } = await readGuardMode(this.harness, context);
+    const capacity = (await this.harness.snapshot(CapacityDoc, context)) ?? {
+      measured: null,
+      at: null,
+    };
+    const custom = (await this.harness.snapshot(TemplatesDoc, context))?.custom ?? {};
+    const counts = waitingCounts(board, await openReceipts(this.harness, context));
+    const { spend } = await this.budgetState(context);
+    return boardView({
+      person: this.person,
+      board,
+      budgetJobs: budgetJobs(board, waits),
+      mode,
+      capacity,
+      templates: templatesOf(custom),
+      waiting: counts.failure + counts.question + counts.risky + counts.routine,
+      resetsAt: spend.resetsAt,
+      now: this.now(),
+      timeZone: this.timeZone,
+    });
+  }
+
+  /**
+   * The stop command: every unfinished job and the lead's current turn stop, with their state
+   * kept; routines and reminders keep their schedule. `by` is the person, or the owner's stop of
+   * every cell.
+   */
+  stop(by: JobStop["by"] = "person", context: Context = BACKGROUND_CONTEXT): Promise<StopAnswer> {
+    return stopJobs(
+      { harness: this.harness, root: this.root, person: this.person, now: this.now },
+      by,
+      context,
+    );
+  }
+
+  /**
+   * The person changes job `n`'s place in the queue: urgent (first), a deadline or none (placed
+   * by priority), or right before job `before`. Refused for a missing number or an ended job.
+   */
+  async reorderJob(
+    n: number,
+    change:
+      | { readonly urgent: true }
+      | { readonly deadline: string | null }
+      | { readonly before: number },
+    context: Context = BACKGROUND_CONTEXT,
+  ): Promise<
+    | {
+        readonly ok: true;
+        readonly job: number;
+        readonly title: string;
+        readonly priority: string;
+        readonly deadline: string | null;
+        readonly place: number;
+        readonly of: number;
+        readonly before?: number;
+      }
+    | { readonly ok: false; readonly reason: "no-job" | "ended"; readonly job: number }
+  > {
+    const answer = await this.harness.commit(async (tx) => {
+      const done =
+        "urgent" in change
+          ? await markUrgent(tx, n)
+          : "before" in change
+            ? await moveBefore(tx, n, change.before)
+            : await setDeadline(tx, n, change.deadline);
+      return "refused" in done
+        ? ({ ok: false, reason: done.refused, job: done.job } as const)
+        : ({
+            ok: true,
+            job: done.row.number,
+            title: done.row.title,
+            priority: done.row.priority,
+            deadline: done.row.deadline,
+            place: done.place,
+            of: done.of,
+            ...("before" in change ? { before: change.before } : {}),
+          } as const);
+    }, context);
+    if (answer.ok) {
+      logEvent("job.reordered", {
+        cell: this.person,
+        job: n,
+        change: "urgent" in change ? "urgent" : "before" in change ? "move" : "deadline",
+        place: answer.place,
+        of: answer.of,
+      });
+    }
+    return answer;
   }
 
   /** The questions put to the person that wait for their answer, oldest first. */
@@ -1084,6 +1199,10 @@ async function finishOpen(
     await tx.doc(BookmarkDoc);
     await tx.doc(TemplatesDoc);
     await tx.doc(TierSettingsDoc);
+    // The stop's lock, the lead's hand-off note, and the measured capacity.
+    await tx.doc(StopDoc);
+    await tx.doc(HandoffNoteDoc);
+    await tx.doc(CapacityDoc);
     for (const row of Object.values(board.jobs)) {
       if (row.conversationId !== null && !ENDED.has(row.status)) {
         await tx.doc(UsageDoc, row.conversationId);
