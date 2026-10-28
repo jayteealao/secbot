@@ -82,7 +82,7 @@ import { createLegacyHandoffExtension } from "./handoff.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import { createHistoryExtension } from "./history-search.ts";
 import { createHouseholdExtension, type HouseholdClient } from "./household-tools.ts";
-import { ENDED } from "./job-board.ts";
+import { answerQuestion, ENDED, openQuestion } from "./job-board.ts";
 import { createJobGate } from "./job-gate.ts";
 import { JobHolds } from "./job-holds.ts";
 import { createJobToolsExtension } from "./job-tools.ts";
@@ -240,6 +240,77 @@ export class CellHarness implements CellParts {
 
   /** Where paused and questioning jobs wait (job-holds.ts); the gate and the lead share it. */
   holds: JobHolds = new JobHolds();
+
+  /**
+   * The person answers a job's question that was put to them. A job waiting on it goes on; the
+   * answer to an escalation question (a job that used its raise and its restart) goes to the lead,
+   * and the job stays failed.
+   */
+  async answerJob(
+    n: number,
+    answer: string,
+    context: Context = BACKGROUND_CONTEXT,
+  ): Promise<
+    | { readonly ok: true; readonly job: number; readonly title: string }
+    | { readonly ok: false; readonly reason: "no-job" | "no-question"; readonly message: string }
+  > {
+    const at = this.now();
+    const done = await this.harness.commit(async (tx) => {
+      const row = (await tx.doc(JobBoardDoc)).jobs[String(n)];
+      if (row === undefined) return { ok: false as const, reason: "no-job" as const };
+      const open = openQuestion(row);
+      if (open === null || !open.toPerson) {
+        return { ok: false as const, reason: "no-question" as const };
+      }
+      const question = await answerQuestion(tx, n, answer, "person", at);
+      return {
+        ok: true as const,
+        title: row.title,
+        from: question?.from ?? "job",
+        number: question?.number ?? 0,
+      };
+    }, context);
+    if (!done.ok) {
+      return {
+        ok: false,
+        reason: done.reason,
+        message: done.reason === "no-job" ? `no job #${n}` : `job ${n} has no question waiting`,
+      };
+    }
+    if (done.from === "escalation") {
+      await this.root.submit(
+        {
+          type: "input",
+          content: `[job ${n}: the person answered: ${answer}]`,
+          whenBusy: "followUp",
+          requestId: `answer:${n}:${done.number}`,
+        },
+        context,
+      );
+    } else {
+      this.holds.wake(n);
+    }
+    logEvent("job.answered", {
+      cell: this.person,
+      job: n,
+      by: "person",
+      answer_chars: answer.length,
+    });
+    return { ok: true, job: n, title: done.title };
+  }
+
+  /** The questions put to the person that wait for their answer, oldest first. */
+  async openQuestions(context: Context = BACKGROUND_CONTEXT) {
+    const board = await this.board(context);
+    return Object.values(board.jobs)
+      .flatMap((row) => {
+        const open = openQuestion(row);
+        return open === null || !open.toPerson
+          ? []
+          : [{ job: row.number, title: row.title, question: open.text, askedAt: open.askedAt }];
+      })
+      .sort((a, b) => a.askedAt - b.askedAt || a.job - b.job);
+  }
 
   /** The person's job board, as committed. */
   async board(context: Context = BACKGROUND_CONTEXT) {

@@ -9,6 +9,8 @@ import { createFauxGateway, openTestCell, type TestCell, until } from "./fixture
 import { createHold, jobResponder, startJobLine } from "./responders.ts";
 
 const LEAD_TOOLS = [
+  "answer_job",
+  "ask_person",
   "broker_call",
   "household_change",
   "household_read",
@@ -27,6 +29,7 @@ const LEAD_TOOLS = [
   "start_job",
 ];
 const JOB_TOOLS = [
+  "ask_lead",
   "broker_call",
   "household_change",
   "household_read",

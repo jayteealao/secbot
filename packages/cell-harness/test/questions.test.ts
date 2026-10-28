@@ -5,6 +5,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { answerQuestion } from "../src/job-board.ts";
 import { questionNotice } from "../src/job-tools.ts";
+import { askPersonText } from "../src/lead-tools.ts";
 import { job } from "./escalation-helpers.ts";
 import {
   createFauxGateway,
@@ -91,5 +92,111 @@ describe("the job's question tool", () => {
       expect.objectContaining({ job: 1, to_person: false, question_chars: QUESTION.length }),
     ]);
     expect(JSON.stringify(events)).not.toContain("airport");
+  });
+});
+
+/** A faux lead that answers a job's question from its history; every other request as `others`. */
+const leadFindsAnswer =
+  (others: Responder): Responder =>
+  (request) => {
+    if (request.role === "lead" && request.lastText === questionNotice(1)) {
+      return fauxAssistantMessage([fauxToolCall("search_history", { query: "Heathrow" })], {
+        stopReason: "toolUse",
+      });
+    }
+    if (
+      request.role === "lead" &&
+      request.last?.role === "toolResult" &&
+      request.lastText.includes("always fly from Heathrow")
+    ) {
+      return fauxAssistantMessage(
+        [
+          fauxToolCall("answer_job", {
+            job: 1,
+            answer: "Heathrow; the person always flies from there.",
+          }),
+        ],
+        { stopReason: "toolUse" },
+      );
+    }
+    return others(request);
+  };
+
+describe("the lead answers, or asks the person", () => {
+  it("answers from its history without asking the person, and the job goes on (AC-21)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(leadFindsAnswer(asksLead)) });
+    const t = test;
+    await (await t.cell.submit("I always fly from Heathrow airport.", "said-1")).wait(
+      BACKGROUND_CONTEXT,
+    );
+    await startAskingJob(t);
+    await until(async () => (await job(t))?.status === "done");
+    const row = await job(t);
+    expect(row?.question).toMatchObject({
+      answeredBy: "lead",
+      toPerson: false,
+      personAskedAt: null,
+      answer: "Heathrow; the person always flies from there.",
+    });
+    expect(row?.result?.text).toBe(
+      "Searched with: The lead answers: Heathrow; the person always flies from there.",
+    );
+    expect(await t.cell.openQuestions()).toEqual([]);
+    expect(
+      t.gateway.requests.some(
+        (request) => request.role === "lead" && request.lastText.includes("Ask the person"),
+      ),
+    ).toBe(false);
+  });
+
+  it("asks the person for a question that commits them; the job waits a week across a reopen, then the person's answer continues it (AC-22)", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    let clock = Date.now();
+    const leadAsksPerson: Responder = (request) => {
+      if (request.role === "lead" && request.lastText === questionNotice(1)) {
+        return fauxAssistantMessage([fauxToolCall("ask_person", { job: 1 })], {
+          stopReason: "toolUse",
+        });
+      }
+      if (request.role === "lead" && request.lastText === askPersonText(1)) {
+        return fauxAssistantMessage([
+          fauxText(
+            "The passport job needs one fact from you: which address goes on the form, home or the office?",
+          ),
+        ]);
+      }
+      return asksLead(request);
+    };
+    test = await openTestCell({ gateway: createFauxGateway(leadAsksPerson), now: () => clock });
+    const t = test;
+    await startAskingJob(t);
+    await until(async () => (await job(t))?.question?.toPerson === true);
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    expect(await t.cell.openQuestions()).toEqual([
+      expect.objectContaining({ job: 1, title: "flights", question: QUESTION }),
+    ]);
+    const asked = researchRequests(t);
+
+    clock += 7 * 24 * 60 * 60 * 1000;
+    await t.reopen();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect((await job(t))?.status).toBe("waiting");
+    expect(researchRequests(t)).toBe(asked);
+    expect(await t.cell.openQuestions()).toHaveLength(1);
+
+    expect(await t.cell.answerJob(1, "home address")).toEqual({
+      ok: true,
+      job: 1,
+      title: "flights",
+    });
+    await until(async () => (await job(t))?.status === "done");
+    expect((await job(t))?.result?.text).toBe("Searched with: The person answers: home address");
+    expect(await t.cell.answerJob(1, "again")).toMatchObject({
+      ok: false,
+      reason: "no-question",
+      message: "job 1 has no question waiting",
+    });
+    expect(await t.cell.answerJob(9, "x")).toMatchObject({ ok: false, message: "no job #9" });
   });
 });

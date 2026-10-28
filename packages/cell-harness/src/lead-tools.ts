@@ -27,7 +27,9 @@ import {
   escalationsUsed,
   exhaust,
   jobCost,
+  answerQuestion,
   markRisky,
+  openQuestion,
   pullResult,
   resumeRow,
   setTierEffort,
@@ -116,8 +118,20 @@ export function jobSummary(row: JobRow): string {
       : row.result.pulledAt === null
         ? `a ${row.result.kind} result waits: pull it with job_result`
         : `its ${row.result.kind} result was pulled`;
-  return `job ${row.number} "${row.title}": ${row.status}, ${row.template} on ${row.tier}, ${effort}, $${row.cost.toFixed(2)} of $${row.cap}, priority ${row.priority}${due}, ${row.attempts.raises} raises and ${row.attempts.restarts} restarts; ${result}.`;
+  const open = openQuestion(row);
+  const question =
+    open === null
+      ? ""
+      : ` Its question waits: "${open.text}"${open.toPerson ? " (asked the person)" : ""}; answer with answer_job.`;
+  return `job ${row.number} "${row.title}": ${row.status}, ${row.template} on ${row.tier}, ${effort}, $${row.cost.toFixed(2)} of $${row.cap}, priority ${row.priority}${due}, ${row.attempts.raises} raises and ${row.attempts.restarts} restarts; ${result}.${question}`;
 }
+
+/** The longest answer to a job's question, from the lead or the person. */
+export const ANSWER_MAX_CHARS = 2_000;
+
+/** What the lead hears after ask_person. */
+export const askPersonText = (n: number) =>
+  `Ask the person in your own words now; the chat adds "[ job ${n} asks ]" and their /answer goes to the job.`;
 
 /** The most a job transcript gives the lead, in characters. */
 export const TRANSCRIPT_MAX_CHARS = 4_000;
@@ -590,6 +604,72 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     },
   });
 
+  const answerJob = defineTool({
+    name: "answer_job",
+    description:
+      "Answer a job's open question (read it with read_job). Answer from your history and the brief; the job goes on with your answer.",
+    parameters: Type.Object({
+      job: jobParameter,
+      answer: Type.String({
+        minLength: 1,
+        maxLength: ANSWER_MAX_CHARS,
+        description: "The answer.",
+      }),
+    }),
+    // A second run finds the question answered and refuses; the first answer stands.
+    replay: "safe",
+    execute: async (args, api, context) => {
+      const answered = await api.commit(async (tx) => {
+        const found = await rowOrError(tx, args.job);
+        if ("error" in found) return found;
+        const open = openQuestion(found);
+        if (open === null) return { error: `job ${args.job} has no question waiting.` };
+        if (open.from !== "job") {
+          return { error: `job ${args.job}'s question is for the person; they answer it.` };
+        }
+        const question = await answerQuestion(tx, args.job, args.answer, "lead", deps.now());
+        return { number: found.number, question: question?.number ?? 0 };
+      }, context);
+      if ("error" in answered) return refusal(answered.error);
+      deps.holds.wake(answered.number);
+      logEvent("job.answered", {
+        cell: person,
+        job: answered.number,
+        by: "lead",
+        answer_chars: args.answer.length,
+      });
+      return {
+        ...text(`job ${answered.number} has your answer and goes on.`),
+        details: { job: answered.number, question: answered.question },
+      };
+    },
+  });
+
+  const askPerson = defineTool({
+    name: "ask_person",
+    description:
+      "Hand a job's open question to the person, when you lack the answer or the answer commits them. Then ask them in your own words in the same reply.",
+    parameters: Type.Object({ job: jobParameter }),
+    replay: "safe",
+    execute: async (args, api, context) => {
+      const asked = await api.commit(async (tx) => {
+        const found = await rowOrError(tx, args.job);
+        if ("error" in found) return found;
+        const open = openQuestion(found);
+        if (open === null) return { error: `job ${args.job} has no question waiting.` };
+        const fresh = !open.toPerson;
+        open.toPerson = true;
+        open.personAskedAt ??= deps.now();
+        return { number: found.number, fresh };
+      }, context);
+      if ("error" in asked) return refusal(asked.error);
+      if (asked.fresh) {
+        logEvent("job.question_asked", { cell: person, job: asked.number, to_person: true });
+      }
+      return { ...text(askPersonText(asked.number)), details: { job: asked.number } };
+    },
+  });
+
   const ReceiptTask = createReceiptTask(deps.remote ?? { person, household: () => undefined });
   return {
     JobTask,
@@ -605,6 +685,8 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         restartJob,
         jobTranscript,
         markRiskyTool,
+        answerJob,
+        askPerson,
         createReadResultTool(deps.now),
       ],
       wraps: remoteWraps(person, ReceiptTask, turnOf, deps.now),
