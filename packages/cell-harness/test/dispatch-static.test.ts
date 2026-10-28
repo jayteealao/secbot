@@ -15,7 +15,10 @@ const DISPATCH_DIRS = [join(packages, "cli", "src"), join(packages, "cell-worker
  * the lead's decision, like the tests' responders, and is never deployed to a person cell. The
  * held-call answer parser (the CLI's `held.ts`) sends an exact `/allow N`, `/always N`, or
  * `/deny N` line to the cell's approval route, never to any agent, and leaves every other line to
- * go to the lead unchanged; `held-chat.test.ts` proves both halves. The CLI's `budget-names.ts`
+ * go to the lead unchanged; `held-chat.test.ts` proves both halves. The job-answer parser (the
+ * CLI's `job-answer.ts`) does the same for an exact `/answer <#> <text>`: it goes to the cell's
+ * job answer route, never to any agent, and every other line goes to the lead unchanged;
+ * `cli.test.ts` and `job-question-chat.test.ts` prove both halves. The CLI's `budget-names.ts`
  * holds only the developer budget's name, which the cost and limits commands print and type; it
  * names a budget and routes nothing. The CLI's `secret-kinds.ts` holds only the broker kinds
  * (`health`, `production`) that `secbot secrets add --broker` types; a kind names the service the
@@ -27,6 +30,7 @@ const NOT_DISPATCH = new Set([
   "conformance-cell.ts",
   "durability-lab.ts",
   "held.ts",
+  "job-answer.ts",
   "secret-kinds.ts",
 ]);
 

@@ -37,17 +37,18 @@ export type Frame =
 const MISSED_WIDTH = 79;
 
 /**
- * `prefix` and one line of `text` as it fits in MISSED_WIDTH columns, the rest on lines indented
- * by two spaces. A line that fits, or text with line breaks of its own, prints unchanged.
+ * `prefix` and one line of `said` as it fits in MISSED_WIDTH columns, the rest on lines indented
+ * by two spaces. A line that fits, or one with line breaks of its own, prints unchanged. Display
+ * only: the result goes to stdout and routes nothing.
  */
-export function wrapped(prefix: string, text: string): string {
-  const whole = prefix + text;
-  if (whole.length <= MISSED_WIDTH || text.includes("\n")) return whole;
+export function wrapped(prefix: string, said: string): string {
+  const whole = prefix + said;
+  if (whole.length <= MISSED_WIDTH || whole.split("\n").length > 1) return whole;
   const lines: string[] = [];
   let line = prefix;
   // No word on the line yet: the next one goes on it whatever its length.
   let empty = true;
-  for (const word of text.split(" ").filter((each) => each !== "")) {
+  for (const word of said.split(" ").filter((each) => each !== "")) {
     const next = empty ? line + word : `${line} ${word}`;
     if (empty || next.length <= MISSED_WIDTH) {
       line = next;
