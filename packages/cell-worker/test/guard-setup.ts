@@ -84,6 +84,8 @@ export async function guardSetup(
      * the global WebSocketPair and reads the frames from its server socket.
      */
     readonly sockets?: boolean;
+    /** Fixed web pages a job can read with `read_fixture_page`. */
+    readonly fixturePages?: OpenCellOptions["fixturePages"];
   } = {},
 ): Promise<GuardSetup> {
   const household =
@@ -158,6 +160,7 @@ export async function guardSetup(
             ...(extras.secrets === undefined ? {} : { secrets: extras.secrets }),
             ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
             ...(options.now === undefined ? {} : { now: options.now }),
+            ...(options.fixturePages === undefined ? {} : { fixturePages: options.fixturePages }),
             // A passing decision model unless a test gives its own: the suites that are not about
             // the model layers keep their request counts.
             guard: { decision: passingDecision, ...options.guard },
