@@ -13,6 +13,9 @@ import {
   DEFAULT_PERSON_RULES,
   EMPTY_REPLY_NUDGE,
   ESCALATION_LIMITS,
+  HANDOFF_NOTE_MAX_CHARS,
+  HANDOFF_NOTE_PROMPT,
+  HANDOFF_NOTE_SOURCE_CHARS,
   INJECTION_MARK_THRESHOLD,
   INJECTION_MAX_MISS_RATE,
   JOB_EFFORTS,
@@ -26,6 +29,7 @@ import {
   RESULT_REVIEW_PROMPT,
   RESULT_WAKE_MS,
   RISKY_TEMPLATES,
+  resumeInput,
   RISKY_TOOLS,
   TIER_CAPS_USD,
   TIER_MODELS,
@@ -197,6 +201,44 @@ describe("release defaults of the content check", () => {
     // model's content state is pinned exactly by its own test.
     expect(CONTENT_CHUNK_BYTES + 1_024).toBeLessThanOrEqual(DECISION_STATE_LIMIT);
     expect(CONTENT_CHUNK_OVERLAP_BYTES).toBeLessThan(CONTENT_CHUNK_BYTES / 2);
+  });
+});
+
+describe("release defaults of the stop, the resume, and the hand-off note", () => {
+  it("asks for a short note under three headings, with no job state", () => {
+    expect(HANDOFF_NOTE_PROMPT.split("\n")[0]).toBe(
+      "You write a short hand-off note for yourself, the household lead, before older messages are summarized.",
+    );
+    for (const heading of ["Open promises:", "Pending questions:", "Recent preferences:"]) {
+      expect(HANDOFF_NOTE_PROMPT).toContain(heading);
+    }
+    expect(HANDOFF_NOTE_PROMPT).toContain("job state is on the job board: do not list jobs");
+    expect(HANDOFF_NOTE_MAX_CHARS).toBe(1_200);
+    expect(HANDOFF_NOTE_SOURCE_CHARS).toBe(24_000);
+  });
+
+  it("tells a resumed job when it was stopped and to continue", () => {
+    expect(resumeInput(Date.UTC(2026, 9, 12, 9, 5), "UTC")).toBe(
+      "The person stopped this job at 09:05; it is resumed now. Continue the brief from where you stopped; your earlier messages are above.",
+    );
+  });
+
+  it("tells the lead about stopped jobs, resume_job, and its hand-off note", () => {
+    expect(LEAD_INSTRUCTIONS).toContain(
+      "A stopped job waits on the board; resume it with resume_job only when the person asks.",
+    );
+    expect(LEAD_INSTRUCTIONS).toContain(
+      "The hand-off note section is yours, written before your last compaction.",
+    );
+  });
+
+  it("permits and thresholds resume_job as restart_job is", () => {
+    expect(DEFAULT_PERSON_RULES).toContainEqual({
+      agent: "all",
+      tool: "resume_job",
+      verdict: "permit",
+    });
+    expect(MARK_THRESHOLDS.resume_job).toBe(MARK_THRESHOLDS.restart_job);
   });
 });
 
