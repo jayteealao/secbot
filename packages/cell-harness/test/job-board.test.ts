@@ -31,11 +31,17 @@ import {
   liveRows,
   markOutside,
   markRisky,
+  markUrgent,
+  moveBefore,
   pauseRow,
+  placeOf,
+  priorityKey,
   pullResult,
+  queueOf,
   recordCost,
   restCount,
   resumeRow,
+  setDeadline,
   setTierEffort,
   storeResult,
   waitingCounts,
@@ -689,5 +695,95 @@ describe("outside content and blocks on the board", () => {
     expect(await blocked(41)).toBe(false);
     expect((await job())?.status).toBe("done");
     expect((await job())?.block).toBeNull();
+  });
+});
+
+describe("the queue order and the person's reorder", () => {
+  const ops = async <T>(change: (tx: Tx) => T | Promise<T>): Promise<T> => {
+    if (test === undefined) throw new Error("no cell");
+    return test.cell.harness.commit(change, BACKGROUND_CONTEXT);
+  };
+  const board = async () => {
+    const value = await test?.cell.harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT);
+    if (value === undefined) throw new Error("no board");
+    return value;
+  };
+  const order = async () => queueOf(await board()).map((job) => job.number);
+  const four = async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    await ops(async (tx) => {
+      await createJobRow(tx, { ...fields("one"), priority: "urgent" });
+      await createJobRow(tx, { ...fields("two"), priority: "deadline", deadline: "2026-10-20" });
+      await createJobRow(tx, { ...fields("three"), priority: "research" });
+      await createJobRow(tx, { ...fields("council tax letter summary"), priority: "routine" });
+    });
+  };
+
+  it("orders by priority: urgent, deadlines by date, routine, research", () => {
+    expect(priorityKey({ priority: "urgent", deadline: null })).toEqual([0, ""]);
+    expect(priorityKey({ priority: "deadline", deadline: "2026-10-12" })).toEqual([1, "2026-10-12"]);
+    expect(priorityKey({ priority: "routine", deadline: null })).toEqual([2, ""]);
+    expect(priorityKey({ priority: "research", deadline: null })).toEqual([3, ""]);
+  });
+
+  it("places four live jobs by priority as they are created", async () => {
+    await four();
+    expect(await order()).toEqual([1, 2, 4, 3]);
+    expect((await board()).queue).toEqual([1, 2, 4, 3]);
+    expect(liveRows(await board()).map((job) => job.number)).toEqual([1, 2, 4, 3]);
+    expect(placeOf(await board(), 3)).toEqual({ place: 4, of: 4 });
+  });
+
+  it("marks urgent, sets and clears a deadline, and moves a job before another", async () => {
+    await four();
+    const urgent = await ops((tx) => markUrgent(tx, 4));
+    expect(urgent).toMatchObject({ ok: true, place: 1, of: 4 });
+    expect(await order()).toEqual([4, 1, 2, 3]);
+    expect((await board()).jobs["4"]?.priority).toBe("urgent");
+
+    const due = await ops((tx) => setDeadline(tx, 4, "2026-10-12"));
+    expect(due).toMatchObject({ ok: true, place: 2, of: 4 });
+    expect((await board()).jobs["4"]).toMatchObject({ priority: "deadline", deadline: "2026-10-12" });
+    expect(await order()).toEqual([1, 4, 2, 3]);
+
+    const cleared = await ops((tx) => setDeadline(tx, 4, null));
+    expect(cleared).toMatchObject({ ok: true, place: 3, of: 4 });
+    expect((await board()).jobs["4"]).toMatchObject({ priority: "routine", deadline: null });
+    expect(await order()).toEqual([1, 2, 4, 3]);
+
+    const moved = await ops((tx) => moveBefore(tx, 4, 1));
+    expect(moved).toMatchObject({ ok: true, place: 1, of: 4 });
+    expect(await order()).toEqual([4, 1, 2, 3]);
+    // The priority stays: a move changes only the place.
+    expect((await board()).jobs["4"]?.priority).toBe("routine");
+  });
+
+  it("refuses a missing number and an ended job, and drops an ended job from the queue", async () => {
+    await four();
+    expect(await ops((tx) => markUrgent(tx, 22))).toEqual({ refused: "no-job", job: 22 });
+    expect(await ops((tx) => setDeadline(tx, 22, null))).toEqual({ refused: "no-job", job: 22 });
+    expect(await ops((tx) => moveBefore(tx, 22, 1))).toEqual({ refused: "no-job", job: 22 });
+    expect(await ops((tx) => moveBefore(tx, 1, 22))).toEqual({ refused: "no-job", job: 22 });
+    await ops((tx) => endRow(tx, 2, "done", 9_000));
+    expect(await ops((tx) => markUrgent(tx, 2))).toEqual({ refused: "ended", job: 2 });
+    expect(await ops((tx) => moveBefore(tx, 1, 2))).toEqual({ refused: "ended", job: 2 });
+    expect(await order()).toEqual([1, 4, 3]);
+    expect((await board()).queue).toEqual([1, 4, 3]);
+    expect(placeOf(await board(), 2)).toBeNull();
+  });
+
+  it("places a live row missing from the queue by its priority", () => {
+    const jobs = {
+      "1": { ...row, number: 1, priority: "research" as const },
+      "2": { ...row, number: 2, priority: "urgent" as const },
+      "3": { ...row, number: 3, priority: "routine" as const, status: "done" as const },
+    };
+    expect(queueOf({ nextNumber: 4, jobs, byConversation: {} }).map((job) => job.number)).toEqual([
+      2, 1,
+    ]);
+    expect(
+      queueOf({ nextNumber: 4, jobs, byConversation: {}, queue: [1, 3] }).map((job) => job.number),
+    ).toEqual([2, 1]);
   });
 });

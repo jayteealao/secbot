@@ -5,6 +5,7 @@
  */
 import { type ConversationId, type Tx, UsageDoc } from "@earendil-works/pi-durable";
 import {
+  compareKeys,
   ENDED,
   emptyJobExtras,
   type JobBlock,
@@ -15,6 +16,7 @@ import {
   type JobResult,
   type JobRow,
   type JobStatus,
+  priorityKey,
   type Receipt,
   type ResultKind,
   TierSettingsDoc,
@@ -28,13 +30,125 @@ import {
 } from "./release-defaults.ts";
 import { capOf } from "./templates.ts";
 
-export { ENDED };
+export { ENDED, priorityKey };
 
 export type BoardState = {
   readonly nextNumber: number;
   readonly jobs: Readonly<Record<string, JobRow>>;
   readonly byConversation: Readonly<Record<string, number>>;
+  /** The live jobs in order; a board read before the queue existed has none. */
+  readonly queue?: readonly number[];
 };
+
+type MutableBoard = {
+  nextNumber: number;
+  jobs: Record<string, JobRow>;
+  byConversation: Record<string, number>;
+  queue: number[];
+};
+
+/** The index in `queue` where job `n` goes: after every live job of the same or a higher priority. */
+function placeIndex(board: BoardState, queue: readonly number[], n: number): number {
+  const row = board.jobs[String(n)];
+  if (row === undefined) return queue.length;
+  const key = priorityKey(row);
+  let at = 0;
+  queue.forEach((other, index) => {
+    const ahead = board.jobs[String(other)];
+    if (ahead !== undefined && compareKeys(priorityKey(ahead), key) <= 0) at = index + 1;
+  });
+  return at;
+}
+
+/**
+ * The live jobs in the order they run and show: the queue's order, with a live job the queue does
+ * not list placed by its priority (older first) and every ended job left out.
+ */
+export function queueOf(board: BoardState): JobRow[] {
+  const live = (n: number) => {
+    const row = board.jobs[String(n)];
+    return row !== undefined && !ENDED.has(row.status);
+  };
+  const queue = [...new Set(board.queue ?? [])].filter(live);
+  const missing = Object.values(board.jobs)
+    .filter((row) => !ENDED.has(row.status) && !queue.includes(row.number))
+    .sort((a, b) => a.number - b.number);
+  for (const row of missing) queue.splice(placeIndex(board, queue, row.number), 0, row.number);
+  return queue.map((n) => board.jobs[String(n)] as JobRow);
+}
+
+/** Job `n`'s place in the queue (from 1) and the number of live jobs; null when it is not live. */
+export function placeOf(board: BoardState, n: number): { place: number; of: number } | null {
+  const order = queueOf(board).map((row) => row.number);
+  const index = order.indexOf(n);
+  return index < 0 ? null : { place: index + 1, of: order.length };
+}
+
+/** Rewrites the queue without ended jobs, then puts job `n` where `where` says. */
+function requeue(board: MutableBoard, n: number, where: (queue: number[]) => number): void {
+  const queue = queueOf(board)
+    .map((row) => row.number)
+    .filter((other) => other !== n);
+  queue.splice(where(queue), 0, n);
+  board.queue = queue;
+}
+
+/** Places job `n` after every live job of the same or a higher priority. */
+export function placeInQueue(board: MutableBoard, n: number): void {
+  requeue(board, n, (queue) => placeIndex(board, queue, n));
+}
+
+export type ReorderAnswer =
+  | { readonly ok: true; readonly row: JobRow; readonly place: number; readonly of: number }
+  | { readonly refused: "no-job" | "ended"; readonly job: number };
+
+async function liveRowFor(
+  tx: Tx,
+  n: number,
+): Promise<{ board: MutableBoard; row: JobRow } | { refused: "no-job" | "ended"; job: number }> {
+  const board = await tx.doc(JobBoardDoc);
+  const row = Object.hasOwn(board.jobs, String(n)) ? board.jobs[String(n)] : undefined;
+  if (row === undefined) return { refused: "no-job", job: n };
+  if (ENDED.has(row.status)) return { refused: "ended", job: n };
+  return { board, row };
+}
+
+function answered(board: MutableBoard, row: JobRow): ReorderAnswer {
+  const place = placeOf(board, row.number);
+  return { ok: true, row, place: place?.place ?? 0, of: place?.of ?? 0 };
+}
+
+/** The person marks job `n` urgent: it goes first. */
+export async function markUrgent(tx: Tx, n: number): Promise<ReorderAnswer> {
+  const found = await liveRowFor(tx, n);
+  if ("refused" in found) return found;
+  found.row.priority = "urgent";
+  requeue(found.board, n, () => 0);
+  return answered(found.board, found.row);
+}
+
+/**
+ * The person sets job `n`'s deadline (an ISO date): it is placed among the deadlines by date. A
+ * cleared deadline makes the job routine, placed after the other routine jobs.
+ */
+export async function setDeadline(tx: Tx, n: number, date: string | null): Promise<ReorderAnswer> {
+  const found = await liveRowFor(tx, n);
+  if ("refused" in found) return found;
+  found.row.priority = date === null ? "routine" : "deadline";
+  found.row.deadline = date;
+  placeInQueue(found.board, n);
+  return answered(found.board, found.row);
+}
+
+/** The person moves job `n` right before job `m`; its priority stays. */
+export async function moveBefore(tx: Tx, n: number, m: number): Promise<ReorderAnswer> {
+  const found = await liveRowFor(tx, n);
+  if ("refused" in found) return found;
+  const target = await liveRowFor(tx, m);
+  if ("refused" in target) return target;
+  requeue(found.board, n, (queue) => queue.indexOf(m));
+  return answered(found.board, found.row);
+}
 
 export interface NewJob {
   readonly title: string;
@@ -89,6 +203,7 @@ export async function createJobRow(tx: Tx, fields: NewJob): Promise<JobRow> {
     result: null,
     ...emptyJobExtras(),
   };
+  placeInQueue(board, number);
   return board.jobs[String(number)] as JobRow;
 }
 
@@ -224,6 +339,7 @@ export async function exhaust(tx: Tx, n: number, at: number): Promise<JobRow> {
   if (!ENDED.has(row.status)) {
     row.status = "failed";
     row.endedAt = at;
+    await dropEnded(tx, n);
   }
   return row;
 }
@@ -324,8 +440,18 @@ export async function endRow(tx: Tx, n: number, status: JobStatus, at: number): 
   if (!ENDED.has(row.status)) {
     row.status = status;
     row.endedAt = at;
+    await dropEnded(tx, n);
   }
   return row;
+}
+
+/** Takes an ended job out of the queue. */
+async function dropEnded(tx: Tx, n: number): Promise<void> {
+  dropFromQueue(await tx.doc(JobBoardDoc), n);
+}
+
+function dropFromQueue(board: { queue: number[] }, n: number): void {
+  if (board.queue.includes(n)) board.queue = board.queue.filter((other) => other !== n);
 }
 
 /**
@@ -373,6 +499,7 @@ export async function blockRow(
   row.block = { ...block };
   row.status = "blocked";
   row.endedAt = block.at;
+  await dropEnded(tx, n);
   row.pause = null;
   await storeResult(tx, n, "failure", blockReason(block), block.at);
   return row;
@@ -407,11 +534,9 @@ export function waitingCounts(
   return counts;
 }
 
-/** The jobs still live (not done, failed, stopped, or blocked), by number. */
+/** The jobs still live (not done, failed, stopped, or blocked), in queue order. */
 export function liveRows(board: BoardState): JobRow[] {
-  return Object.values(board.jobs)
-    .filter((row) => !ENDED.has(row.status))
-    .sort((a, b) => a.number - b.number);
+  return queueOf(board);
 }
 
 /** How many jobs ended. */
