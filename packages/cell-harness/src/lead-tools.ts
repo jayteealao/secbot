@@ -19,6 +19,13 @@ import { JobBoardDoc, type JobRow, RoleModelsDoc, TemplatesDoc } from "./docs.ts
 import { createJobRow, ENDED, pullResult, setTierEffort } from "./job-board.ts";
 import { configureJob, createJobTask, type JobTask } from "./job-task.ts";
 import { budgetOf } from "./month-ledger.ts";
+import {
+  createReadResultTool,
+  createReceiptTask,
+  type ReceiptTask,
+  type RemoteDeps,
+  remoteWraps,
+} from "./receipts.ts";
 import { DEFAULT_JOB_EFFORT, JOB_EFFORTS, TIERS } from "./release-defaults.ts";
 import { appliedEffort, templateNamed, templatesOf, tierModelOf } from "./templates.ts";
 
@@ -30,6 +37,8 @@ export interface JobsExtensionDeps {
   /** The extensions a job conversation selects (no tool that starts work). */
   readonly jobExtensions: () => readonly Extension[];
   readonly now: () => number;
+  /** The household and secrets cells the lead's remote tools reach in the background. */
+  readonly remote?: RemoteDeps;
 }
 
 /** The lead's note when a job will wait above a limit before it starts. */
@@ -90,6 +99,7 @@ export function jobSummary(row: JobRow): string {
 export function createJobsExtension(deps: JobsExtensionDeps): {
   readonly extension: Extension;
   readonly JobTask: JobTask;
+  readonly ReceiptTask: ReceiptTask;
 } {
   const { person } = deps;
   const JobTask = createJobTask({
@@ -268,12 +278,15 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     },
   });
 
+  const ReceiptTask = createReceiptTask(deps.remote ?? { person, household: () => undefined });
   return {
     JobTask,
+    ReceiptTask,
     extension: defineExtension({
       name: "secbot-jobs",
-      tools: [startJob, readJob, jobResult, setJob],
-      tasks: [JobTask],
+      tools: [startJob, readJob, jobResult, setJob, createReadResultTool(deps.now)],
+      wraps: remoteWraps(person, ReceiptTask, turnOf, deps.now),
+      tasks: [JobTask, ReceiptTask],
     }),
   };
 }
