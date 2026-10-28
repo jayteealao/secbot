@@ -229,6 +229,21 @@ function outcomeText(outcome: string, report: string | undefined): string {
   return "no answer";
 }
 
+/**
+ * The retired hand-off's tasks with no tool: registered so a reporter started before an upgrade
+ * still delivers and reports once, and the specialists' anchor tasks still resolve.
+ */
+export function createLegacyHandoffExtension(
+  person: string,
+  gate: () => BudgetWaiter | undefined = () => undefined,
+  timeZone = "UTC",
+): Extension {
+  return defineExtension({
+    name: "secbot-handoff",
+    tasks: [Anchor, createReporter(person, gate, timeZone)],
+  });
+}
+
 /** The lead's note when the brief waits above a limit. */
 export const WAITS_NOTE =
   "; the person is over their monthly limit, so the brief waits until the limit rises or the month resets";

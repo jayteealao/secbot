@@ -10,7 +10,10 @@ export interface CellParts {
   /** The extensions each role selects, in order. */
   readonly extensions: {
     readonly lead: readonly Extension[];
+    /** The frozen specialists' list: the same as a job's, so no tool reaches them by name. */
     readonly specialist: readonly Extension[];
+    /** A job conversation's list: no tool that starts work. */
+    readonly job: readonly Extension[];
   };
 }
 

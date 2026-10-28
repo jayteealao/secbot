@@ -43,17 +43,20 @@ import {
   listHeld,
   type SetTimer,
 } from "./approvals.ts";
+import { createBookmarkExtension, recordInterruption } from "./bookmark.ts";
 import { BudgetGate, createBudgetExtension } from "./budget-gate.ts";
 import { type CellParts, errorFields, logEvent } from "./cell-parts.ts";
 import { createDecisionModels, type DecisionModels, parseThresholdCaps } from "./decision-model.ts";
 import { type MissedPage, markDelivered, missedPage } from "./delivery.ts";
 import {
   ApprovalsDoc,
+  BookmarkDoc,
   BudgetWaitsDoc,
   DecisionModelDoc,
   type GuardMode,
   GuardModeDoc,
   HouseholdBudgetDoc,
+  JobBoardDoc,
   JobsDoc,
   type LimitNotice,
   LimitNoticesDoc,
@@ -61,7 +64,10 @@ import {
   ModelHealthDoc,
   MonthLedgerDoc,
   NoticeDeliveryDoc,
+  ReceiptsDoc,
   RosterDoc,
+  TemplatesDoc,
+  TierSettingsDoc,
 } from "./docs.ts";
 import { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 import { createGuardExtension, createModelStage, type GuardOptions, ruleStage } from "./guard.ts";
@@ -72,11 +78,14 @@ import {
   setDecisionAdapter,
   setGuardMode,
 } from "./guard-settings.ts";
-import { createHandoffExtension } from "./handoff.ts";
+import { createLegacyHandoffExtension } from "./handoff.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import { createHistoryExtension } from "./history-search.ts";
 import { createHouseholdExtension, type HouseholdClient } from "./household-tools.ts";
+import { ENDED } from "./job-board.ts";
+import type { JobTask } from "./job-task.ts";
 import { liveJobs } from "./jobs.ts";
+import { createJobsExtension } from "./lead-tools.ts";
 import {
   type BudgetState,
   budgetState,
@@ -93,6 +102,7 @@ import {
 import { ModelHealthMonitor } from "./model-health.ts";
 import { listRoleModels, type RoleModel, setRoleModel } from "./model-map.ts";
 import { ledgerConversations } from "./month-ledger.ts";
+import type { ReceiptTask } from "./receipts.ts";
 import { type DecisionAdapter, LEAD_ROLE } from "./release-defaults.ts";
 import {
   createReminderExtension,
@@ -219,6 +229,20 @@ export class CellHarness implements CellParts {
     /** The harness's report gate: close logs the count of reports it did not log. */
     private readonly reports?: ReportGate,
   ) {}
+
+  /** The job and receipt tasks (job-task.ts, receipts.ts), set at open. */
+  tasks: { readonly job: JobTask; readonly receipt: ReceiptTask } | undefined;
+
+  /** The person's job board, as committed. */
+  async board(context: Context = BACKGROUND_CONTEXT) {
+    return (
+      (await this.harness.snapshot(JobBoardDoc, context)) ?? {
+        nextNumber: 1,
+        jobs: {},
+        byConversation: {},
+      }
+    );
+  }
 
   private limitParts() {
     return { person: this.person, harness: this.harness, now: this.now, timeZone: this.timeZone };
@@ -408,13 +432,27 @@ export class CellHarness implements CellParts {
     return { summary, next };
   }
 
-  /** Submits a message to the lead's root conversation, unchanged. Idempotent per request id. */
-  submit(
+  /**
+   * Submits a message to the lead's root conversation, unchanged. Idempotent per request id. A
+   * person's message steers in by default: it enters after the lead's current reply step, and when
+   * the lead is busy the interrupt bookmark records where it was first (bookmark.ts).
+   */
+  async submit(
     text: string,
     requestId: string,
+    options: { readonly whenBusy?: "steer" | "followUp" } = {},
     context: Context = BACKGROUND_CONTEXT,
   ): Promise<Submission> {
-    return this.root.submit({ type: "input", content: text, requestId }, context);
+    const whenBusy = options.whenBusy ?? "steer";
+    const bookmark =
+      whenBusy === "steer" ? await recordInterruption(this, this.now(), context) : null;
+    logEvent("input.steered", {
+      cell: this.person,
+      request_id: requestId,
+      busy: bookmark !== null,
+      when_busy: whenBusy,
+    });
+    return this.root.submit({ type: "input", content: text, requestId, whenBusy }, context);
   }
 
   async status(context: Context = BACKGROUND_CONTEXT): Promise<CellStatus> {
@@ -610,7 +648,7 @@ export async function openCellHarness(
   const heartbeat = createHeartbeatRoutine(env, hooks, options.fetch);
   const reminders = createReminderRoutine(hooks);
   const lead = createLeadExtension({ now, timeZone });
-  const handoff = createHandoffExtension(person, () => gate, timeZone);
+  const legacy = createLegacyHandoffExtension(person, () => gate, timeZone);
   const history = createHistoryExtension(current);
   const household = createHouseholdExtension(person, () => options.household);
   // Granted values reach the redactor at open (best effort) and before each secrets call.
@@ -630,6 +668,26 @@ export async function openCellHarness(
   });
   const telemetry = createTelemetryExtension(person, monitor);
   const models = options.models ?? createGatewayModels(env);
+  let jobList: readonly Extension[] = [];
+  const jobs = createJobsExtension({
+    person,
+    gate: () => gate,
+    timeZone,
+    models: () => models,
+    jobExtensions: () => jobList,
+    now,
+    remote: {
+      person,
+      household: () => options.household,
+      secrets: {
+        person,
+        client: () => options.secrets,
+        options: { now, timeZone },
+        loadRedaction,
+      },
+    },
+  });
+  const bookmark = createBookmarkExtension(person, now);
   const {
     decision: decisionOption,
     reviewer: reviewerOption,
@@ -668,14 +726,17 @@ export async function openCellHarness(
     ...guardOptions,
   });
   const extra = options.extensions ?? [];
-  // The budget extension is on every specialist's list, after the guard, and never on the lead's:
-  // above a limit a specialist's job waits before its next request; chat with the lead runs.
+  // The budget extension is on every job's list, after the guard, and never on the lead's: above a
+  // limit a job waits before its next request; chat with the lead runs.
   const budget = createBudgetExtension(() => gate);
+  const job = [guard, budget, history, household, secrets, telemetry, ...extra];
+  jobList = job;
   const extensions = {
     lead: [
       guard,
       lead,
-      handoff,
+      jobs.extension,
+      bookmark,
       history,
       household,
       secrets,
@@ -684,10 +745,12 @@ export async function openCellHarness(
       telemetry,
       ...extra,
     ],
-    specialist: [guard, budget, history, household, secrets, telemetry, ...extra],
+    specialist: job,
+    job,
   };
   const registry = createRegistry();
-  for (const extension of new Set([...extensions.lead, ...extensions.specialist])) {
+  // The retired hand-off's tasks stay registered so a hand-off in flight at upgrade finishes once.
+  for (const extension of new Set([...extensions.lead, ...extensions.job, legacy])) {
     registry.install(extension);
   }
   const durable = await openCelldStorageWithDatabase(storage);
@@ -712,6 +775,7 @@ export async function openCellHarness(
       gate,
       onReport,
       reports,
+      tasks: { job: jobs.JobTask, receipt: jobs.ReceiptTask },
     });
   } catch (error) {
     // A failure after the open (roster, routines, inspect) must not leave this harness running on
@@ -751,6 +815,7 @@ async function finishOpen(
     readonly gate: BudgetGate;
     readonly onReport: (error: unknown) => void;
     readonly reports: ReportGate;
+    readonly tasks: { readonly job: JobTask; readonly receipt: ReceiptTask };
   },
 ): Promise<CellHarness> {
   const { person } = options;
@@ -789,6 +854,7 @@ async function finishOpen(
     ),
     parts.reports,
   );
+  cell.tasks = parts.tasks;
 
   // What the last run left: live work, and routines whose time passed while the cell was down.
   // Read before this open creates anything and before resume(), so nothing has run yet.
@@ -812,8 +878,19 @@ async function finishOpen(
     await tx.doc(NoticeDeliveryDoc);
     await tx.doc(BudgetWaitsDoc);
     await tx.doc(HouseholdBudgetDoc);
-    // The cost marks of hand-off jobs (activity).
+    // The cost marks of hand-offs in flight at upgrade (activity).
     await tx.doc(JobsDoc);
+    // The job board, receipts, bookmark, custom templates, and tier caps.
+    const board = await tx.doc(JobBoardDoc);
+    await tx.doc(ReceiptsDoc);
+    await tx.doc(BookmarkDoc);
+    await tx.doc(TemplatesDoc);
+    await tx.doc(TierSettingsDoc);
+    for (const row of Object.values(board.jobs)) {
+      if (row.conversationId !== null && !ENDED.has(row.status)) {
+        await tx.doc(UsageDoc, row.conversationId);
+      }
+    }
     // Each conversation's ledger exists, so the limit watch can watch it from the start.
     await tx.doc(UsageDoc, ROOT_CONVERSATION_ID);
     for (const record of Object.values((await tx.doc(RosterDoc)).specialists)) {

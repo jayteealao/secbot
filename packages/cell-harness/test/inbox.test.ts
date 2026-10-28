@@ -3,16 +3,11 @@
 // result unpulled for 30 minutes sends one too, across a restart.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Message } from "@earendil-works/pi-ai";
-import {
-  defineExtension,
-  type EntryRecord,
-  ROOT_CONVERSATION_ID,
-  type TaskId,
-} from "@earendil-works/pi-durable";
+import { type EntryRecord, ROOT_CONVERSATION_ID, type TaskId } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobBoardDoc, type ResultKind } from "../src/docs.ts";
 import { createJobRow, pullResult, storeResult, waitingCounts } from "../src/job-board.ts";
-import { createJobTask } from "../src/job-task.ts";
+import type { JobTask } from "../src/job-task.ts";
 import { RESULT_WAKE_MS } from "../src/release-defaults.ts";
 import { wakesOf } from "../src/wake-times.ts";
 import {
@@ -52,32 +47,26 @@ const wakeNotices = async (t: TestCell) =>
     .map(textOf)
     .filter((text) => text.startsWith("[job "));
 
-/** A cell whose test extension registers the job task (the lead's tools come later). */
+/** A cell and its job task, which tests start directly (as `start_job` does). */
 async function openJobCell(options: {
   readonly respond?: Responder;
   readonly now?: () => number;
   readonly storage?: FakeCelldStorage;
-}): Promise<{ t: TestCell; JobTask: ReturnType<typeof createJobTask> }> {
-  let opened: TestCell | undefined;
-  const JobTask = createJobTask({
-    person: "owner",
-    gate: () => undefined,
-    timeZone: "UTC",
-    extensions: () => opened?.cell.extensions.specialist ?? [],
-  });
-  opened = await openTestCell({
+}): Promise<{ t: TestCell; JobTask: JobTask }> {
+  const opened = await openTestCell({
     gateway: createFauxGateway(options.respond ?? jobResponder),
-    extensions: [defineExtension({ name: "test-jobs", tasks: [JobTask] })],
     ...(options.now === undefined ? {} : { now: options.now }),
     ...(options.storage === undefined ? {} : { storage: options.storage }),
   });
+  const JobTask = opened.cell.tasks?.job;
+  if (JobTask === undefined) throw new Error("no job task");
   return { t: opened, JobTask };
 }
 
 /** Starts job `n` (with an optional result stored ahead, as later producers will) and its task. */
 async function startJob(
   t: TestCell,
-  JobTask: ReturnType<typeof createJobTask>,
+  JobTask: JobTask,
   stored?: { readonly kind: ResultKind; readonly text: string },
 ): Promise<{ number: number; taskId: TaskId<null> }> {
   return t.cell.harness.commit(async (tx) => {
@@ -162,7 +151,7 @@ describe("the results inbox", () => {
     });
     const risky = await startJob(t, JobTask, {
       kind: "risky",
-      text: "Booked the flight for £412.",
+      text: "Booked the Tuesday flight.",
     });
     await t.cell.harness.waitForTask(question.taskId, BACKGROUND_CONTEXT);
     await t.cell.harness.waitForTask(risky.taskId, BACKGROUND_CONTEXT);
@@ -174,7 +163,7 @@ describe("the results inbox", () => {
     ]);
     const lead = JSON.stringify(await leadEntries(t));
     expect(lead).not.toContain("LIS or OPO");
-    expect(lead).not.toContain("412");
+    expect(lead).not.toContain("Tuesday flight");
   });
 
   it("sends one wake notice for a routine result unpulled for 30 minutes, across a restart (AC-12)", async () => {

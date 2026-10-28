@@ -1,12 +1,10 @@
 // Jobs: a job task owns a fresh conversation, runs the brief there, and stores the answer on the
 // board as a waiting result. The lead's tools that start and steer jobs are covered below.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { defineExtension, ROOT_CONVERSATION_ID, type TaskId } from "@earendil-works/pi-durable";
+import { ROOT_CONVERSATION_ID, type TaskId } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ActivityPageDoc, JobBoardDoc } from "../src/docs.ts";
 import { createJobRow } from "../src/job-board.ts";
-import { createJobTask } from "../src/job-task.ts";
-import { createJobsExtension } from "../src/lead-tools.ts";
 import {
   createFauxGateway,
   loggedEvents,
@@ -28,19 +26,10 @@ afterEach(async () => {
 describe("the job task", () => {
   it("a job task owns a fresh conversation and stores its answer as a waiting result", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    let opened: TestCell | undefined;
-    const JobTask = createJobTask({
-      person: "owner",
-      gate: () => undefined,
-      timeZone: "UTC",
-      extensions: () => opened?.cell.extensions.specialist ?? [],
-    });
-    test = await openTestCell({
-      gateway: createFauxGateway(jobResponder),
-      extensions: [defineExtension({ name: "test-jobs", tasks: [JobTask] })],
-    });
-    opened = test;
+    test = await openTestCell({ gateway: createFauxGateway(jobResponder) });
     const { harness } = test.cell;
+    const JobTask = test.cell.tasks?.job;
+    if (JobTask === undefined) throw new Error("no job task");
     const taskId = await harness.commit(async (tx) => {
       const row = await createJobRow(tx, {
         title: "flights to Lisbon",
@@ -121,22 +110,9 @@ describe("the job task", () => {
   });
 });
 
-/** A cell with the lead's job tools on every list (wired for the lead only once the harness is). */
-async function openToolCell(respond: Responder = jobResponder): Promise<TestCell> {
-  let opened: TestCell | undefined;
-  const jobs = createJobsExtension({
-    person: "owner",
-    gate: () => undefined,
-    timeZone: "UTC",
-    models: () => gateway.models,
-    jobExtensions: () =>
-      (opened?.cell.extensions.specialist ?? []).filter((each) => each.name !== "secbot-jobs"),
-    now: Date.now,
-  });
-  const gateway = createFauxGateway(respond);
-  opened = await openTestCell({ gateway, extensions: [jobs.extension] });
-  return opened;
-}
+/** A cell whose faux lead follows `respond`. */
+const openToolCell = (respond: Responder = jobResponder): Promise<TestCell> =>
+  openTestCell({ gateway: createFauxGateway(respond) });
 
 const answers = (t: TestCell) => answersOf(t.cell.root);
 const toolResults = (t: TestCell) => toolResultsOf(t.cell.root);

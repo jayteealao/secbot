@@ -4,7 +4,6 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReceiptDoc, ReceiptsDoc } from "../src/docs.ts";
 import type { HouseholdClient } from "../src/household-tools.ts";
-import { createJobsExtension } from "../src/lead-tools.ts";
 import {
   createFauxGateway,
   createHouseholdStub,
@@ -41,22 +40,8 @@ function heldHousehold() {
   return { stub, client, release: () => open(), reads: () => reads };
 }
 
-async function openRemoteCell(household: HouseholdClient): Promise<TestCell> {
-  let opened: TestCell | undefined;
-  const gateway = createFauxGateway(jobResponder);
-  const jobs = createJobsExtension({
-    person: "owner",
-    gate: () => undefined,
-    timeZone: "UTC",
-    models: () => gateway.models,
-    jobExtensions: () =>
-      (opened?.cell.extensions.specialist ?? []).filter((each) => each.name !== "secbot-jobs"),
-    now: Date.now,
-    remote: { person: "owner", household: () => household },
-  });
-  opened = await openTestCell({ gateway, household, extensions: [jobs.extension] });
-  return opened;
-}
+const openRemoteCell = (household: HouseholdClient): Promise<TestCell> =>
+  openTestCell({ gateway: createFauxGateway(jobResponder), household });
 
 describe("background receipts", () => {
   it("answers a held household read with a receipt in the round, and stores the result", async () => {
