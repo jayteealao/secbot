@@ -6,15 +6,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReceiptDoc, ReceiptsDoc } from "../src/docs.ts";
 import type { HouseholdClient } from "../src/household-tools.ts";
 import type { SecretsClient } from "../src/secret-tools.ts";
+import { job, leadCalls } from "./escalation-helpers.ts";
 import {
   createFauxGateway,
   createHouseholdStub,
+  fauxAssistantMessage,
+  fauxText,
   openTestCell,
+  resultReviewer,
   type TestCell,
   until,
 } from "./fixtures.ts";
 import { answersOf, toolResultsOf } from "./job-helpers.ts";
-import { createHold, jobResponder } from "./responders.ts";
+import { createHold, jobResponder, startJobLine } from "./responders.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -157,6 +161,11 @@ const CASES: readonly (readonly [string, Record<string, unknown>])[] = [
   ["read_job", { job: 1 }],
   ["job_result", { job: 1 }],
   ["set_job", { job: 1, effort: "high" }],
+  ["job_transcript", { job: 1 }],
+  ["mark_risky", { job: 1, reason: "it books trains" }],
+  ["answer_job", { job: 1, answer: "the morning train" }],
+  ["ask_person", { job: 1 }],
+  ["restart_job", { job: 9, note: "No job 9: the round still ends with a refusal." }],
   ["read_result", { receipt: "r1" }],
   ["note_bookmark", { sentence: "I was checking the tools." }],
   ["resume_work", {}],
@@ -228,4 +237,39 @@ describe("every lead tool returns in its round (AC-9)", () => {
     expect(answers).toContain("receipt r2 (household_change)");
     expect(answers).toContain("pong");
   }, 60_000);
+});
+
+describe("job_result on a result under review (AC-9)", () => {
+  it("returns in its round with the review hold while the reviewer is held", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const models = createHold();
+    // The reviewer's requests are held: its instructions name no specialist.
+    models.hold("unknown");
+    test = await openTestCell({
+      gateway: createFauxGateway(
+        models.wrap(
+          resultReviewer((request) =>
+            request.role === "health"
+              ? fauxAssistantMessage([fauxText("Sleep eight hours.")])
+              : jobResponder(request),
+          ),
+        ),
+      ),
+    });
+    const t = test;
+    await (
+      await t.cell.submit(
+        startJobLine({ title: "sleep", brief: "sleep advice", template: "health" }),
+        "rv-1",
+      )
+    ).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await job(t))?.review?.status === "running");
+    await until(() => models.waiting("unknown") === 1);
+    expect(await leadCalls(t, "job_result", { job: 1 })).toBe(
+      "job 1's result is under review; you get a notice when it is done.",
+    );
+    expect((await job(t))?.result?.pulledAt).toBeNull();
+    models.release("unknown");
+    await until(async () => (await job(t))?.review?.status === "passed");
+  });
 });
