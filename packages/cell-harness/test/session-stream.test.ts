@@ -3,16 +3,20 @@
 // person; the delivered callback lets the cell advance the device's cursor.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { questionNotice } from "../src/job-tools.ts";
+import { askPersonText } from "../src/lead-tools.ts";
 import type { Frame } from "../src/session-stream.ts";
 import {
   createFauxGateway,
   fauxAssistantMessage,
   fauxText,
+  fauxToolCall,
   openTestCell,
+  type Responder,
   type TestCell,
   until,
 } from "./fixtures.ts";
-import { researchResponder } from "./responders.ts";
+import { jobResponder, researchResponder, startJobLine } from "./responders.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -83,4 +87,55 @@ describe("session frames", () => {
     expect(parts.join("")).toBe(long);
     expect(frames.at(-1)).toMatchObject({ type: "answer", text: long });
   }, 30_000);
+});
+
+describe("the question frame", () => {
+  it("follows the lead's answer that asks the person, once", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const respond: Responder = (request) => {
+      if (request.role === "research") {
+        return request.last?.role === "toolResult"
+          ? fauxAssistantMessage([fauxText(`Filled in: ${request.lastText}`)])
+          : fauxAssistantMessage(
+              [fauxToolCall("ask_lead", { question: "Which address goes on the form?" })],
+              { stopReason: "toolUse" },
+            );
+      }
+      if (request.lastText === questionNotice(1)) {
+        return fauxAssistantMessage([fauxToolCall("ask_person", { job: 1 })], {
+          stopReason: "toolUse",
+        });
+      }
+      if (request.lastText === askPersonText(1)) {
+        return fauxAssistantMessage([
+          fauxText("The passport job needs one fact from you: home or the office?"),
+        ]);
+      }
+      return jobResponder(request);
+    };
+    test = await openTestCell({ gateway: createFauxGateway(respond) });
+    const frames: Frame[] = [];
+    const session = await test.cell.session((frame) => frames.push(frame));
+    await (
+      await test.cell.submit(
+        startJobLine({
+          title: "renew passport form",
+          brief: "fill the form",
+          template: "research",
+        }),
+        "q-1",
+      )
+    ).wait(BACKGROUND_CONTEXT);
+    await until(() => frames.some((frame) => frame.type === "question"));
+    await test.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    await session.stop();
+    const kinds = frames
+      .filter((frame) => frame.type === "answer" || frame.type === "question")
+      .map((frame) => (frame.type === "answer" ? `answer: ${frame.text}` : frame));
+    expect(kinds.slice(-2)).toEqual([
+      "answer: The passport job needs one fact from you: home or the office?",
+      { type: "question", job: 1, title: "renew passport form" },
+    ]);
+    expect(frames.filter((frame) => frame.type === "question")).toHaveLength(1);
+  });
 });

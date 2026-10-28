@@ -6,13 +6,23 @@
  * only reports what was committed; it never decides where a message goes.
  *
  * After each answer the stream sends a `usage` frame (month-to-date spend against the limit, and
- * the guard mode), and a `notice` frame when a limit line is reached.
+ * the guard mode), and a `notice` frame when a limit line is reached. A job question the lead put
+ * to the person goes out as a `question` frame right after the lead's next answer, so the lead's
+ * own words come first.
  */
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { type Harness, ROOT_CONVERSATION_ID, watchEvents } from "@earendil-works/pi-durable";
 import { type HeldCallView, readHeld, viewOf } from "./approvals.ts";
 import { leadMessageOf } from "./delivery.ts";
-import { ApprovalsDoc, type LimitNotice, LimitNoticesDoc, ModelHealthDoc } from "./docs.ts";
+import {
+  ApprovalsDoc,
+  type JobRow,
+  JobBoardDoc,
+  type LimitNotice,
+  LimitNoticesDoc,
+  ModelHealthDoc,
+} from "./docs.ts";
+import { openQuestion } from "./job-board.ts";
 import type { UsageLine, WaitingItem } from "./limits.ts";
 
 export type Frame =
@@ -56,7 +66,12 @@ export type Frame =
       readonly type: "notice";
       readonly notice: LimitNotice;
       readonly waiting: readonly WaitingItem[];
-    };
+    }
+  /**
+   * A job's question put to the person: sent once, after the lead's answer that asks it, and for
+   * each open one when a session opens. The person answers with the job's answer route.
+   */
+  | { readonly type: "question"; readonly job: number; readonly title: string };
 
 /** Every frame type, for checks that the documented protocol matches this union. */
 export const FRAME_TYPES = [
@@ -72,7 +87,20 @@ export const FRAME_TYPES = [
   "held",
   "usage",
   "notice",
+  "question",
 ] as const satisfies readonly Frame["type"][];
+
+/** The open job questions put to the person, as `<job>:<question number>` keys with their rows. */
+export function personQuestions(
+  jobs: Readonly<Record<string, JobRow>>,
+): { readonly key: string; readonly job: number; readonly title: string }[] {
+  return Object.values(jobs).flatMap((row) => {
+    const open = openQuestion(row);
+    return open === null || !open.toPerson || open.personAskedAt === null
+      ? []
+      : [{ key: `${row.number}:${open.number}`, job: row.number, title: row.title }];
+  });
+}
 
 export interface SessionStream {
   stop(): Promise<void>;
@@ -96,6 +124,20 @@ export async function openSessionStream(
   usage?: UsageSource,
 ): Promise<SessionStream> {
   const context = BACKGROUND_CONTEXT;
+  // Questions open when the stream starts are sent by each session as it opens.
+  const asked = new Set(
+    personQuestions((await harness.snapshot(JobBoardDoc, context))?.jobs ?? {}).map(
+      (question) => question.key,
+    ),
+  );
+  const askQuestions = async () => {
+    const board = await harness.snapshot(JobBoardDoc, context);
+    for (const question of personQuestions(board?.jobs ?? {})) {
+      if (asked.has(question.key)) continue;
+      asked.add(question.key);
+      send({ type: "question", job: question.job, title: question.title });
+    }
+  };
   const events = await watchEvents(harness, ROOT_CONVERSATION_ID, context);
   // The in-flight answer's text blocks by content index, and how much of it was already sent. A
   // block can arrive whole (`text_start`, `block`, `message`) or as appends (`text_delta`), and the
@@ -157,6 +199,8 @@ export async function openSessionStream(
           send({ type: "answer", entryId: message.entryId, text: message.text });
           // The answer's own cost is in the same commit as its entry, so the line includes it.
           if (usage !== undefined) send({ type: "usage", usage: await usage.usage() });
+          // A question the lead just put to the person follows the lead's own words.
+          await askQuestions();
         } else {
           send({
             type: "followup",
