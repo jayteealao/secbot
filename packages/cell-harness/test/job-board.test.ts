@@ -70,6 +70,8 @@ const row: JobRow = {
   review: null,
   requestedBy: null,
   resumedAt: null,
+  outside: null,
+  block: null,
 };
 
 /** A row with every field this slice adds set. */
@@ -109,13 +111,26 @@ const fullRow: JobRow = {
     at: 2_400,
   },
   requestedBy: 4,
+  outside: { at: 1_200, kinds: ["page", "mail"], tools: ["read_fixture_page", "read_mail"] },
+  block: { cause: "hit", kind: "page", tool: "read_fixture_page", chunk: 3, at: 2_500 },
 };
 
 describe("the job board upgrade", () => {
-  it("is version 2 and migrates a version-1 board, field by field", () => {
-    expect(JobBoardDoc.definition.version).toBe(2);
-    const { pause, question, risky, toolsUsed, runs, review, requestedBy, resumedAt, ...v1 } =
-      row;
+  it("is version 3 and migrates a version-1 board, field by field", () => {
+    expect(JobBoardDoc.definition.version).toBe(3);
+    const {
+      pause,
+      question,
+      risky,
+      toolsUsed,
+      runs,
+      review,
+      requestedBy,
+      resumedAt,
+      outside,
+      block,
+      ...v1
+    } = row;
     const migrated = JobBoardDoc.definition.migrate?.(
       { nextNumber: 2, jobs: { "1": v1 }, byConversation: { "7": 1 } } as never,
       1,
@@ -129,7 +144,23 @@ describe("the job board upgrade", () => {
     expect(upgraded?.review).toBeNull();
     expect(upgraded?.requestedBy).toBeNull();
     expect(upgraded?.resumedAt).toBeNull();
+    expect(upgraded?.outside).toBeNull();
+    expect(upgraded?.block).toBeNull();
     expect(migrated).toEqual({ nextNumber: 2, jobs: { "1": row }, byConversation: { "7": 1 } });
+  });
+
+  it("migrates a version-2 board, keeping every field and adding the outside and block fields", () => {
+    const { outside, block, ...v2 } = fullRow;
+    const migrated = JobBoardDoc.definition.migrate?.(
+      { nextNumber: 2, jobs: { "1": v2 }, byConversation: {} } as never,
+      2,
+    );
+    const upgraded = migrated?.jobs["1"];
+    expect(upgraded?.outside).toBeNull();
+    expect(upgraded?.block).toBeNull();
+    for (const [field, value] of Object.entries(v2)) {
+      expect(upgraded?.[field as keyof JobRow]).toEqual(value);
+    }
   });
 
   it("round-trips every new field through a commit and a snapshot", async () => {

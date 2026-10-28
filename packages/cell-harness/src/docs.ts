@@ -16,6 +16,7 @@ import {
   DEFAULT_DECISION_ADAPTER,
   type DecisionAdapter,
   type JobEffort,
+  type OutsideKind,
   type Tier,
 } from "./release-defaults.ts";
 import type { Rule } from "./rules.ts";
@@ -318,7 +319,9 @@ export const HouseholdBudgetDoc = defineDoc<{
 export type JobPriority = "urgent" | "deadline" | "routine" | "research";
 /**
  * A job's status. `paused` waits for the lead's escalation move (cap or loop guard); `waiting`
- * waits for an answer to its question; `rejected` is a risky result the reviewer turned down.
+ * waits for an answer to its question; `rejected` is a risky result the reviewer turned down;
+ * `blocked` is a job the content check stopped (outside content tried to give its agent orders, or
+ * the check could not answer).
  */
 export type JobStatus =
   | "queued"
@@ -328,7 +331,8 @@ export type JobStatus =
   | "done"
   | "failed"
   | "rejected"
-  | "stopped";
+  | "stopped"
+  | "blocked";
 /** What a waiting result is: the inbox wakes the lead at once for every kind but `routine`. */
 export type ResultKind = "failure" | "question" | "risky" | "routine";
 
@@ -383,10 +387,34 @@ export type JobReview = {
   at: number;
 };
 
-/** The fields this slice adds to every row, empty (a new row, and a row of a version-1 board). */
+/** The outside content a job has read: when first, which kinds, and through which tools. */
+export type JobOutside = { at: number; kinds: OutsideKind[]; tools: string[] };
+
+/**
+ * Why the content check stopped a job: it found orders to the agent (`hit`), it timed out, or it
+ * failed; the kind of content, the reading tool, the chunk (when one chunk answered), and when.
+ */
+export type JobBlock = {
+  cause: "hit" | "timeout" | "error";
+  kind: OutsideKind;
+  tool: string;
+  chunk: number | null;
+  at: number;
+};
+
+/** The fields added to rows after version 1, empty (a new row, and a row of an older board). */
 export const emptyJobExtras = (): Pick<
   JobRow,
-  "pause" | "question" | "risky" | "toolsUsed" | "runs" | "review" | "requestedBy" | "resumedAt"
+  | "pause"
+  | "question"
+  | "risky"
+  | "toolsUsed"
+  | "runs"
+  | "review"
+  | "requestedBy"
+  | "resumedAt"
+  | "outside"
+  | "block"
 > => ({
   pause: null,
   question: null,
@@ -396,6 +424,8 @@ export const emptyJobExtras = (): Pick<
   review: null,
   requestedBy: null,
   resumedAt: null,
+  outside: null,
+  block: null,
 });
 
 /** One job on the board. Numbers grow per cell and are never reused. */
@@ -442,6 +472,13 @@ export type JobRow = {
    * counts only failing steps after it. Null when never resumed.
    */
   resumedAt: number | null;
+  /**
+   * The outside content the job has read (web pages, mails, files), or null. Kept across restarts:
+   * an outside action of the job needs the reviewer's yes.
+   */
+  outside: JobOutside | null;
+  /** Why the content check stopped the job; null unless it is `blocked`. */
+  block: JobBlock | null;
 };
 
 /**
@@ -454,7 +491,7 @@ export const JobBoardDoc = defineDoc<{
   byConversation: Record<string, number>;
 }>({
   kind: "secbot.job-board",
-  version: 2,
+  version: 3,
   scope: "session",
   initial: () => ({ nextNumber: 1, jobs: {}, byConversation: {} }),
   migrate: (value) => migrateJobBoard(value),
