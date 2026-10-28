@@ -15,7 +15,9 @@ import {
 import { DECISION_STATE_LIMIT } from "../src/release-defaults.ts";
 import { DECISION_EXAMPLES } from "./decision-examples.ts";
 import {
+  cleanAt,
   DECISIONS_ROUTE,
+  injectionAt,
   riskyAt,
   routineAt,
   STUB_STATUSES,
@@ -103,6 +105,42 @@ describe("the Decisions API client", () => {
     const failure = await model.ask(state, "start_job").catch((error: unknown) => error);
     expect((failure as DecisionFailure).cause).toBe("no-key");
     expect(stub.seen).toHaveLength(0);
+  });
+});
+
+describe("the stub decisions route", () => {
+  const post = async (questions: Record<string, unknown>) => {
+    const response = await fetch(new URL(DECISIONS_ROUTE, stub.origin), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "typesafe/jev-1.13", state: { content: "x" }, questions }),
+    });
+    return (await response.json()) as { answers: Record<string, { choice: string }> };
+  };
+
+  it("answers under the key of each asked question", async () => {
+    stub.decision = injectionAt(0.9);
+    const body = await post({ injection: { type: "choice" } });
+    expect(Object.keys(body.answers)).toEqual(["injection"]);
+    expect(body.answers.injection).toMatchObject({
+      choice: "injection",
+      probabilities: {
+        clean: expect.closeTo(0.1),
+        injection: expect.closeTo(0.72),
+        unclear: expect.closeTo(0.18),
+      },
+    });
+  });
+
+  it("lets a test answer from the state's text", async () => {
+    stub.decide = (body) =>
+      JSON.stringify(body.state).includes("order") ? injectionAt(0.8) : cleanAt(0.1);
+    expect((await post({ injection: { type: "choice" } })).answers.injection?.choice).toBe("clean");
+    expect(cleanAt(0.1).probabilities).toEqual({
+      clean: 0.9,
+      injection: 0.05,
+      unclear: 0.05,
+    });
   });
 });
 
