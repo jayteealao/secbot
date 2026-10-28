@@ -231,6 +231,7 @@ export {
   type DecisionAdapter,
   GUARD_USAGE_KEYS,
   HOLD_MS,
+  JOB_TEMPLATES,
   LEAD_ROLE,
   LIMIT_LINES,
   LIMIT_MAX_USD,
@@ -239,6 +240,8 @@ export {
   REVIEWER_ROLE,
   SECRET_WORD_PATTERN,
   STARTER_SPECIALISTS,
+  TIER_MODELS,
+  TIERS,
 } from "./release-defaults.ts";
 export { REMINDER_PREFIX, type ReminderPayload, scheduleReminder } from "./reminder.ts";
 export {

@@ -57,6 +57,7 @@ import {
   type Reviewer,
   type Rule,
   SECRET_WORD_PATTERN,
+  TIER_MODELS,
   thresholdFor,
 } from "@secbot/cell-harness";
 import type { CelldCellStorage } from "@secbot/cell-storage";
@@ -481,7 +482,9 @@ export class GuardBenchCell {
   private models() {
     const faux = fauxProvider({
       provider: "openrouter",
-      models: [DEFAULT_LEAD_MODEL, DEFAULT_SPECIALIST_MODEL].map((id) => ({ id })),
+      models: [
+        ...new Set([DEFAULT_LEAD_MODEL, DEFAULT_SPECIALIST_MODEL, ...Object.values(TIER_MODELS)]),
+      ].map((id) => ({ id })),
     });
     faux.setResponses(
       Array.from(

@@ -373,8 +373,8 @@ export function judgeCrash(before, armed, after) {
   );
   check(
     "crash-job-and-cut-off-call",
-    after.followupReported === true && (after.calls?.specialist ?? 0) >= 1,
-    `specialist calls after the restart: ${after.calls?.specialist ?? 0}; answer relayed: ${after.followupReported}`,
+    after.resultStored === true && (after.calls?.specialist ?? 0) >= 1,
+    `job model calls after the restart: ${after.calls?.specialist ?? 0}; result stored: ${after.resultStored}`,
   );
   check(
     "crash-alarm",
@@ -450,7 +450,7 @@ export async function durability({ env, "crash-only": crashOnly, "down-seconds":
   await runRemote(["crash", "--env", env]);
   const after = await labUntil(
     env,
-    (state) => state.followupReported === true && state.liveUntimed === 0,
+    (state) => state.resultStored === true && state.liveUntimed === 0,
     300_000,
   );
   results.push(...judgeCrash(before, armed, after));

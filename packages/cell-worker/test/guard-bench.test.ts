@@ -253,7 +253,7 @@ describe("GuardBenchCell", () => {
     const results = await examplesFinished(cell);
     expect(results.allOk).toBe(false);
     expect(results.tuning.examples.filter((example) => !example.ok)).toEqual([
-      expect.objectContaining({ tool: "handoff", expected: "mark", marked: [false] }),
+      expect.objectContaining({ tool: "start_job", expected: "mark", marked: [false] }),
     ]);
   }, 60_000);
 
