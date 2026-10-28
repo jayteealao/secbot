@@ -160,3 +160,47 @@ describe("the lead's prompt sections", () => {
     );
   });
 });
+
+describe("blocked jobs in the lead's jobs section", () => {
+  const failure = (at: number, text: string) =>
+    ({ kind: "failure", text, at, pulledAt: null, wokeAt: null }) as const;
+
+  it("lists a blocked job with its reason until its result is pulled, like a failure", () => {
+    const board = {
+      nextNumber: 4,
+      byConversation: {},
+      jobs: {
+        "1": row(1, {
+          status: "blocked",
+          endedAt: 2,
+          block: { cause: "hit", kind: "page", tool: "read_fixture_page", chunk: 0, at: 2 },
+          outside: { at: 1, kinds: ["page"], tools: ["read_fixture_page"] },
+          result: failure(2, "a page tried to give the agent orders; nothing from it was used"),
+        }),
+        "2": row(2, {
+          status: "blocked",
+          endedAt: 3,
+          block: { cause: "timeout", kind: "mail", tool: "read_mail", chunk: 1, at: 3 },
+          result: failure(3, "the content check did not answer; stopped to be safe"),
+        }),
+        "3": row(3, {
+          status: "blocked",
+          endedAt: 4,
+          block: { cause: "error", kind: "file", tool: "read_file", chunk: null, at: 4 },
+          result: {
+            ...failure(4, "the content check did not answer; stopped to be safe"),
+            pulledAt: 5,
+          },
+        }),
+      },
+    };
+    expect(jobsSection(board, templatesOf(), []).split("\n").slice(1)).toEqual([
+      "No live jobs.",
+      "Blocked jobs (read why with job_result; restart one only when the person asks):",
+      "#1 research mid/medium blocked $0.12/$1 job title 1 (blocked: a page tried to give the agent orders; nothing from it was used)",
+      "#2 research mid/medium blocked $0.12/$1 job title 2 (blocked: the content check did not answer; stopped to be safe)",
+      "and 3 finished or stopped",
+      "results waiting: failure 2, question 0, risky 0, routine 0 (pull them with job_result or read_result)",
+    ]);
+  });
+});

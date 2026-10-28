@@ -17,6 +17,7 @@ import {
 } from "./docs.ts";
 import {
   type BoardState,
+  blockReason,
   ENDED,
   liveRows,
   openQuestion,
@@ -81,6 +82,9 @@ export function jobStateDetails(row: JobRow): string {
   if (row.review?.status === "running") details.push(`review running on ${row.review.model}`);
   if (row.review?.status === "rejected") details.push(`review rejected: ${row.review.reason}`);
   if (row.requestedBy !== null) details.push(`requested by job ${row.requestedBy}`);
+  if (row.status === "blocked" && row.block !== null) {
+    details.push(`blocked: ${blockReason(row.block)}`);
+  }
   const { raises, restarts } = row.attempts;
   if (raises > 0 || restarts > 0) {
     details.push(
@@ -90,11 +94,15 @@ export function jobStateDetails(row: JobRow): string {
   return details.length === 0 ? "" : ` (${details.join("; ")})`;
 }
 
+/** A job's line in the jobs section. */
+const jobLine = (row: JobRow) =>
+  `#${row.number} ${row.template} ${row.tier}/${row.effort.applied} ${row.status} $${row.cost.toFixed(2)}/$${row.cap} ${row.title}${jobStateDetails(row)}`;
+
 /**
  * The jobs section: the templates with their start tiers, each live job (and each whose result is
  * under review) as `#<n> <template> <tier>/<applied effort> <status> $<cost>/$<cap> <title>` and
- * its state details, how many ended, and what waits for the lead by kind. Results never enter the
- * lead's conversation by themselves.
+ * its state details, each blocked job with its reason until its result is pulled, how many ended,
+ * and what waits for the lead by kind. Results never enter the lead's conversation by themselves.
  */
 export function jobsSection(
   board: BoardState,
@@ -111,11 +119,16 @@ export function jobsSection(
   if (live.length === 0) lines.push("No live jobs.");
   else {
     lines.push("Live jobs:");
-    for (const row of live) {
-      lines.push(
-        `#${row.number} ${row.template} ${row.tier}/${row.effort.applied} ${row.status} $${row.cost.toFixed(2)}/$${row.cap} ${row.title}${jobStateDetails(row)}`,
-      );
-    }
+    for (const row of live) lines.push(jobLine(row));
+  }
+  const blocked = Object.values(board.jobs)
+    .filter((row) => row.status === "blocked" && row.result?.pulledAt === null)
+    .sort((a, b) => a.number - b.number);
+  if (blocked.length > 0) {
+    lines.push(
+      "Blocked jobs (read why with job_result; restart one only when the person asks):",
+      ...blocked.map(jobLine),
+    );
   }
   const rest = restCount(board);
   if (rest > 0) lines.push(`and ${rest} finished or stopped`);
