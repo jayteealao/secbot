@@ -86,6 +86,10 @@ export interface HouseholdStubLike extends HouseholdClient {
   history?(document: string, itemId?: string): Promise<unknown>;
   status?(): Promise<{ status: "up"; version: string; roles: string[] }>;
   alarmReport?(): Promise<unknown>;
+  /** The household's shared jobs, as a board view (absent on stubs built before the board). */
+  jobs?(): Promise<BoardView>;
+  /** The owner's stop of the household's shared jobs. */
+  stopJobs?(): Promise<StopAnswer>;
 }
 
 export interface HouseholdNamespaceLike {

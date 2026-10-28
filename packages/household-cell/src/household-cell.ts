@@ -18,6 +18,7 @@ import type { Harness } from "@earendil-works/pi-durable";
 import {
   type AlarmReport,
   alarmVerdict,
+  type BoardView,
   type BudgetBoard,
   type BudgetSettings,
   CellAlarm,
@@ -33,6 +34,7 @@ import {
   type NextWake,
   openRoutineHarness,
   type ReportSpendResult,
+  type StopAnswer,
   type WakeSummary,
 } from "@secbot/cell-harness";
 import {
@@ -224,6 +226,31 @@ export class HouseholdCell {
   async status(): Promise<{ status: "up"; version: string; roles: string[] }> {
     await this.open();
     return { status: "up", version: this.options.version ?? "0.0.0-dev", roles: [] };
+  }
+
+  /**
+   * RPC: the household's shared jobs as a board view for the owner. The household cell runs no
+   * agent yet, so the view is empty.
+   */
+  async jobs(): Promise<BoardView> {
+    await this.open();
+    return {
+      person: HOUSEHOLD_CELL_NAME,
+      mode: "shadow",
+      live: 0,
+      waiting: 0,
+      rows: [],
+      finished: [],
+      shown: 0,
+      capacity: null,
+      templates: [],
+    };
+  }
+
+  /** RPC: the owner's stop of the household's shared jobs; nothing runs here yet. */
+  async stopJobs(): Promise<StopAnswer> {
+    await this.open();
+    return { jobs: 0, turn: false };
   }
 
   /**

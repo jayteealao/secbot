@@ -127,6 +127,23 @@ describe("HouseholdCell", () => {
     expect((await household.fetch(new Request("http://cell/other"))).status).toBe(404);
   });
 
+  it("answers an empty shared-jobs board and a stop with nothing to stop", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { household } = setup();
+    expect(await household.jobs()).toEqual({
+      person: "household",
+      mode: "shadow",
+      live: 0,
+      waiting: 0,
+      rows: [],
+      finished: [],
+      shown: 0,
+      capacity: null,
+      templates: [],
+    });
+    expect(await household.stopJobs()).toEqual({ jobs: 0, turn: false });
+  });
+
   it("pings its heartbeat when its alarm fires late, and re-arms to the next wake", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     let clock = Date.now();
