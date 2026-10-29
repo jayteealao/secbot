@@ -101,8 +101,8 @@ const budgetOfConversation = (conversation: LedgerConversation): BudgetName =>
  * from the board: its current and earlier runs (role: its template) and its result review (role
  * and layer reviewer, on the template's budget). A conversation the month's start retired (its
  * job ended before the closing month and it spent nothing in it, or it was left out then) is left
- * out; a job conversation made after the start (a late review) and one with a baseline (a shared
- * job's last charge) still count.
+ * out while its job stays ended; a job conversation made after the start (a late review) and one
+ * the start kept (a shared job's last charge) still count, and so do a resumed job's.
  */
 export async function ledgerConversations(
   reader: Pick<DocumentReader, "snapshot">,
@@ -120,14 +120,14 @@ export async function ledgerConversations(
   let old = false;
   const add = (conversation: LedgerConversation) => {
     if (listed.has(conversation.conversationId)) return;
-    // A conversation of a job that ended before this month: with a baseline, its spend since the
-    // month's start counts; retired at the start, all its spend is in earlier months; made after
-    // the start (a review the lead pulled late), all its spend is in this month.
+    // A conversation of a job that ended before this month: retired at the start, all its spend
+    // is in earlier months; otherwise its spend since its baseline counts, or all of it when it
+    // was made after the start (a review the lead pulled late). A job resumed since is not old,
+    // so its retired conversations count again from the baseline the retirement kept.
     const id = conversation.conversationId;
     if (
       old &&
-      !Object.hasOwn(baseline, id) &&
-      (retired === undefined || Object.hasOwn(retired, id))
+      (retired === undefined ? !Object.hasOwn(baseline, id) : Object.hasOwn(retired, id))
     ) {
       return;
     }
@@ -271,7 +271,7 @@ export const conversationTotal = (state: Readonly<UsageState> | undefined): numb
  * first read). A roll keeps the closing month's person spend in `closed`, takes every listed
  * conversation's totals as the new baseline, retires each job conversation that will spend no
  * more (its job ended before the closing month and it spent nothing in it, or it was not listed),
- * so later reads leave it out, and applies a time zone the owner set during the
+ * so later reads leave it out while it keeps its baseline for a resume, and applies a time zone the owner set during the
  * closing month. The first month of a cell has no baseline: what its conversations spent before
  * counts in it.
  */
@@ -306,8 +306,9 @@ export async function ensureMonth(
       const since = total(spendSince(costs, doc.baseline[conversationId]));
       if (!first && budgetOfConversation(conversation) === "person") closing += since;
       const done = endedAt !== undefined && endedAt !== null && endedAt < doc.startsAt;
+      // A retired conversation keeps its baseline, so a resumed job counts only its new spend.
+      if (!first) baseline[conversationId] = costs;
       if (!first && done && since === 0) retired[conversationId] = true;
-      else if (!first) baseline[conversationId] = costs;
       seen[conversationId] = sum(costs);
     }
     if (!first) {
@@ -316,7 +317,10 @@ export async function ensureMonth(
         const ids = [row.conversationId, ...row.runs.map((run) => run.conversationId)];
         ids.push(row.review?.conversationId ?? null);
         for (const each of ids) {
-          if (each !== null && !listed.has(String(each))) retired[String(each)] = true;
+          if (each === null || listed.has(String(each))) continue;
+          retired[String(each)] = true;
+          const kept = doc.baseline[String(each)];
+          if (kept !== undefined) baseline[String(each)] = kept;
         }
       }
     }

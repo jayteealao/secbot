@@ -360,10 +360,63 @@ describe("jobs that ended before the month", () => {
     expect(rolled.month).toBe("2026-11");
     // The lead's own conversation is listed too; only the job conversations matter here.
     const jobIds = Object.keys(rolled.baseline).filter((id) => id.startsWith("4"));
-    expect(jobIds.sort()).toEqual(["42", "43"]);
+    // A retired conversation keeps its baseline, so a resume counts only its new spend.
+    expect(jobIds.sort()).toEqual(["41", "42", "43"]);
     expect(Object.keys(rolled.retired ?? {}).sort()).toEqual(["41", "44"]);
     expect(ledger).toMatchObject({ closed: { "2026-10": 0.7 } });
     const after = await ledgerConversations(harness, BACKGROUND_CONTEXT);
     expect(after.filter((each) => each.job !== undefined).map((each) => each.job)).toEqual([2, 3]);
+  });
+
+  it("counts none of a resumed job's earlier cost after the roll retired it", async () => {
+    const { JobBoardDoc, MonthLedgerDoc } = await import("../src/docs.ts");
+    const usage = (cost: number) => ({ models: { x: { cost: { total: cost } } }, tools: {} });
+    // Job 1 was stopped in September, baselined at the October roll, and spent nothing in October.
+    const row: Record<string, unknown> = {
+      number: 1,
+      template: "research",
+      endedAt: Date.UTC(2026, 8, 20),
+      conversationId: 51,
+      runs: [],
+      review: null,
+    };
+    const ledger: Record<string, unknown> = {
+      month: "2026-10",
+      zone: "UTC",
+      startsAt: Date.UTC(2026, 9, 1),
+      endsAt: Date.UTC(2026, 10, 1),
+      nextZone: null,
+      baseline: { "51": { "m:x": 0.2 } },
+      hours: {},
+      seen: {},
+      retired: {},
+    };
+    const costs: Record<string, unknown> = { "51": usage(0.2) };
+    const docs = new Map<unknown, unknown>([
+      [JobBoardDoc, { jobs: { "1": row } }],
+      [MonthLedgerDoc, ledger],
+    ]);
+    const tx = {
+      doc: async (doc: unknown, id?: unknown) =>
+        doc === UsageDoc ? costs[String(id)] : docs.get(doc),
+    };
+    const harness = {
+      snapshot: async (doc: unknown, ...rest: unknown[]) =>
+        doc === UsageDoc ? costs[String(rest[0])] : docs.get(doc),
+      commit: async (work: (value: typeof tx) => Promise<unknown>) => work(tx),
+    } as unknown as Parameters<typeof readMonth>[0];
+    const november = await readMonth(harness, Date.UTC(2026, 10, 2), "UTC", BACKGROUND_CONTEXT);
+    expect(november.month).toBe("2026-11");
+    expect(Object.keys((ledger.retired as Record<string, true>) ?? {})).toEqual(["51"]);
+    // The owner resumes it on 5 November: its old conversation moves to runs, and the new run
+    // spends 0.05.
+    Object.assign(row, {
+      endedAt: null,
+      conversationId: 52,
+      runs: [{ conversationId: 51 }],
+    });
+    costs["52"] = usage(0.05);
+    const after = await readMonth(harness, Date.UTC(2026, 10, 5), "UTC", BACKGROUND_CONTEXT);
+    expect(after.person.spentUsd).toBeCloseTo(0.05, 6);
   });
 });
