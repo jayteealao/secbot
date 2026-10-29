@@ -178,8 +178,20 @@ export {
   type HouseholdDocument,
   type HouseholdItem,
   type ReportSpendResult,
+  type SharedCharge,
+  type SharedOp,
+  type SharedSyncAnswer,
+  type SharedSyncRequest,
+  type SharedSyncRow,
   type SpendReport,
 } from "./household-contract.ts";
+export {
+  HOUSEHOLD_JOB_TOOLS,
+  HOUSEHOLD_TOOL_REFUSAL,
+  type HouseholdAgent,
+  type HouseholdAgentOptions,
+  openHouseholdAgent,
+} from "./household-agent.ts";
 export {
   costFromReport,
   type HouseholdCostRow,

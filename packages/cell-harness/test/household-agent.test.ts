@@ -4,6 +4,7 @@
 // wake time.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
+import { openCelldStorageWithDatabase } from "@secbot/cell-storage";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobBoardDoc } from "../src/docs.ts";
 import {
@@ -39,7 +40,7 @@ async function open(respond: Responder): Promise<{ agent: HouseholdAgent; gatewa
   const gateway = createFauxGateway(resultReviewer(respond));
   agent = await openHouseholdAgent({
     cell: "household",
-    storage: new FakeCelldStorage(),
+    storage: (await openCelldStorageWithDatabase(new FakeCelldStorage())).storage,
     env: {},
     now: () => Date.now(),
     onReport: () => {},

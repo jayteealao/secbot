@@ -20,3 +20,4 @@ export {
   type HouseholdCellOptions,
   type HouseholdCellState,
 } from "./household-cell.ts";
+export { SHARED_OPS_MAX, validateSharedSync } from "./shared-sync.ts";

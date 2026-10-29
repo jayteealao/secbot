@@ -18,7 +18,6 @@ import {
   hook,
   ToolTask,
 } from "@earendil-works/pi-durable";
-import { type CelldStorage, openCelldStorageWithDatabase } from "@secbot/cell-storage";
 import { type AlertEnv, createAlerts } from "./alerts.ts";
 import { defaultSetTimer, type SetTimer } from "./approvals.ts";
 import { createBudgetExtension } from "./budget-gate.ts";
@@ -52,7 +51,8 @@ export const HOUSEHOLD_TOOL_REFUSAL =
 
 export interface HouseholdAgentOptions {
   readonly cell: string;
-  readonly storage: CelldStorage;
+  /** The cell's pi-durable storage (the household's documents share its database). */
+  readonly storage: Parameters<typeof Harness.open>[0];
   readonly env: HeartbeatEnv & GatewayEnv & AlertEnv;
   readonly now: () => number;
   /** Every harness report, after it is logged or counted. */
@@ -159,9 +159,8 @@ export async function openHouseholdAgent(options: HouseholdAgentOptions): Promis
     }),
   );
   for (const extension of jobList) registry.install(extension);
-  const durable = await openCelldStorageWithDatabase(options.storage);
   const harness = await Harness.open(
-    durable.storage,
+    options.storage,
     {
       models: options.models ?? createGatewayModels(options.env),
       registry,

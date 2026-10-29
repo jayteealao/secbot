@@ -14,6 +14,7 @@
  * crates/celld/js/harness.js:2875-2879 and 5387-5398; docs/cloudflare-compat.md "Compatibility
  * flags").
  */
+import type { Models } from "@earendil-works/pi-ai";
 import type { Harness } from "@earendil-works/pi-durable";
 import {
   type AlarmReport,
@@ -23,17 +24,20 @@ import {
   type BudgetSettings,
   CellAlarm,
   errorFields,
+  type GatewayEnv,
   HarnessSlot,
   type HeartbeatEnv,
   type HeartbeatState,
+  type HouseholdAgent,
   type HouseholdApplyResult,
   type HouseholdChange,
   type HouseholdDocument,
   heartbeatState,
   logEvent,
   type NextWake,
-  openRoutineHarness,
+  openHouseholdAgent,
   type ReportSpendResult,
+  type SharedSyncAnswer,
   type StopAnswer,
   type WakeSummary,
 } from "@secbot/cell-harness";
@@ -47,6 +51,7 @@ import {
 } from "@secbot/cell-storage";
 import { BudgetBoardStore } from "./budget-board.ts";
 import { ChangeLog, type HistoryEntry } from "./change-log.ts";
+import { validateSharedSync } from "./shared-sync.ts";
 
 export const HOUSEHOLD_CELL_NAME = "household";
 
@@ -55,7 +60,8 @@ export interface HouseholdCellState {
   waitUntil?(promise: Promise<unknown>): void;
 }
 
-export interface HouseholdCellEnv extends HeartbeatEnv {}
+/** The household cell's config: the heartbeat, and the fleet's model key for the household agent. */
+export interface HouseholdCellEnv extends HeartbeatEnv, GatewayEnv {}
 
 export interface HouseholdCellOptions {
   /** The release version; set by the worker from the bundle. */
@@ -66,6 +72,10 @@ export interface HouseholdCellOptions {
   readonly fetch?: typeof fetch;
   /** Tests: how often a settling alarm looks at the tasks. */
   readonly pollMs?: number;
+  /** The household's people (person cell names); a shared job is between two of them. */
+  readonly persons?: readonly string[];
+  /** Tests: the model gateway of the household agent (default: the fleet's key). */
+  readonly models?: Models;
 }
 
 interface Opened {
@@ -73,6 +83,7 @@ interface Opened {
   readonly board: BudgetBoardStore;
   readonly harness: Harness;
   readonly database: CelldSqliteDatabase;
+  readonly agent: HouseholdAgent;
   readonly wakes: () => Promise<{
     readonly summary: WakeSummary;
     readonly next: NextWake | undefined;
@@ -135,22 +146,33 @@ export class HouseholdCell {
   private async openNow(onReport: (error: unknown) => void): Promise<Opened> {
     const { storage, database } = await openCelldStorageWithDatabase(this.state.storage);
     const log = new ChangeLog(database, this.now);
-    const routine = await openRoutineHarness(
-      {
-        cell: HOUSEHOLD_CELL_NAME,
-        storage,
-        env: this.env,
-        now: this.now,
-        onReport,
-        onWakeChange: () => this.rearmSoon(),
-        ...(this.options.fetch === undefined ? {} : { fetch: this.options.fetch }),
-      },
-      (opened) => this.alarms.rearm(opened),
-    );
+    const board = new BudgetBoardStore(database, this.now);
+    const agent = await openHouseholdAgent({
+      cell: HOUSEHOLD_CELL_NAME,
+      storage,
+      env: this.env,
+      now: this.now,
+      onReport,
+      onWakeChange: () => this.rearmSoon(),
+      ...(this.options.fetch === undefined ? {} : { fetch: this.options.fetch }),
+      ...(this.options.models === undefined ? {} : { models: this.options.models }),
+      budgets: async () => (await board.board()).reports,
+      household: { read: (document) => log.read(document), apply: (change) => log.apply(change) },
+      persons: this.options.persons ?? [],
+    });
+    try {
+      await this.alarms.rearm(agent);
+    } catch (error) {
+      await agent.close().catch(() => {});
+      throw error;
+    }
     return {
-      ...routine,
+      harness: agent.harness,
+      wakes: () => agent.wakes(),
+      close: () => agent.close(),
+      agent,
       log,
-      board: new BudgetBoardStore(database, this.now),
+      board,
       database,
     };
   }
@@ -220,6 +242,17 @@ export class HouseholdCell {
   /** RPC: a claimed developer alert went out, or did not and can be claimed again. */
   async alertSent(outcome: unknown): Promise<void> {
     await (await this.open()).board.alertSent(outcome);
+  }
+
+  /**
+   * RPC: one shared-job exchange with a person cell: its operations in (each applied once by its
+   * operation id), its shared jobs out. A malformed request is refused with
+   * `RefusedHouseholdChange`.
+   */
+  async sharedSync(request: unknown): Promise<SharedSyncAnswer> {
+    const checked = validateSharedSync(request, this.options.persons ?? []);
+    const opened = await this.open();
+    return opened.agent.exchange(checked);
   }
 
   /** RPC: up with the release version (check:cells). */
