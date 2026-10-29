@@ -166,6 +166,15 @@ to the lead. For a health or production target, the secrets cell makes the outsi
   look-alikes is scored in tests against a fixed stand-in for the decision model, which proves
   the chunking, the question, and the threshold, not detection. The live model's score is taken
   on a test cell, and the reviewer on outside actions covers what it misses.
+- **The household agent runs shared jobs without the guard.** The household cell has no person
+  to answer a held call, so its agent gets no rule stage, decision model, or reviewer before a
+  call. Its jobs get two tools only, `household_read` and `household_change`; any other tool is
+  refused. A `household_change` marks the result risky, so a reviewer on another model checks it
+  before either lead may use it, but the change itself has already been made. A person's prohibit
+  or ask-first rule on `household_change` does not bind a shared job, and the other person agrees
+  to the job's title and cost, not its brief. A shared job can therefore edit or remove a shared
+  list that both people use. A later unit that gives the household agent more tools adds the
+  guard there.
 
 ## Related pages
 
