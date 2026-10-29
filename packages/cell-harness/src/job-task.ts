@@ -91,6 +91,12 @@ export interface JobTaskDeps {
   readonly timeZone: string;
   /** The extensions a job conversation selects (no tool that starts work). */
   readonly extensions: () => readonly Extension[];
+  /**
+   * Relay mode (the household agent, which has no lead): the result is stored and the task ends,
+   * with no wake notice; each person's lead pulls it from its own board. A risky result is still
+   * reviewed first.
+   */
+  readonly relay?: boolean;
 }
 
 const textOf = (message: AssistantMessage | undefined): string =>
@@ -423,6 +429,9 @@ export function createJobTask(deps: JobTaskDeps) {
           // A risky result is reviewed first; the review wakes the lead when it is done.
           if (stored.kind === "risky" && status === "done") {
             await startReview(tx, deps.review(), n);
+            return { status: "terminal", outcome: { status: "completed", result: null } };
+          }
+          if (deps.relay === true) {
             return { status: "terminal", outcome: { status: "completed", result: null } };
           }
           const next: JobState =

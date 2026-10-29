@@ -113,6 +113,8 @@ export interface ReviewTaskDeps {
   readonly now: () => number;
   /** The reviewer conversation's extensions: no tools (the budget wait and telemetry only). */
   readonly extensions: () => readonly Extension[];
+  /** Relay mode (the household agent, which has no lead): the verdict is stored, with no wake. */
+  readonly relay?: boolean;
 }
 
 type ReviewState = { phase: "open" } | { phase: "run" } | { phase: "notify"; passed: boolean };
@@ -202,6 +204,7 @@ export function createReviewTask(deps: ReviewTaskDeps) {
           if (verdict.verdict === "reject") current.status = "rejected";
           await recordCost(tx, n, await jobCost(tx, current));
           decided = { verdict: verdict.verdict, model: current.review.model };
+          if (deps.relay === true) return terminal;
           return {
             status: "running",
             checkpoint: { phase: "notify", passed: verdict.verdict === "pass" },
