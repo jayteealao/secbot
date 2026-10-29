@@ -288,20 +288,17 @@ export class CellHarness implements CellParts {
     readonly timeZone: string,
     /** The limit watch and the budget gate. */
     readonly budget: CellBudget,
+    /** The job and receipt tasks (job-task.ts, receipts.ts). */
+    readonly tasks: { readonly job: JobTask; readonly receipt: ReceiptTask } | undefined,
+    /** Where paused and questioning jobs wait (job-holds.ts); the gate and the lead share it. */
+    readonly holds: JobHolds,
+    /** The shared-job exchange with the household; undefined in a cell with no household. */
+    readonly shared: SharedParts | undefined,
     /** Routines that spend nothing (the heartbeat): activity does not list them as jobs. */
     readonly quietRoutines: ReadonlySet<string> = new Set(),
     /** The harness's report gate: close logs the count of reports it did not log. */
     private readonly reports?: ReportGate,
   ) {}
-
-  /** The job and receipt tasks (job-task.ts, receipts.ts), set at open. */
-  tasks: { readonly job: JobTask; readonly receipt: ReceiptTask } | undefined;
-
-  /** Where paused and questioning jobs wait (job-holds.ts); the gate and the lead share it. */
-  holds: JobHolds = new JobHolds();
-
-  /** The shared-job exchange with the household; undefined in a cell with no household. */
-  shared: SharedParts | undefined;
 
   /** One shared-job exchange with the household now (the routine runs one every 2 minutes). */
   syncShared(context: Context = BACKGROUND_CONTEXT): Promise<SyncOutcome> {
@@ -1318,6 +1315,16 @@ async function finishOpen(
     onReport: parts.onReport,
   });
   let spendWatch: SpendWatch = { stop: async () => {}, count: () => 0 };
+  const shared: SharedParts | undefined =
+    options.household === undefined
+      ? undefined
+      : {
+          harness,
+          person,
+          household: () => options.household,
+          now,
+          gate: () => parts.gate,
+        };
   const cell = new CellHarness(
     person,
     options.version,
@@ -1336,6 +1343,9 @@ async function finishOpen(
       stop: () => spendWatch.stop(),
       watching: () => spendWatch.count(),
     },
+    parts.tasks,
+    parts.holds,
+    shared,
     new Set(
       [...recurring.map(({ routine }) => routine), reminders]
         .filter((routine) => !routine.spends)
@@ -1343,18 +1353,7 @@ async function finishOpen(
     ),
     parts.reports,
   );
-  cell.tasks = parts.tasks;
-  cell.holds = parts.holds;
-  if (options.household !== undefined) {
-    cell.shared = {
-      harness,
-      person,
-      household: () => options.household,
-      now,
-      gate: () => parts.gate,
-    };
-    parts.onShared(cell.shared);
-  }
+  if (shared !== undefined) parts.onShared(shared);
 
   // What the last run left: live work, and routines whose time passed while the cell was down.
   // Read before this open creates anything and before resume(), so nothing has run yet.
