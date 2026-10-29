@@ -694,13 +694,38 @@ export const HandoffNoteDoc = defineDoc<{
   initial: () => ({ note: null }),
 });
 
+/** The capacity document's fields. */
+export type Capacity = {
+  /** How many jobs this cell was measured to run at once (the owner's setting); null when unset. */
+  measured: number | null;
+  /** When it was measured (epoch ms); null when unset. */
+  at: number | null;
+  /** When the owner was last alerted that running jobs passed the number; null before any alert. */
+  alertedAt: number | null;
+  /** True while running jobs are above the number (one alert per such episode). */
+  passing: boolean;
+};
+
 /**
- * `secbot.capacity`: how many jobs this cell was measured to run at once, and when; null until it
- * is measured. More running jobs only show a warning: nothing is held back.
+ * `secbot.capacity`: how many jobs this cell was measured to run at once, and when (null until the
+ * owner sets it; the release default applies then), and the warning's memory: the last alert and
+ * whether running jobs are above the number now. More running jobs only warn: nothing is held back.
  */
-export const CapacityDoc = defineDoc<{ measured: number | null; at: number | null }>({
+export const CapacityDoc = defineDoc<Capacity>({
   kind: "secbot.capacity",
-  version: 1,
+  version: 2,
   scope: "session",
-  initial: () => ({ measured: null, at: null }),
+  initial: () => ({ measured: null, at: null, alertedAt: null, passing: false }),
+  migrate: (value) => migrateCapacity(value),
 });
+
+/** A version-1 capacity document: its number and date, no alert yet, and no episode open. */
+export function migrateCapacity(value: JsonObject): Capacity {
+  const old = value as Partial<Capacity>;
+  return {
+    measured: old.measured ?? null,
+    at: old.at ?? null,
+    alertedAt: old.alertedAt ?? null,
+    passing: old.passing ?? false,
+  };
+}

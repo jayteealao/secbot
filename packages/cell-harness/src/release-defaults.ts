@@ -420,6 +420,16 @@ export const INJECTION_MAX_MISS_RATE = 0.1;
  */
 export const FIXTURE_SLOW_MS = 90_000;
 
+/**
+ * How many jobs a person cell was measured to run at once, and the day of the measurement
+ * (`YYYY-MM-DD`): null until the live run on the test cell fills it with its measured number and
+ * date. A cell's own capacity setting overrides it. Passing it only warns: nothing is held back.
+ */
+export const MEASURED_CAPACITY: { readonly jobs: number; readonly on: string } | null = null;
+
+/** The least time between two capacity alerts of one cell, so a count that hovers alerts once. */
+export const CAPACITY_REARM_MS = 24 * 60 * 60_000;
+
 /** What kind of outside content a reading tool returns. */
 export type OutsideKind = "page" | "mail" | "file";
 

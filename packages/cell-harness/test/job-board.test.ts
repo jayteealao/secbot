@@ -9,6 +9,7 @@ import {
   HandoffNoteDoc,
   JobBoardDoc,
   type JobRow,
+  migrateCapacity,
   ReceiptDoc,
   StopDoc,
   TemplatesDoc,
@@ -48,6 +49,7 @@ import {
   storeResult,
   waitingCounts,
 } from "../src/job-board.ts";
+import { CAPACITY_REARM_MS, MEASURED_CAPACITY } from "../src/release-defaults.ts";
 import { openTestCell, type TestCell } from "./fixtures.ts";
 
 let test: TestCell | undefined;
@@ -356,7 +358,7 @@ describe("the job documents", () => {
         compactions: 2,
       },
     };
-    const capacity = { measured: 8, at: 5_000 };
+    const capacity = { measured: 8, at: 5_000, alertedAt: 6_000, passing: true };
     await harness.commit(async (tx) => {
       Object.assign(await tx.doc(StopDoc), structuredClone(stop));
       Object.assign(await tx.doc(HandoffNoteDoc), structuredClone(note));
@@ -383,9 +385,36 @@ describe("the job documents", () => {
       expect((await tx.doc(BookmarkDoc)).bookmark).toBeNull();
       expect(await tx.doc(StopDoc)).toEqual({ active: null, last: null });
       expect(await tx.doc(HandoffNoteDoc)).toEqual({ note: null });
-      expect(await tx.doc(CapacityDoc)).toEqual({ measured: null, at: null });
+      expect(await tx.doc(CapacityDoc)).toEqual({
+        measured: null,
+        at: null,
+        alertedAt: null,
+        passing: false,
+      });
       expect((await tx.doc(ReceiptDoc, "r9", null)).receipt).toBeNull();
     }, BACKGROUND_CONTEXT);
+  });
+});
+
+describe("the capacity document", () => {
+  it("migrates a version-1 document field by field", () => {
+    expect(migrateCapacity({ measured: 8, at: 5_000 })).toEqual({
+      measured: 8,
+      at: 5_000,
+      alertedAt: null,
+      passing: false,
+    });
+    expect(migrateCapacity({ measured: null, at: null })).toEqual({
+      measured: null,
+      at: null,
+      alertedAt: null,
+      passing: false,
+    });
+  });
+
+  it("has the release default unset until the live run fills it, and a one-day re-arm", () => {
+    expect(MEASURED_CAPACITY).toBeNull();
+    expect(CAPACITY_REARM_MS).toBe(24 * 60 * 60_000);
   });
 });
 
