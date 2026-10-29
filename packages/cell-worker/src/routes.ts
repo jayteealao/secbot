@@ -240,6 +240,13 @@ async function internalHousehold(request: Request, env: WorkerEnv): Promise<Resp
       await household.alertSent(body as never);
       return Response.json({ ok: true });
     }
+    if (
+      request.method === "POST" &&
+      method === "shared-sync" &&
+      household.sharedSync !== undefined
+    ) {
+      return Response.json(await household.sharedSync(body as never));
+    }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // A refused change is the caller's error; anything else is the cell's.

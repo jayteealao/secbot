@@ -20,6 +20,7 @@ import type {
   HouseholdClient,
   HouseholdDocument,
   ReportSpendResult,
+  SharedSyncAnswer,
 } from "@secbot/cell-harness";
 import { errorFields, logEvent } from "@secbot/cell-harness";
 import { HOUSEHOLD_CELL_NAME, isRefusedHouseholdChange } from "@secbot/household-cell";
@@ -35,7 +36,8 @@ export type HouseholdMethod =
   | "budget"
   | "report-spend"
   | "set-budget"
-  | "alert-sent";
+  | "alert-sent"
+  | "shared-sync";
 
 export interface HouseholdClientEnv {
   readonly HOUSEHOLD_CELL?: HouseholdNamespaceLike;
@@ -113,6 +115,7 @@ export function httpHouseholdClient(
     alertSent: async (outcome) => {
       await call<unknown>("alert-sent", outcome);
     },
+    sharedSync: (request) => call<SharedSyncAnswer>("shared-sync", request),
   };
 }
 
@@ -160,6 +163,10 @@ export function stubHouseholdClient(stub: HouseholdStubLike): HouseholdClient {
   if (stub.alertSent !== undefined) {
     client.alertSent = (outcome) =>
       logged("alert-sent", () => stub.alertSent?.(outcome) as Promise<void>);
+  }
+  if (stub.sharedSync !== undefined) {
+    client.sharedSync = (request) =>
+      logged("shared-sync", () => stub.sharedSync?.(request) as Promise<SharedSyncAnswer>);
   }
   return client;
 }
