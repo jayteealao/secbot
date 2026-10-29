@@ -43,16 +43,15 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 
 ### Spend and limits
 
-A person cell counts its month-to-date spend from its own model ledger: every model response
-(failed attempts included) of the lead, each job's conversations (every run and its result
-review, under the job's template as the role), and each frozen specialist, plus the guard's
-decision-model and
+A person cell counts its month-to-date spend from its own model ledger: every model response (failed
+attempts included) of the lead, each job's conversations (every run and its result review, under the
+job's template as the role), and each frozen specialist, plus the guard's decision-model and
 reviewer calls, which the guard adds under the tool keys `secbot-guard:decision` and
 `secbot-guard:reviewer` of the calling conversation's `pi.usage`, in the commit that records its
 verdict. A month runs from local midnight on the first, in the household time zone, to the next
-first. The spend of jobs on the developer template counts against the household developer budget (50 dollars
-by default, summed across every person cell); everything else counts against the person's monthly
-limit (25 dollars by default). Only the owner changes either, through the operator routes.
+first. The spend of jobs on the developer template counts against the household developer budget (50
+dollars by default, summed across every person cell); everything else counts against the person's
+monthly limit (25 dollars by default). Only the owner changes either, through the operator routes.
 
 A `CostView` is `{person, month, timeZone, resetsAt, mode, modeSince, spentUsd, limitUsd, percent,
 line, byLayer: {agent, decision, reviewer}, byRole, hours, waiting: [Waiting], developer: {spentUsd,
@@ -185,8 +184,9 @@ Later releases add record kinds and fields; a client ignores what it does not kn
 A job's cost: a board job costs the sum of its conversations' ledgers, every run and its result
 review (the guard cost of the job's own calls included, which also shows on those calls' rows). A
 hand-off still draining from before the upgrade costs the specialist conversation's ledger growth
-since the later of the job's start and the end of that specialist's previous job. A routine run costs `0`: it only sends a message to the lead, whose answer is chat
-spend. A running job's `cost` is its cost so far.
+since the later of the job's start and the end of that specialist's previous job. A routine run
+costs `0`: it only sends a message to the lead, whose answer is chat spend. A running job's `cost`
+is its cost so far.
 
 `spentUsd`: for the month the spending ledger is in, the month to date (the same number as the
 usage line and `GET /cost`); for an ended month, the total the ledger kept when that month ended;
@@ -211,11 +211,12 @@ unavailable; the call ran`). In enforce mode it reads `reviewer: <reason>`.
 ### The guard's layers and the mode
 
 Every tool call passes the rules first. A prohibit refuses it and an ask-first rule holds it before
-any model sees it. A call the rules pass goes to the decision model (Jev for a new cell, or Clef or Clef Flash, on
-OpenRouter's Decisions API), which can only pass it or mark it; a mark, or any decision-model
-failure (an HTTP error, a malformed body, a timeout over 1.5 s, an unknown answer, no key), sends
-it to the reviewer. The reviewer allows it, blocks it (`reviewer: <reason>`), or asks the person
-(a held call). A reviewer that fails or takes over 30 s holds the call (`reviewer unavailable`).
+any model sees it. A call the rules pass goes to the decision model (Jev for a new cell, or Clef or
+Clef Flash, on OpenRouter's Decisions API), which can only pass it or mark it; a mark, or any
+decision-model failure (an HTTP error, a malformed body, a timeout over 1.5 s, an unknown answer, no
+key), sends it to the reviewer. The reviewer allows it, blocks it (`reviewer: <reason>`), or asks
+the person (a held call). A reviewer that fails or takes over 30 s holds the call (`reviewer
+unavailable`).
 
 Every cell starts in shadow mode: the decision model and the reviewer run and the record says what
 they would have done, but the call runs. Rules, ask-first holds, and approvals enforce in both
@@ -281,10 +282,11 @@ The cell sends these, as JSON text frames:
 | `question` | `job`, `title` | A job's question the lead put to the person: once, right after the lead's `answer` that asks it, and at connect for each question still open. The client answers through `POST /jobs/{n}/answer`; a chat line is never an answer. |
 | `shared` | `job`, `title`, `from`, `payer` (`half` or `all`) | A shared job the other person proposed, given to this person by their lead: once, right after the lead's `answer` that gives it, and at connect for each offer still open. `payer` is `all` when this person's limit is reached, so `from` pays all. The client answers through `POST /jobs/{n}/join` or `POST /jobs/{n}/decline`; a chat line is never an answer. |
 
-Ordering and reconnects: `connected`, then `usage`, then a `held` frame for every waiting call,
-then a `notice` frame for every notice this device has not seen, then every `missed` frame, then a
-`question` frame for every open job question, then a `shared` frame for every open offer, then live frames. An input with no `accepted` or `rejected` frame is resent on the
-next connection under the same `requestId`.
+Ordering and reconnects: `connected`, then `usage`, then a `held` frame for every waiting call, then
+a `notice` frame for every notice this device has not seen, then every `missed` frame, then a
+`question` frame for every open job question, then a `shared` frame for every open offer, then live
+frames. An input with no `accepted` or `rejected` frame is resent on the next connection under the
+same `requestId`.
 
 ## Host routes
 
@@ -328,9 +330,10 @@ route here. A device key never opens them, and no device-key route changes the m
 | PUT | `/ops/capacity?cell=<person>` | Body `{"measured": <jobs 1-1000>, "at": <epoch ms>}` sets the person cell's measured number of jobs at once and the day it was measured; `{"measured": null, "at": null}` clears it, so the release's number (if any) applies again. Answers `{person, measured, at}`. The number only warns: the board's capacity line and one owner alert per episode; nothing is held back. Logs `ops.capacity_set` with `cell`, `ok`, and `measured`. 400 for any other body; 404 for the household or secrets cell, which have no number. |
 | POST | `/ops/stop` | The owner's stop of every cell, all at once: each person cell this fleet serves, the household cell when served, and the cells another fleet serves through its `/internal/stop` (three attempts, 30 s). Answers `{cells: [{cell, jobs, turn, shared, running?}], missing: [cell]}`; `running` (present only when above 0) counts a cell's aborted jobs that had not ended within its stop's wait. `missing` names each cell that did not answer within 20 s, failed, or that no fleet address reaches; a slow cell's stop may still finish, so repeat the stop to see the real state. Every job stopped this way says it was the owner. A shared job is counted once, in the household cell's `shared` count; the person cells' counts leave it out. Logs `ops.stop`. Safe to repeat. |
 
-`<person>` is `owner` or `second` (`person` also names the second cell). A route that needs
-`?cell=` answers 400 `send ?cell=<person>` without it. A cell this fleet does not serve answers 404
-`cell <name> is served by another fleet`; a cell that is not a person cell answers 404. No device-key route changes a limit, the developer budget, or the time zone.
+`<person>` is `owner` or `second` (`person` also names the second cell). A route that needs `?cell=`
+answers 400 `send ?cell=<person>` without it. A cell this fleet does not serve answers 404 `cell
+<name> is served by another fleet`; a cell that is not a person cell answers 404. No device-key
+route changes a limit, the developer budget, or the time zone.
 
 The secrets cell is never snapshotted, restored, wiped, or digested: without `cells=` those
 routes and `/ops/heartbeats` leave it out, and naming it answers 400 (restore: 403). A refused

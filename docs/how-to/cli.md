@@ -52,12 +52,12 @@ device key is what proves the caller.
 | `secbot activity [--month YYYY-MM] [--page N]` | This month's activity under the month's spend, newest first, 50 to a page: each guard verdict, held call, answer, and lapse, and each job, routine, and reminder with its state (running, waiting, done); time, agent, tool or job, verdict or state, the layer, the cost, and the reason or step on the line below. |
 
 The match option is one of `--exact`, `--prefix`, `--email-domain`, `--web-domain`, or `--regex`,
-each followed by `<argument>=<value>`, for example
-`secbot rules add lead start_job permit --exact template=research`. The agent is `all`, `lead`,
-or a template's name (inside a job, the agent is the job's template); the tool is a tool name, `pay` (every pay tool), or `*` (any tool). Inside
-your rules the most specific one decides; between the owner's rules and yours the stricter wins.
-Rules and history that name the retired `handoff` tool or a specialist still read; no tool reaches
-a specialist now, so such a rule matches nothing new.
+each followed by `<argument>=<value>`, for example `secbot rules add lead start_job permit --exact
+template=research`. The agent is `all`, `lead`, or a template's name (inside a job, the agent is the
+job's template); the tool is a tool name, `pay` (every pay tool), or `*` (any tool). Inside your
+rules the most specific one decides; between the owner's rules and yours the stricter wins. Rules
+and history that name the retired `handoff` tool or a specialist still read; no tool reaches a
+specialist now, so such a rule matches nothing new.
 
 ### Answer a held call
 
@@ -209,12 +209,12 @@ $ secbot jobs restart 14
 
 When nothing runs, the stop prints `[ stopped ] nothing was running. Routines and reminders keep
 their schedule.` The stop waits up to 15 seconds for its aborted jobs to end; a job that has not
-ended by then is not counted as stopped, and the stop adds `  1 job still ending; run secbot stop
-again to check.` Running the stop again is safe. A paused job is the lead's to go on with: `secbot jobs restart` prints
-`[ restarted ] #12 compare broadband deals is paused, not stopped; ask the lead` (exit 1). A
-number with no stopped or blocked job prints `no stopped job #<n>` (exit 1). While a stop runs, a
-restart prints `secbot: a stop is running; try again` (exit 1). You can also ask the lead in chat
-to resume a stopped job.
+ended by then is not counted as stopped, and the stop adds ` 1 job still ending; run secbot stop
+again to check.` Running the stop again is safe. A paused job is the lead's to go on with: `secbot
+jobs restart` prints `[ restarted ] #12 compare broadband deals is paused, not stopped; ask the
+lead` (exit 1). A number with no stopped or blocked job prints `no stopped job #<n>` (exit 1). While
+a stop runs, a restart prints `secbot: a stop is running; try again` (exit 1). You can also ask the
+lead in chat to resume a stopped job.
 
 ### Your month's spend and limits
 
@@ -278,12 +278,13 @@ TIME   AGENT      TOOL OR JOB              VERDICT       LAYER          COST
 showing 3 of 3 this month; older: secbot activity --month 2026-09
 ```
 
-The activity lists job runs from your job board, routine runs, and reminders. Each shows
-`running` or `waiting` (above your limit, or a reminder before its time) while it lasts, and
-`done` once it ended, with its cost: a job costs what its ledger counts over every run and review;
-a routine or reminder costs nothing itself (the lead's answer counts as chat). A month lists 50 rows a page; while older
-rows of the month remain the last line says `older: secbot activity --page 2`, and on the last
-page it names the month before. `--month` and `--page` combine. Activity is kept with no pruning.
+The activity lists job runs from your job board, routine runs, and reminders. Each shows `running`
+or `waiting` (above your limit, or a reminder before its time) while it lasts, and `done` once it
+ended, with its cost: a job costs what its ledger counts over every run and review; a routine or
+reminder costs nothing itself (the lead's answer counts as chat). A month lists 50 rows a page;
+while older rows of the month remain the last line says `older: secbot activity --page 2`, and on
+the last page it names the month before. `--month` and `--page` combine. Activity is kept with no
+pruning.
 
 ### Read shadow verdicts
 
