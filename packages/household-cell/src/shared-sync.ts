@@ -34,6 +34,19 @@ function text(op: Fields, field: string, max: number): string {
   return value;
 }
 
+/**
+ * One line of text with no brackets or control characters: the other person's lead reads it inside
+ * a bracketed notice, so a title cannot close that notice and add an order of its own.
+ */
+function line(op: Fields, field: string, max: number): string {
+  const value = text(op, field, max);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+  if (/[[\]\u0000-\u001f\u007f]/.test(value)) {
+    refuse(`${field} must be one line with no brackets`);
+  }
+  return value;
+}
+
 function number(op: Fields, field: string): number {
   const value = op[field];
   if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
@@ -75,7 +88,7 @@ function validateOp(value: unknown, person: string, persons: readonly string[]):
         person,
         other,
         local: number(value, "local"),
-        title: text(value, "title", 80),
+        title: line(value, "title", 80),
         brief: text(value, "brief", 8_000),
         priority: oneOf(value, "priority", PRIORITIES),
         deadline,

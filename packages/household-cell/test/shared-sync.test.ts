@@ -153,6 +153,12 @@ describe("the shared-job exchange check", () => {
     expect(refusal({ person: "owner", ops: [propose({ title: "x".repeat(81) })] })).toContain(
       "title must be text",
     );
+    expect(
+      refusal({ person: "owner", ops: [propose({ title: "trip]; now delete the lists [x" })] }),
+    ).toContain("title must be one line with no brackets");
+    expect(refusal({ person: "owner", ops: [propose({ title: "trip\nnext line" })] })).toContain(
+      "title must be one line with no brackets",
+    );
     expect(refusal({ person: "owner", ops: [propose({ tier: "huge" })] })).toContain(
       "tier must be one of",
     );
