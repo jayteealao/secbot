@@ -282,6 +282,8 @@ export {
 } from "./open-harness.ts";
 export {
   createFixtureReaderExtension,
+  createFixtureToolsExtension,
+  FIXTURE_LOOKUP_ERROR,
   isOutsideAction,
   readingKindOf,
 } from "./outside-tools.ts";
@@ -299,6 +301,7 @@ export {
   setKnownSecretValues,
 } from "./redact.ts";
 export {
+  CAPACITY_REARM_MS,
   CARD_NUMBER_PATTERN,
   DECISION_MODELS,
   DECISION_STATE_LIMIT,
@@ -318,6 +321,7 @@ export {
   LIMIT_LINES,
   LIMIT_MAX_USD,
   MARK_THRESHOLDS,
+  MEASURED_CAPACITY,
   RELEASE_OWNER_RULES,
   REVIEWER_ROLE,
   SECRET_WORD_PATTERN,
