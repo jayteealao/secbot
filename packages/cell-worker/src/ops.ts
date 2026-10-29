@@ -109,7 +109,7 @@ export interface GuardStub {
   refreshBudget?(person: string): Promise<void>;
   /** The job board and the owner's stop; absent on a stub built before them. */
   jobsOf?(person: string): Promise<Answer<unknown>>;
-  stopOf?(person: string): Promise<Answer<{ jobs: number; turn: boolean }>>;
+  stopOf?(person: string): Promise<Answer<{ jobs: number; turn: boolean; running?: number }>>;
   /** The measured number of jobs at once; absent on a stub built before it. */
   setCapacityOf?(
     person: string,
@@ -121,7 +121,7 @@ export interface GuardStub {
 /** The household cell's shared-jobs board and stop, when this fleet serves it. */
 export interface HouseholdJobsStub {
   jobs?(): Promise<unknown>;
-  stopJobs?(): Promise<{ jobs: number; turn: boolean }>;
+  stopJobs?(): Promise<{ jobs: number; turn: boolean; running?: number }>;
 }
 
 /** Another fleet's private address and the operator key, for the routes that reach every cell. */
@@ -162,6 +162,8 @@ export type CellStop = {
   readonly jobs: number;
   readonly turn: boolean;
   readonly shared: boolean;
+  /** Aborted jobs that had not ended by the cell's stop bound (absent when none). */
+  readonly running?: number;
 };
 
 /** How long the owner's stop waits for another fleet to answer. */
@@ -203,15 +205,25 @@ async function stopOne(deps: OpsDeps, cell: string): Promise<CellStop | null> {
     const household = deps.householdJobs?.();
     if (household?.stopJobs === undefined) return null;
     const stopped = await household.stopJobs();
-    return { cell, jobs: stopped.jobs, turn: stopped.turn, shared: true };
+    return { cell, jobs: stopped.jobs, turn: stopped.turn, shared: true, ...ending(stopped) };
   }
   const guard = deps.guardOf?.(cell);
   if (guard?.stopOf === undefined) return null;
   const answer = await guard.stopOf(cell);
   return answer.ok
-    ? { cell, jobs: answer.value.jobs, turn: answer.value.turn, shared: false }
+    ? {
+        cell,
+        jobs: answer.value.jobs,
+        turn: answer.value.turn,
+        shared: false,
+        ...ending(answer.value),
+      }
     : null;
 }
+
+/** The `running` count of a cell's stop, kept only when some aborted job had not ended. */
+const ending = (stopped: { readonly running?: number }) =>
+  stopped.running !== undefined && stopped.running > 0 ? { running: stopped.running } : {};
 
 /** `work`, or a rejection once `ms` have passed. */
 async function bounded<T>(ms: number, work: Promise<T>): Promise<T> {

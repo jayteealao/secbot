@@ -18,8 +18,13 @@ export const listed = (names: readonly string[]): string =>
     : `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
 
 /** The person's stop lines. */
-export function stopLines(answer: { readonly jobs: number; readonly turn: boolean }): string[] {
-  if (answer.jobs === 0 && !answer.turn) {
+export function stopLines(answer: {
+  readonly jobs: number;
+  readonly turn: boolean;
+  readonly running?: number;
+}): string[] {
+  const ending = endingLine(answer.running);
+  if (answer.jobs === 0 && !answer.turn && ending.length === 0) {
     return ["[ stopped ] nothing was running. Routines and reminders keep their schedule."];
   }
   const parts = [
@@ -27,10 +32,17 @@ export function stopLines(answer: { readonly jobs: number; readonly turn: boolea
     ...(answer.turn ? ["the lead's current turn"] : []),
   ];
   return [
-    `[ stopped ] ${parts.join(" and ")}. Their state is kept.`,
+    `[ stopped ] ${parts.length === 0 ? "nothing yet" : parts.join(" and ")}. Their state is kept.`,
+    ...ending,
     "  Routines and reminders keep their schedule.",
     ...(answer.jobs > 0 ? ["  Restart one: secbot jobs restart <#>"] : []),
   ];
+}
+
+/** The line for aborted jobs that had not ended when the cell answered; none when all ended. */
+function endingLine(running: number | undefined): string[] {
+  if (running === undefined || running <= 0) return [];
+  return [`  ${count(running, "job")} still ending; run secbot stop again to check.`];
 }
 
 /** One cell's part of the owner's stop. */
@@ -39,6 +51,8 @@ export interface CellStop {
   readonly jobs: number;
   readonly turn: boolean;
   readonly shared: boolean;
+  /** Aborted jobs that had not ended when the cell answered (absent when none). */
+  readonly running?: number;
 }
 
 /** The owner's stop lines: the household's totals, then one line per cell that stopped. */
@@ -51,14 +65,19 @@ export function stopAllLines(cells: readonly CellStop[]): string[] {
       const what = each.shared
         ? count(each.jobs, "shared job")
         : `${count(each.jobs, "job")}${each.turn ? ", lead turn" : ""}`;
-      return `  ${plain(each.cell).padEnd(10)}${what}`;
+      const ending =
+        each.running !== undefined && each.running > 0 ? `, ${each.running} still ending` : "";
+      return `  ${plain(each.cell).padEnd(10)}${what}${ending}`;
     }),
   ];
 }
 
 /** `secbot stop`. */
 export async function stopOwn(client: CellClient, io: Io): Promise<number> {
-  const answer = await client.request<{ jobs: number; turn: boolean }>("POST", "/stop");
+  const answer = await client.request<{ jobs: number; turn: boolean; running?: number }>(
+    "POST",
+    "/stop",
+  );
   io.stdout(`${stopLines(answer).join("\n")}\n`);
   return 0;
 }

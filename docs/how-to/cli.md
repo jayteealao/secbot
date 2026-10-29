@@ -208,7 +208,9 @@ $ secbot jobs restart 14
 ```
 
 When nothing runs, the stop prints `[ stopped ] nothing was running. Routines and reminders keep
-their schedule.` A paused job is the lead's to go on with: `secbot jobs restart` prints
+their schedule.` The stop waits up to 15 seconds for its aborted jobs to end; a job that has not
+ended by then is not counted as stopped, and the stop adds `  1 job still ending; run secbot stop
+again to check.` Running the stop again is safe. A paused job is the lead's to go on with: `secbot jobs restart` prints
 `[ restarted ] #12 compare broadband deals is paused, not stopped; ask the lead` (exit 1). A
 number with no stopped or blocked job prints `no stopped job #<n>` (exit 1). While a stop runs, a
 restart prints `secbot: a stop is running; try again` (exit 1). You can also ask the lead in chat

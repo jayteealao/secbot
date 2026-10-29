@@ -530,7 +530,7 @@ describe("the owner's stop of this fleet's cells", () => {
           asked.push(cell);
           // The owner's cell hangs; the second answers.
           if (cell === "owner") return new Promise<never>(() => {});
-          return { ok: true as const, value: { jobs: 1, turn: false } };
+          return { ok: true as const, value: { jobs: 1, turn: false, running: 1 } };
         },
       }),
       householdJobs: () => ({
@@ -546,7 +546,7 @@ describe("the owner's stop of this fleet's cells", () => {
     await vi.advanceTimersByTimeAsync(CELL_STOP_TIMEOUT_MS);
     expect(await pending).toEqual({
       cells: [
-        { cell: "second", jobs: 1, turn: false, shared: false },
+        { cell: "second", jobs: 1, turn: false, shared: false, running: 1 },
         { cell: "household", jobs: 2, turn: false, shared: true },
       ],
       missing: ["owner"],

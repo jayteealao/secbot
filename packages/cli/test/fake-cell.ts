@@ -120,7 +120,7 @@ export interface FakeCell {
   /** The restart route: job -> [status, body]; an unknown job answers 404. */
   restartAnswers: Record<number, [number, unknown]>;
   /** `POST /stop`. */
-  stopAnswer: { jobs: number; turn: boolean };
+  stopAnswer: { jobs: number; turn: boolean; running?: number };
   /** `POST /ops/stop`: the answer, or a refusal status. */
   opsStop: Record<string, unknown> | number;
   close(): Promise<void>;

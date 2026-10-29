@@ -79,6 +79,28 @@ describe("secbot stop", () => {
       "[ stopped ] nothing was running. Routines and reminders keep their schedule.\n",
     );
   });
+
+  it("says how many aborted jobs were still ending when the cell answered", async () => {
+    cell.stopAnswer = { jobs: 2, turn: true, running: 1 };
+    expect((await own()).out).toBe(
+      [
+        "[ stopped ] 2 jobs and the lead's current turn. Their state is kept.",
+        "  1 job still ending; run secbot stop again to check.",
+        "  Routines and reminders keep their schedule.",
+        "  Restart one: secbot jobs restart <#>",
+        "",
+      ].join("\n"),
+    );
+    cell.stopAnswer = { jobs: 0, turn: false, running: 2 };
+    expect((await own()).out).toBe(
+      [
+        "[ stopped ] nothing yet. Their state is kept.",
+        "  2 jobs still ending; run secbot stop again to check.",
+        "  Routines and reminders keep their schedule.",
+        "",
+      ].join("\n"),
+    );
+  });
 });
 
 describe("secbot stop --all", () => {

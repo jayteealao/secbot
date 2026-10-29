@@ -33,8 +33,16 @@ export interface StopParts {
   };
 }
 
-/** What one stop stopped: how many jobs, and whether the lead was in a turn. */
-export type StopAnswer = { readonly jobs: number; readonly turn: boolean };
+/**
+ * What one stop stopped: how many jobs, whether the lead was in a turn, and how many aborted jobs
+ * had not ended by the stop's bound (absent when none): those are not counted in `jobs`, and a
+ * second stop shows whether they ended.
+ */
+export type StopAnswer = {
+  readonly jobs: number;
+  readonly turn: boolean;
+  readonly running?: number;
+};
 
 export interface StopSeams {
   /** Test-only: runs after the lock is set and before any abort. */
@@ -150,14 +158,16 @@ export async function stopJobs(
     if (!left.includes(job.number)) logEvent("job.stopped", { cell: person, job: job.number, by });
   }
   if (left.length > 0) logEvent("stop.left_running", { cell: person, jobs: left.length }, "warn");
+  const stopped = count - left.length;
   // Bounded by the exchange's own timeout; an unanswered household keeps the op for the next one.
   if (locked.shared > 0) await parts.shared?.sync(quiet).catch(syncFailed(person));
   logEvent("stop.done", {
     cell: person,
     by,
-    jobs: count,
+    jobs: stopped,
+    running: left.length,
     turn,
     duration_ms: Date.now() - started,
   });
-  return { jobs: count, turn };
+  return left.length > 0 ? { jobs: stopped, turn, running: left.length } : { jobs: stopped, turn };
 }
