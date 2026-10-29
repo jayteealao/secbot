@@ -2,11 +2,12 @@
 // an agent apply inside its jobs, a developer job waits on the developer budget), telemetry names
 // the job, the month ledger counts their spend, and the usage watch stops when the job ends.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { afterEach, describe, expect, it, vi } from "vitest";
 import { UsageDoc } from "@earendil-works/pi-durable";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { jobConversations } from "../src/job-board.ts";
 import { conversationTotal, ledgerConversations, readMonth } from "../src/month-ledger.ts";
 import { roleOf } from "../src/telemetry.ts";
+import { job, leadCalls } from "./escalation-helpers.ts";
 import {
   addJobSpend,
   addSpend,
@@ -21,7 +22,6 @@ import {
   type TestCell,
   until,
 } from "./fixtures.ts";
-import { job, leadCalls } from "./escalation-helpers.ts";
 import { createHold, jobResponder, startJobLine } from "./responders.ts";
 
 let test: TestCell | undefined;
@@ -229,5 +229,30 @@ describe("every conversation of a job is counted (D-051)", () => {
       (each) => each.event === "job.watch_closed" && each.job === 1,
     );
     expect(closed.map((each) => each.conversation_id).sort()).toEqual(ids.map(String).sort());
+  });
+});
+
+describe("jobs that ended before the month", () => {
+  it("counts an old job's conversation only when the month's start took its baseline", async () => {
+    const { JobBoardDoc, MonthLedgerDoc } = await import("../src/docs.ts");
+    const ended = (number: number, conversationId: number) => ({
+      number,
+      template: "research",
+      endedAt: 5_000,
+      conversationId,
+      runs: [],
+      review: null,
+    });
+    const docs = new Map<unknown, unknown>([
+      [JobBoardDoc, { jobs: { "1": ended(1, 21), "2": ended(2, 22) } }],
+      // The month began after both ended; only job 1's conversation has a baseline (a late
+      // review or charge on it counts; job 2's spend is all in earlier months).
+      [MonthLedgerDoc, { startsAt: 10_000, baseline: { "21": { "m:x": 0.3 } } }],
+    ]);
+    const reader = {
+      snapshot: async (doc: unknown) => docs.get(doc),
+    } as unknown as Parameters<typeof ledgerConversations>[0];
+    const listed = await ledgerConversations(reader, BACKGROUND_CONTEXT);
+    expect(listed.filter((each) => each.job !== undefined).map((each) => each.job)).toEqual([1]);
   });
 });

@@ -98,7 +98,8 @@ const budgetOfConversation = (conversation: LedgerConversation): BudgetName =>
  * The lead's conversation, each specialist's from the roster, and every conversation of each job
  * from the board: its current and earlier runs (role: its template) and its result review (role
  * and layer reviewer, on the template's budget). A job that ended before the current month began
- * is left out: its spend is all in earlier months.
+ * is left out unless the month's start took a baseline of its conversation, so spend booked on it
+ * after its end (a late review, a shared job's last charge) still counts.
  */
 export async function ledgerConversations(
   reader: Pick<DocumentReader, "snapshot">,
@@ -106,16 +107,23 @@ export async function ledgerConversations(
 ): Promise<LedgerConversation[]> {
   const roster = await reader.snapshot(RosterDoc, context);
   const board = await reader.snapshot(JobBoardDoc, context);
-  const startsAt = (await reader.snapshot(MonthLedgerDoc, context))?.startsAt ?? 0;
+  const ledger = await reader.snapshot(MonthLedgerDoc, context);
+  const startsAt = ledger?.startsAt ?? 0;
+  const baseline = ledger?.baseline ?? {};
   const jobs: LedgerConversation[] = [];
   const listed = new Set<string>();
+  let old = false;
   const add = (conversation: LedgerConversation) => {
     if (listed.has(conversation.conversationId)) return;
+    // A conversation of a job that ended before this month counts only with a baseline from the
+    // month's start: then a review or a shared charge booked after the end counts, and its spend
+    // before the month does not. Without one, all its spend is in earlier months.
+    if (old && !Object.hasOwn(baseline, conversation.conversationId)) return;
     listed.add(conversation.conversationId);
     jobs.push(conversation);
   };
   for (const row of Object.values(board?.jobs ?? {})) {
-    if (row.endedAt !== null && row.endedAt < startsAt) continue;
+    old = row.endedAt !== null && row.endedAt < startsAt;
     const job = { role: row.template, job: row.number };
     for (const run of row.runs) {
       if (run.conversationId !== null) {
