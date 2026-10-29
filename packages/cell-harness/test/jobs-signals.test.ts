@@ -1,8 +1,12 @@
 // The slice's signals, each one JSON line through logEvent with its fields: a job's start, finish,
 // waiting result, wake notice, pull, and effort change, the closing of its usage watch, a receipt's
 // start and finish, the bookmark's record and resume, the steered input, each job a stop ends,
-// the stop's end and a job it left running, a restart, and a reorder. No line carries a brief, a
-// title, a result, a note, or a secret's value.
+// the stop's end and a job it left running, a restart, a reorder, and the capacity warning. No
+// line carries a brief, a title, a result, a note, or a secret's value; every designed signal name
+// is logged from some package source file.
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -753,5 +757,84 @@ describe("the shared-job signals", () => {
     ]) {
       expect(lines).not.toContain(secret);
     }
+  });
+});
+
+describe("the capacity signal", () => {
+  it("logs capacity.passed with its fields and no title or brief", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const slow: Responder = (request) => {
+      if (request.role !== "research") return jobResponder(request);
+      return request.last?.role === "toolResult"
+        ? fauxAssistantMessage([fauxText("three options")])
+        : fauxAssistantMessage([fauxToolCall("fixture_slow_lookup", { topic: "flights" })], {
+            stopReason: "toolUse",
+          });
+    };
+    test = await openTestCell({
+      fixtureTools: { slowMs: 60_000 },
+      gateway: createFauxGateway(slow),
+    });
+    const t = test;
+    await t.cell.setCapacity(1, Date.UTC(2026, 9, 29));
+    const lines = ["secret title one", "secret title two"]
+      .map((title) => startJobLine({ title, brief: `brief of ${title}`, template: "research" }))
+      .join("\n");
+    await (await t.cell.submit(lines, "start-two")).wait(BACKGROUND_CONTEXT);
+    const passed = () =>
+      loggedEvents(log.mock.calls).filter((line) => line.event === "capacity.passed");
+    await until(() => passed().length > 0);
+    expect(passed()).toEqual([
+      {
+        event: "capacity.passed",
+        level: "info",
+        cell: "owner",
+        parallel_jobs: 2,
+        measured: 1,
+        alerted: true,
+      },
+    ]);
+  });
+});
+
+describe("every designed signal", () => {
+  /** The signal names of the instrumentation plan, plus the dark-path warn lines. */
+  const SIGNALS = [
+    "job.started",
+    "job.finished",
+    "job.result_waiting",
+    "job.wake_sent",
+    "job.result_pulled",
+    "job.effort_changed",
+    "job.watch_closed",
+    "job.queued_long",
+    "receipt.started",
+    "receipt.finished",
+    "bookmark.recorded",
+    "bookmark.resumed",
+    "input.steered",
+    "template.migrated",
+    "job.paused",
+    "job.restarted",
+    "job.raised",
+    "job.review_rejected",
+    "job.injection_stop",
+    "job.stopped",
+    "stop.left_running",
+    "capacity.passed",
+  ];
+
+  it("is logged by name from some package source file", () => {
+    const packages = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
+    const sources = readdirSync(packages).flatMap((name) => {
+      const src = join(packages, name, "src");
+      if (!existsSync(src)) return [];
+      return readdirSync(src, { recursive: true })
+        .map(String)
+        .filter((file) => file.endsWith(".ts"))
+        .map((file) => readFileSync(join(src, file), "utf8"));
+    });
+    const text = sources.join("\n");
+    for (const name of SIGNALS) expect(text, name).toContain(`"${name}"`);
   });
 });
