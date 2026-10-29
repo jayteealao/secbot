@@ -199,6 +199,8 @@ export const MonthLedgerDoc = defineDoc<{
   hours: Record<string, Record<string, number>>;
   seen: Record<string, number>;
   closed?: Record<string, number>;
+  /** Job conversations the month's start retired: they spend no more, so reads leave them out. */
+  retired?: Record<string, true>;
 }>({
   kind: "secbot.month-ledger",
   version: 1,

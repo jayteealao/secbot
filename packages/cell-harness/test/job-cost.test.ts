@@ -5,7 +5,12 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { UsageDoc } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { jobConversations } from "../src/job-board.ts";
-import { conversationTotal, ledgerConversations, readMonth } from "../src/month-ledger.ts";
+import {
+  conversationTotal,
+  ensureMonth,
+  ledgerConversations,
+  readMonth,
+} from "../src/month-ledger.ts";
 import { roleOf } from "../src/telemetry.ts";
 import { job, leadCalls } from "./escalation-helpers.ts";
 import {
@@ -254,5 +259,111 @@ describe("jobs that ended before the month", () => {
     } as unknown as Parameters<typeof ledgerConversations>[0];
     const listed = await ledgerConversations(reader, BACKGROUND_CONTEXT);
     expect(listed.filter((each) => each.job !== undefined).map((each) => each.job)).toEqual([1]);
+  });
+
+  it("counts a review made after the month began, and leaves out what the start retired", async () => {
+    const { JobBoardDoc, MonthLedgerDoc } = await import("../src/docs.ts");
+    const docs = new Map<unknown, unknown>([
+      [
+        JobBoardDoc,
+        {
+          jobs: {
+            // Job 1 ended before the month; the lead pulled its risky result after the roll, so
+            // its review conversation (31) is new this month. Job 2's conversation was retired.
+            "1": {
+              number: 1,
+              template: "research",
+              endedAt: 5_000,
+              conversationId: 21,
+              runs: [],
+              review: { conversationId: 31 },
+            },
+            "2": {
+              number: 2,
+              template: "research",
+              endedAt: 5_000,
+              conversationId: 22,
+              runs: [],
+              review: null,
+            },
+          },
+        },
+      ],
+      [MonthLedgerDoc, { startsAt: 10_000, baseline: {}, retired: { "21": true, "22": true } }],
+    ]);
+    const reader = {
+      snapshot: async (doc: unknown) => docs.get(doc),
+    } as unknown as Parameters<typeof ledgerConversations>[0];
+    const listed = await ledgerConversations(reader, BACKGROUND_CONTEXT);
+    expect(
+      listed.filter((each) => each.job !== undefined).map((each) => each.conversationId),
+    ).toEqual(["31"]);
+  });
+
+  it("retires a quiet old job's conversations at the roll and keeps the ones that spent", async () => {
+    const { JobBoardDoc, MonthLedgerDoc } = await import("../src/docs.ts");
+    const usage = (cost: number) => ({ models: { x: { cost: { total: cost } } }, tools: {} });
+    const row = (number: number, conversationId: number, endedAt: number) => ({
+      number,
+      template: "research",
+      endedAt,
+      conversationId,
+      runs: [],
+      review: null,
+    });
+    const now = Date.UTC(2026, 10, 2);
+    const ledger = {
+      month: "2026-10",
+      zone: "UTC",
+      startsAt: Date.UTC(2026, 9, 1),
+      endsAt: Date.UTC(2026, 10, 1),
+      nextZone: null,
+      // 41 ended in September and spent nothing in October; 42 ended in September and took a
+      // late charge in October; 43 ended in October; 44 was left out of October altogether.
+      baseline: { "41": { "m:x": 0.2 }, "42": { "m:x": 0.2 } },
+      hours: {},
+      seen: {},
+    };
+    const board = {
+      jobs: {
+        "1": row(1, 41, Date.UTC(2026, 8, 20)),
+        "2": row(2, 42, Date.UTC(2026, 8, 20)),
+        "3": row(3, 43, Date.UTC(2026, 9, 20)),
+        "4": row(4, 44, Date.UTC(2026, 7, 20)),
+      },
+    };
+    const costs: Record<string, unknown> = { "41": usage(0.2), "42": usage(0.5), "43": usage(0.4) };
+    const docs = new Map<unknown, unknown>([
+      [JobBoardDoc, board],
+      [MonthLedgerDoc, ledger],
+    ]);
+    const tx = {
+      doc: async (doc: unknown, id?: unknown) =>
+        doc === UsageDoc ? costs[String(id)] : docs.get(doc),
+    };
+    const harness = {
+      snapshot: async (doc: unknown, ...rest: unknown[]) =>
+        doc === UsageDoc ? costs[String(rest[0])] : docs.get(doc),
+      commit: async (work: (value: typeof tx) => Promise<unknown>) => work(tx),
+    } as unknown as Parameters<typeof ensureMonth>[0];
+    const conversations = await ledgerConversations(harness, BACKGROUND_CONTEXT);
+    expect(conversations.filter((each) => each.job !== undefined).map((each) => each.job)).toEqual([
+      1, 2, 3,
+    ]);
+    const { ledger: rolled } = await ensureMonth(
+      harness,
+      now,
+      "UTC",
+      conversations,
+      BACKGROUND_CONTEXT,
+    );
+    expect(rolled.month).toBe("2026-11");
+    // The lead's own conversation is listed too; only the job conversations matter here.
+    const jobIds = Object.keys(rolled.baseline).filter((id) => id.startsWith("4"));
+    expect(jobIds.sort()).toEqual(["42", "43"]);
+    expect(Object.keys(rolled.retired ?? {}).sort()).toEqual(["41", "44"]);
+    expect(ledger).toMatchObject({ closed: { "2026-10": 0.7 } });
+    const after = await ledgerConversations(harness, BACKGROUND_CONTEXT);
+    expect(after.filter((each) => each.job !== undefined).map((each) => each.job)).toEqual([2, 3]);
   });
 });

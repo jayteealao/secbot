@@ -88,6 +88,8 @@ export interface LedgerConversation {
   readonly budget?: BudgetName;
   /** The layer all its spend counts in when not by bucket (a result review: reviewer). */
   readonly layer?: Layer;
+  /** When its job ended, for a job conversation of an ended job. */
+  readonly endedAt?: number | null;
 }
 
 /** The budget a ledger conversation spends. */
@@ -97,9 +99,10 @@ const budgetOfConversation = (conversation: LedgerConversation): BudgetName =>
 /**
  * The lead's conversation, each specialist's from the roster, and every conversation of each job
  * from the board: its current and earlier runs (role: its template) and its result review (role
- * and layer reviewer, on the template's budget). A job that ended before the current month began
- * is left out unless the month's start took a baseline of its conversation, so spend booked on it
- * after its end (a late review, a shared job's last charge) still counts.
+ * and layer reviewer, on the template's budget). A conversation the month's start retired (its
+ * job ended before the closing month and it spent nothing in it, or it was left out then) is left
+ * out; a job conversation made after the start (a late review) and one with a baseline (a shared
+ * job's last charge) still count.
  */
 export async function ledgerConversations(
   reader: Pick<DocumentReader, "snapshot">,
@@ -110,21 +113,30 @@ export async function ledgerConversations(
   const ledger = await reader.snapshot(MonthLedgerDoc, context);
   const startsAt = ledger?.startsAt ?? 0;
   const baseline = ledger?.baseline ?? {};
+  // A ledger rolled before retirement was recorded: an old conversation without a baseline is out.
+  const retired = ledger?.retired;
   const jobs: LedgerConversation[] = [];
   const listed = new Set<string>();
   let old = false;
   const add = (conversation: LedgerConversation) => {
     if (listed.has(conversation.conversationId)) return;
-    // A conversation of a job that ended before this month counts only with a baseline from the
-    // month's start: then a review or a shared charge booked after the end counts, and its spend
-    // before the month does not. Without one, all its spend is in earlier months.
-    if (old && !Object.hasOwn(baseline, conversation.conversationId)) return;
+    // A conversation of a job that ended before this month: with a baseline, its spend since the
+    // month's start counts; retired at the start, all its spend is in earlier months; made after
+    // the start (a review the lead pulled late), all its spend is in this month.
+    const id = conversation.conversationId;
+    if (
+      old &&
+      !Object.hasOwn(baseline, id) &&
+      (retired === undefined || Object.hasOwn(retired, id))
+    ) {
+      return;
+    }
     listed.add(conversation.conversationId);
     jobs.push(conversation);
   };
   for (const row of Object.values(board?.jobs ?? {})) {
     old = row.endedAt !== null && row.endedAt < startsAt;
-    const job = { role: row.template, job: row.number };
+    const job = { role: row.template, job: row.number, endedAt: row.endedAt };
     for (const run of row.runs) {
       if (run.conversationId !== null) {
         add({ id: run.conversationId, conversationId: String(run.conversationId), ...job });
@@ -141,6 +153,7 @@ export async function ledgerConversations(
         job: row.number,
         budget: budgetOf(row.template),
         layer: "reviewer",
+        endedAt: row.endedAt,
       });
     }
   }
@@ -243,6 +256,7 @@ type Ledger = {
   baseline: Record<string, Record<string, number>>;
   hours: Record<string, Record<string, number>>;
   seen: Record<string, number>;
+  retired?: Record<string, true>;
 };
 
 const sum = (costs: Readonly<Record<string, number>>) =>
@@ -254,8 +268,10 @@ export const conversationTotal = (state: Readonly<UsageState> | undefined): numb
 
 /**
  * The current month's ledger, rolled in one commit when `now` passed its end (or started at the
- * first read). A roll keeps the closing month's person spend in `closed`, takes every
- * conversation's totals as the new baseline, and applies a time zone the owner set during the
+ * first read). A roll keeps the closing month's person spend in `closed`, takes every listed
+ * conversation's totals as the new baseline, retires each job conversation that will spend no
+ * more (its job ended before the closing month and it spent nothing in it, or it was not listed),
+ * so later reads leave it out, and applies a time zone the owner set during the
  * closing month. The first month of a cell has no baseline: what its conversations spent before
  * counts in it.
  */
@@ -280,15 +296,29 @@ export async function ensureMonth(
     const bounds = monthBounds(now, nextZone);
     const baseline: Record<string, Record<string, number>> = {};
     const seen: Record<string, number> = {};
+    const retired: Record<string, true> = {};
     let closing = 0;
+    const listed = new Set<string>();
     for (const conversation of conversations) {
-      const { id, conversationId } = conversation;
+      const { id, conversationId, endedAt } = conversation;
+      listed.add(conversationId);
       const costs = costsOf(await tx.doc(UsageDoc, id));
-      if (!first && budgetOfConversation(conversation) === "person") {
-        closing += total(spendSince(costs, doc.baseline[conversationId]));
-      }
-      if (!first) baseline[conversationId] = costs;
+      const since = total(spendSince(costs, doc.baseline[conversationId]));
+      if (!first && budgetOfConversation(conversation) === "person") closing += since;
+      const done = endedAt !== undefined && endedAt !== null && endedAt < doc.startsAt;
+      if (!first && done && since === 0) retired[conversationId] = true;
+      else if (!first) baseline[conversationId] = costs;
       seen[conversationId] = sum(costs);
+    }
+    if (!first) {
+      // A job conversation the closing month left out spends no more: it stays out.
+      for (const row of Object.values((await tx.doc(JobBoardDoc)).jobs)) {
+        const ids = [row.conversationId, ...row.runs.map((run) => run.conversationId)];
+        ids.push(row.review?.conversationId ?? null);
+        for (const each of ids) {
+          if (each !== null && !listed.has(String(each))) retired[String(each)] = true;
+        }
+      }
     }
     if (!first) doc.closed = { ...doc.closed, [doc.month]: Math.round(closing * 10_000) / 10_000 };
     Object.assign(doc, {
@@ -300,6 +330,7 @@ export async function ensureMonth(
       baseline,
       hours: {},
       seen,
+      retired,
     });
     return { ledger: JSON.parse(JSON.stringify(doc)) as Ledger, rolled: true };
   }, context);
