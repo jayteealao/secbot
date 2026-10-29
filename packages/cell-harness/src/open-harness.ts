@@ -100,7 +100,7 @@ import {
   setDeadline,
   waitingCounts,
 } from "./job-board.ts";
-import { createJobGate } from "./job-gate.ts";
+import { createJobGate, withLiveCosts } from "./job-gate.ts";
 import { JobHolds } from "./job-holds.ts";
 import { type JobTask, resumeJobTask } from "./job-task.ts";
 import { createJobToolsExtension } from "./job-tools.ts";
@@ -447,7 +447,7 @@ export class CellHarness implements CellParts {
     // Shared jobs first catch up with the household (bounded); a failed exchange shows the last
     // mirrored state.
     await this.syncShared(context).catch(() => undefined);
-    const board = await this.board(context);
+    const board = await withLiveCosts(this.harness, await this.board(context), context);
     const waits = (await this.harness.snapshot(BudgetWaitsDoc, context))?.tasks ?? {};
     const { mode } = await readGuardMode(this.harness, context);
     const capacity = effectiveCapacity(

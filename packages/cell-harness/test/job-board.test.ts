@@ -49,6 +49,7 @@ import {
   storeResult,
   waitingCounts,
 } from "../src/job-board.ts";
+import { withLiveCosts } from "../src/job-gate.ts";
 import { CAPACITY_REARM_MS, MEASURED_CAPACITY } from "../src/release-defaults.ts";
 import { openTestCell, type TestCell } from "./fixtures.ts";
 
@@ -1009,5 +1010,31 @@ describe("the person's resume of a stopped or blocked job", () => {
     expect(await ops((tx) => resumeStoppedRow(tx, 1, 7_000))).toEqual({ refused: "locked" });
     expect((await job(1))?.status).toBe("stopped");
     expect((await job(1))?.resumes).toBe(0);
+  });
+});
+
+describe("live job costs", () => {
+  it("reads a running job's cost from its ledger and keeps an ended job's settled cost", async () => {
+    const totals: Record<string, number> = { "7": 0.4, "8": 0.9 };
+    const reader = {
+      snapshot: async (_doc: unknown, id: unknown) => ({
+        models: {},
+        tools: { probe: { cost: { total: totals[String(id)] ?? 0 } } },
+      }),
+    } as unknown as Parameters<typeof withLiveCosts>[0];
+    const board = {
+      jobs: {
+        "1": row,
+        "2": {
+          ...row,
+          number: 2,
+          status: "done" as const,
+          conversationId: 8 as unknown as ConversationId,
+        },
+      },
+    };
+    const live = await withLiveCosts(reader, board, BACKGROUND_CONTEXT);
+    expect(live.jobs["1"]?.cost).toBeCloseTo(0.4);
+    expect(live.jobs["2"]?.cost).toBe(0.12);
   });
 });

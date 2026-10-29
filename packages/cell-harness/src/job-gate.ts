@@ -63,6 +63,24 @@ export async function jobCostOf(
   return total;
 }
 
+/**
+ * The board with each live job's cost read from its ledgers: a row's own cost is written only at a
+ * pause, an end, a restart, or a review, so a running job would show its last settled figure.
+ */
+export async function withLiveCosts<B extends { readonly jobs: Readonly<Record<string, JobRow>> }>(
+  reader: Pick<DocumentReader, "snapshot">,
+  board: B,
+  context: Context,
+): Promise<B> {
+  const jobs: Record<string, JobRow> = {};
+  for (const [key, row] of Object.entries(board.jobs)) {
+    jobs[key] = ENDED.has(row.status)
+      ? row
+      : { ...row, cost: Math.max(row.cost, await jobCostOf(reader, row, context)) };
+  }
+  return { ...board, jobs };
+}
+
 /** The wake notice of a paused job, as the lead reads it. */
 export const pauseNotice = (n: number, reason: "cap" | "loop"): string =>
   `[job ${n} paused: ${reason === "cap" ? "cap reached" : `same step failed ${LOOP_LIMIT} times`}; choose set_job or restart_job]`;

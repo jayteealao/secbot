@@ -25,6 +25,7 @@ import {
   restCount,
   waitingCounts,
 } from "./job-board.ts";
+import { withLiveCosts } from "./job-gate.ts";
 import { openReceipts } from "./receipts.ts";
 import { ESCALATION_LIMITS, type JobTemplate, LOOP_LIMIT } from "./release-defaults.ts";
 import { localTime } from "./reminder.ts";
@@ -201,7 +202,11 @@ export function createLeadExtension(
           queue: [],
         };
         const custom = (await input.read.snapshot(TemplatesDoc, context))?.custom ?? {};
-        return jobsSection(board, templatesOf(custom), await openReceipts(input.read, context));
+        return jobsSection(
+          await withLiveCosts(input.read, board, context),
+          templatesOf(custom),
+          await openReceipts(input.read, context),
+        );
       }),
     ],
   });

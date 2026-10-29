@@ -465,7 +465,10 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     execute: async (args, api, context) => {
       const found = await api.commit(async (tx) => {
         const row = await rowOrError(tx, args.job);
-        return "error" in row ? row : { summary: jobSummary(row) };
+        if ("error" in row) return row;
+        // A running job's cost is read from its ledgers, not the last settled figure.
+        const cost = ENDED.has(row.status) ? row.cost : Math.max(row.cost, await jobCost(tx, row));
+        return { summary: jobSummary({ ...row, cost }) };
       }, context);
       if ("error" in found) return refusal(found.error);
       return { ...text(found.summary), details: { job: args.job } };
