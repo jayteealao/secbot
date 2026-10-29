@@ -32,7 +32,6 @@ import { addToolUsage, costOnlyUsage } from "./month-ledger.ts";
 import {
   RESULT_WAKE_MS,
   SHARED_CHARGE_KEY,
-  SHARED_DECLINED,
   SHARED_SYNC_TIMEOUT_MS,
   sharedJoinedText,
   sharedOfferText,
@@ -219,17 +218,8 @@ async function reconcile(
         });
       }
     } else if (remote.consent === "declined" && before !== "declined") {
+      // The requesting row gets the household's stored decline as its failure result below.
       link.consent = "declined";
-      if (role === "requester") {
-        row.result ??= {
-          kind: "failure",
-          text: SHARED_DECLINED(remote.other),
-          at: now,
-          pulledAt: null,
-          wokeAt: null,
-        };
-        notices.push(resultNotice(row.number, "failure"));
-      }
     } else if (remote.consent === "asked" && role === "requester" && before === "asking") {
       link.consent = "asked";
     }
@@ -261,6 +251,7 @@ async function reconcile(
             at: remote.block.at,
           };
     if (
+      !(remote.consent === "declined" && role === "other") &&
       remote.result !== null &&
       remote.result.at !== link.resultAt &&
       KINDS.has(remote.result.kind)

@@ -22,6 +22,7 @@ import {
   type TestCell,
   until,
 } from "./fixtures.ts";
+import { wakeNoticesOf } from "./job-helpers.ts";
 
 const open: { agent?: HouseholdAgent | undefined; cells: TestCell[] } = { cells: [] };
 afterEach(async () => {
@@ -252,5 +253,75 @@ describe("the person side's reconcile", () => {
     });
     expect((await pair.row("second", 1))?.shared?.consent).toBe("declined");
     expect((await pair.row("second", 1))?.status).toBe("failed");
+  });
+});
+
+describe("notices to the lead", () => {
+  const notices = (cell: TestCell) => wakeNoticesOf(cell.cell.root);
+
+  it("wakes the other lead with the offer, and the requesting lead with the join line, once each", async () => {
+    const pair = await openPair();
+    await proposeFrom(pair);
+    await pair.sync("owner");
+    const offered = await pair.sync("second");
+    expect(offered).toMatchObject({
+      notices: [
+        {
+          job: 1,
+          requestId: "shared:1:offer",
+          text: "[job 1 shared offer from owner: plan the May trip; the person's half is about $0.13. Call offer_shared with job 1, then ask the person in your own words whether to share the cost]",
+        },
+      ],
+    });
+    await until(async () => (await notices(pair.second)).length === 1);
+    await answerFrom(pair, 1, true);
+    await pair.sync("second");
+    const joined = await pair.sync("owner");
+    expect(joined).toMatchObject({
+      notices: [
+        {
+          requestId: "shared:1:joined",
+          text: "[job 1 shared: second agreed to share the cost. Tell the person in one line: On it, for both of you: plan the May trip (job 1, household, shared)]",
+        },
+      ],
+    });
+    const again = await pair.sync("second");
+    expect(again).toMatchObject({ notices: [] });
+    await until(async () => (await notices(pair.owner)).length === 1);
+  });
+
+  it("wakes the requesting lead with a failure on a decline", async () => {
+    const pair = await openPair();
+    await proposeFrom(pair);
+    await pair.sync("owner");
+    await pair.sync("second");
+    await answerFrom(pair, 1, false);
+    await pair.sync("second");
+    expect(await pair.sync("owner")).toMatchObject({
+      notices: [{ requestId: "wake:1:failure", text: "[job 1 failure: pull it with job_result]" }],
+    });
+    expect((await pair.sync("owner")) as { notices: unknown[] }).toMatchObject({ notices: [] });
+    expect((await pair.row("owner", 1))?.result?.wokeAt).not.toBeNull();
+  });
+
+  it("sends the late notice for a routine result unpulled for 30 minutes, once", async () => {
+    const pair = await openPair();
+    await proposeFrom(pair);
+    await pair.sync("owner");
+    await pair.sync("second");
+    await answerFrom(pair, 1, true);
+    await pair.sync("second");
+    await until(async () => {
+      await pair.sync("owner");
+      return (await pair.row("owner", 1))?.result !== null;
+    });
+    expect((await pair.sync("owner")) as { notices: unknown[] }).toMatchObject({ notices: [] });
+    pair.clock.now += 30 * 60_000;
+    expect(await pair.sync("owner")).toMatchObject({
+      notices: [
+        { requestId: "wake:1:late", text: "[job 1 waited 30 minutes: pull it with job_result]" },
+      ],
+    });
+    expect((await pair.sync("owner")) as { notices: unknown[] }).toMatchObject({ notices: [] });
   });
 });
