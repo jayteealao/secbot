@@ -330,7 +330,37 @@ async function reconcile(
       ? []
       : [{ job: row.number, household: link.household, waited: now - row.createdAt }];
   });
-  return { notices, charged, offers };
+  return { notices: keepUnsent(board, notices), charged, offers };
+}
+
+/**
+ * Keeps every notice on its row until it is delivered: notices an earlier exchange made and never
+ * delivered (the cell restarted, or a delivery failed) go first, then the new ones, each once.
+ */
+function keepUnsent(
+  board: { jobs: Record<string, JobRow> },
+  fresh: readonly SharedNotice[],
+): SharedNotice[] {
+  const notices: SharedNotice[] = [];
+  const seen = new Set<string>();
+  for (const row of Object.values(board.jobs)) {
+    for (const kept of row.shared?.unsent ?? []) {
+      if (seen.has(kept.requestId)) continue;
+      seen.add(kept.requestId);
+      notices.push({ ...kept });
+    }
+  }
+  for (const notice of fresh) {
+    if (seen.has(notice.requestId)) continue;
+    seen.add(notice.requestId);
+    notices.push(notice);
+    const link = board.jobs[String(notice.job)]?.shared;
+    if (link !== null && link !== undefined) {
+      link.unsent ??= [];
+      link.unsent.push({ ...notice });
+    }
+  }
+  return notices;
 }
 
 const resultNotice = (n: number, kind: ResultKind): SharedNotice => ({
@@ -350,9 +380,15 @@ async function deliver(parts: SharedParts, notice: SharedNotice, context: Contex
     context,
   );
   await parts.harness.commit(async (tx) => {
-    const result = (await tx.doc(JobBoardDoc)).jobs[String(notice.job)]?.result;
+    const row = (await tx.doc(JobBoardDoc)).jobs[String(notice.job)];
+    const result = row?.result;
     if (result !== undefined && result !== null && notice.requestId.startsWith("wake:")) {
       result.wokeAt ??= parts.now();
+    }
+    const link = row?.shared;
+    if (link?.unsent !== undefined) {
+      link.unsent = link.unsent.filter((kept) => kept.requestId !== notice.requestId);
+      if (link.unsent.length === 0) delete link.unsent;
     }
   }, context);
 }

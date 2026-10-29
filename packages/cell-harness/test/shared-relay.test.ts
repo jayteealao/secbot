@@ -4,6 +4,7 @@
 // lead once, and each charge is booked once on the person's month.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { describe, expect, it, vi } from "vitest";
+import { JobBoardDoc } from "../src/docs.ts";
 import { readMonth } from "../src/month-ledger.ts";
 import { syncShared } from "../src/shared-relay.ts";
 import { openTestCell, type TestCell, until } from "./fixtures.ts";
@@ -133,6 +134,26 @@ describe("notices to the lead", () => {
     });
     expect((await pair.sync("owner")) as { notices: unknown[] }).toMatchObject({ notices: [] });
     expect((await pair.row("owner", 1))?.result?.wokeAt).not.toBeNull();
+    expect((await pair.row("owner", 1))?.shared?.unsent).toBeUndefined();
+  });
+
+  it("sends a notice an earlier exchange made but never delivered, once", async () => {
+    const pair = await openPair();
+    await proposeFrom(pair);
+    await pair.sync("owner");
+    // As after a restart between the reconcile commit and the delivery: the notice is kept.
+    const lost = {
+      job: 1,
+      text: "[job 1 failure: pull it with job_result]",
+      requestId: "wake:1:failure",
+    };
+    await pair.owner.cell.harness.commit(async (tx) => {
+      const link = (await tx.doc(JobBoardDoc)).jobs["1"]?.shared;
+      if (link) link.unsent = [lost];
+    }, BACKGROUND_CONTEXT);
+    expect(await pair.sync("owner")).toMatchObject({ notices: [lost] });
+    expect((await pair.row("owner", 1))?.shared?.unsent).toBeUndefined();
+    expect((await pair.sync("owner")) as { notices: unknown[] }).toMatchObject({ notices: [] });
   });
 
   it("sends the late notice for a routine result unpulled for 30 minutes, once", async () => {
