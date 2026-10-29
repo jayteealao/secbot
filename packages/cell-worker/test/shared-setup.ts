@@ -20,6 +20,7 @@ import {
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
+  type Responder,
   until,
 } from "@secbot/cell-harness/testing";
 import { CellClient } from "../../cli/src/client.ts";
@@ -166,6 +167,8 @@ export async function sharedSetup(options: {
   readonly clock?: () => number;
   /** The cost of one answered model step, in USD (default $0.01), so jobs settle charges. */
   readonly stepCostUsd?: (modelId: string) => number;
+  /** Wraps the scripted models (for example a hold that keeps a role at its next model step). */
+  readonly wrap?: (respond: Responder) => Responder;
 }): Promise<SharedSetup> {
   const householdFetches: string[] = [];
   const householdFetch: typeof fetch = async (input) => {
@@ -175,7 +178,7 @@ export async function sharedSetup(options: {
   const setup = await guardSetup(options.fleets === 2 ? "second,household" : undefined, {
     household: true,
     persons: PERSONS,
-    respond: sharedResponder,
+    respond: options.wrap === undefined ? sharedResponder : options.wrap(sharedResponder),
     householdFetch,
     sockets: true,
     stepCostUsd: options.stepCostUsd ?? (() => 0.01),
@@ -445,4 +448,24 @@ export function fitsTerminal(text: string): boolean {
         line.length <= 80 &&
         [...line].every((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127),
     );
+}
+
+/**
+ * The owner's lead proposes `title` from the owner's chat; both persons' exchanges run until the
+ * other lead has given the offer as `second`'s job `n`.
+ */
+export async function proposeShared(
+  setup: SharedSetup,
+  owner: ChatSession,
+  second: ChatSession,
+  title: string,
+  n: number,
+): Promise<void> {
+  await owner.say(`SHARE ${title}`);
+  await until(async () => {
+    const rows = Object.values((await setup.harness("owner").board()).jobs);
+    return rows.some((row) => row.title === title && row.shared?.household != null);
+  });
+  await setup.harness("second").syncShared();
+  await until(() => second.out().includes(`[ job ${n} shared ]`));
 }
