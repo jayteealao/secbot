@@ -371,6 +371,8 @@ const resultNotice = (n: number, kind: ResultKind): SharedNotice => ({
 
 /** Notices that wait on a person's limit, delivered in order behind each other, per cell. */
 const deferred = new WeakMap<Harness, Promise<void>>();
+/** The request ids already waiting in a cell's chain, so each exchange queues a notice once. */
+const queued = new WeakMap<Harness, Set<string>>();
 
 /** Submits one notice to the lead (sent once across restarts by its request id). */
 async function deliver(parts: SharedParts, notice: SharedNotice, context: Context) {
@@ -410,21 +412,33 @@ async function sendNotices(parts: SharedParts, notices: readonly SharedNotice[],
     if (waits) later.push(notice);
     else await deliver(parts, notice, context);
   }
-  if (later.length === 0 || gate === undefined) return;
+  const waiting = queued.get(parts.harness) ?? new Set<string>();
+  queued.set(parts.harness, waiting);
+  // A notice already waiting in the chain (an earlier exchange queued it) is not queued again.
+  const fresh = later.filter((notice) => !waiting.has(notice.requestId));
+  if (fresh.length === 0 || gate === undefined) return;
+  for (const notice of fresh) waiting.add(notice.requestId);
   const before = deferred.get(parts.harness) ?? Promise.resolve();
   const next = before.then(async () => {
-    for (const notice of later) {
-      await gate.waitUntilUnder(
-        { budget: "person", taskId: `shared:${notice.job}`, what: `job ${notice.job} result` },
-        context,
-      );
-      await deliver(parts, notice, context);
+    for (const notice of fresh) {
+      try {
+        await gate.waitUntilUnder(
+          { budget: "person", taskId: `shared:${notice.job}`, what: `job ${notice.job} result` },
+          context,
+        );
+        await deliver(parts, notice, context);
+      } finally {
+        waiting.delete(notice.requestId);
+      }
     }
   });
   // A failed delivery (a closing cell) only ends this chain; the next exchange starts a new one.
+  // The notices it did not reach may be queued again by a later exchange.
   deferred.set(
     parts.harness,
-    next.catch(() => {}),
+    next.catch(() => {
+      for (const notice of fresh) waiting.delete(notice.requestId);
+    }),
   );
 }
 
