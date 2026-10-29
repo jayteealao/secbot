@@ -102,7 +102,7 @@ import {
 } from "./job-board.ts";
 import { createJobGate, withLiveCosts } from "./job-gate.ts";
 import { JobHolds } from "./job-holds.ts";
-import { type JobTask, resumeJobTask } from "./job-task.ts";
+import type { JobTask } from "./job-task.ts";
 import { createJobToolsExtension } from "./job-tools.ts";
 import { liveJobs } from "./jobs.ts";
 import { createJobsExtension } from "./lead-tools.ts";
@@ -138,6 +138,7 @@ import {
   createReminderRoutine,
   type ReminderPayload,
 } from "./reminder.ts";
+import { logResumed, resumeInCommit } from "./resume-job.ts";
 import { createReviewer, type Reviewer } from "./reviewer.ts";
 import { addTemplate, ensureRoster } from "./roster.ts";
 import { defineRoutine, ensureRoutines, type Routine } from "./routines.ts";
@@ -387,39 +388,13 @@ export class CellHarness implements CellParts {
   > {
     const task = this.tasks?.job;
     if (task === undefined) throw new Error("the job task is not registered");
-    const done = await this.harness.commit(async (tx) => {
-      // A shared job runs in the household: its resume goes there as an operation, never as a
-      // job task here on this person's own model and budget.
-      const row = (await tx.doc(JobBoardDoc)).jobs[String(n)];
-      const link = row?.shared ?? null;
-      if (row !== undefined && link !== null) {
-        if ((await tx.doc(StopDoc)).active !== null)
-          return { ok: false, reason: "locked" } as const;
-        if (link.household === null || (row.status !== "stopped" && row.status !== "blocked")) {
-          return { ok: false, reason: "not-stopped" } as const;
-        }
-        link.outbox.push({
-          kind: "resume",
-          opId: sharedOpId(this.person, this.now()),
-          person: this.person,
-          household: link.household,
-        });
-        return { ok: true, job: row.number, title: row.title, resumes: 0, shared: true } as const;
-      }
-      const resumed = await resumeJobTask(tx, task, n, this.now(), by);
-      return "refused" in resumed
-        ? ({ ok: false, reason: resumed.refused } as const)
-        : ({
-            ok: true,
-            job: resumed.ok.number,
-            title: resumed.ok.title,
-            resumes: resumed.ok.resumes,
-            shared: false,
-          } as const);
-    }, context);
-    if (!done.ok) return done;
+    const done = await this.harness.commit(
+      (tx) => resumeInCommit(tx, { task, person: this.person, at: this.now(), by }, n),
+      context,
+    );
+    if (!done.ok) return { ok: false, reason: done.reason };
     if (done.shared) this.kickShared(context);
-    logEvent("job.resumed", { cell: this.person, job: n, by, resumes: done.resumes });
+    logResumed(this.person, done, by);
     return { ok: true, job: done.job, title: done.title };
   }
 

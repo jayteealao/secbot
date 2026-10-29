@@ -47,13 +47,7 @@ import {
   setTierEffort,
 } from "./job-board.ts";
 import type { JobHolds } from "./job-holds.ts";
-import {
-  configureJob,
-  createJobTask,
-  type JobTask,
-  type JobTaskDeps,
-  resumeJobTask,
-} from "./job-task.ts";
+import { configureJob, createJobTask, type JobTask, type JobTaskDeps } from "./job-task.ts";
 import { budgetOf } from "./month-ledger.ts";
 import {
   createReadResultTool,
@@ -64,6 +58,7 @@ import {
 } from "./receipts.ts";
 import { DEFAULT_JOB_EFFORT, JOB_EFFORTS, TIERS } from "./release-defaults.ts";
 import { createReviewTask, type ReviewTask, reviewHold, startReview } from "./result-review.ts";
+import { logResumed, resumeInCommit } from "./resume-job.ts";
 import { sharedOpId } from "./shared-relay.ts";
 import { payerText } from "./shared-split.ts";
 import { STOP_RUNNING } from "./stop.ts";
@@ -875,52 +870,26 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     // A crash mid-call gives the model an interrupted result instead of a second resume.
     replay: "unsafe",
     execute: async (args, api, context) => {
-      const shared = await sharedMove(api, context, args.job, (row, link) => {
-        if (link.household === null) return { error: sharedNotStartedText(row.number, link.with) };
-        if (row.status !== "stopped" && row.status !== "blocked") {
-          return { error: resumeRefusalText(row.number, "not-stopped", row.status) };
-        }
-        return {
-          op: {
-            kind: "resume",
-            opId: sharedOpId(person, deps.now()),
-            person,
-            household: link.household,
-          },
-        };
-      });
-      if (shared !== null) {
-        if ("error" in shared) return refusal(shared.error);
-        logEvent("job.resumed", { cell: person, job: args.job, by: "lead", resumes: 0 });
-        return {
-          ...text(
-            `job ${args.job} resumes in the household from its kept brief and transcript; this does not use its restart.`,
-          ),
-          details: { job: args.job },
-        };
+      const resumed = await api.commit(
+        (tx) => resumeInCommit(tx, { task: JobTask, person, at: deps.now(), by: "lead" }, args.job),
+        context,
+      );
+      if (!resumed.ok) {
+        return refusal(
+          resumed.waitingOn !== null
+            ? sharedNotStartedText(args.job, resumed.waitingOn)
+            : resumeRefusalText(args.job, resumed.reason, resumed.status),
+        );
       }
-      const answer = await api.commit(async (tx) => {
-        const resumed = await resumeJobTask(tx, JobTask, args.job, deps.now(), "lead");
-        if ("refused" in resumed) {
-          const row = (await tx.doc(JobBoardDoc)).jobs[String(args.job)];
-          return { ...resumed, status: row?.status ?? "" };
-        }
-        return { number: resumed.ok.number, resumes: resumed.ok.resumes };
-      }, context);
-      if ("refused" in answer) {
-        return refusal(resumeRefusalText(args.job, answer.refused, answer.status));
-      }
-      logEvent("job.resumed", {
-        cell: person,
-        job: answer.number,
-        by: "lead",
-        resumes: answer.resumes,
-      });
+      if (resumed.shared) deps.shared?.()?.kick();
+      logResumed(person, resumed, "lead");
       return {
         ...text(
-          `job ${answer.number} resumes from its kept brief and transcript; this does not use its restart.`,
+          resumed.shared
+            ? `job ${resumed.job} resumes in the household from its kept brief and transcript; this does not use its restart.`
+            : `job ${resumed.job} resumes from its kept brief and transcript; this does not use its restart.`,
         ),
-        details: { job: answer.number },
+        details: { job: resumed.job },
       };
     },
   });
