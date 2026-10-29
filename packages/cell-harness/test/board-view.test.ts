@@ -48,6 +48,7 @@ const base = (number: number, change: Partial<JobRow> = {}): JobRow => ({
   block: null,
   stop: null,
   resumes: 0,
+  shared: null,
   ...change,
 });
 

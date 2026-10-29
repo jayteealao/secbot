@@ -12,6 +12,7 @@ import {
 } from "@earendil-works/pi-durable";
 import type { ActivityRecord } from "./activity.ts";
 import type { HeldCall } from "./approvals.ts";
+import type { SharedOp } from "./household-contract.ts";
 import {
   DEFAULT_DECISION_ADAPTER,
   type DecisionAdapter,
@@ -417,6 +418,7 @@ export const emptyJobExtras = (): Pick<
   | "block"
   | "stop"
   | "resumes"
+  | "shared"
 > => ({
   pause: null,
   question: null,
@@ -430,7 +432,33 @@ export const emptyJobExtras = (): Pick<
   block: null,
   stop: null,
   resumes: 0,
+  shared: null,
 });
+
+/**
+ * A person-side row's link to a shared job that runs in the household: the household's number
+ * (null until the household took the proposal), this person's part, the other person, where the
+ * consent stands, who pays, the operations not yet delivered, and the charges already booked.
+ */
+export type SharedLink = {
+  household: number | null;
+  role: "requester" | "other";
+  /** The other person's cell name. */
+  with: string;
+  consent: "asking" | "asked" | "offered" | "shown" | "joined" | "declined";
+  payer: "half" | "you" | "them";
+  estimateUsd: number;
+  /** Operations for the household, oldest first; each leaves when the household acks it. */
+  outbox: SharedOp[];
+  /** The ids of the household's charges already booked on this row's ledger conversation. */
+  charges: string[];
+  /** When the household's result copied onto this row was written; null until one is. */
+  resultAt: number | null;
+  /** The household holds the job until a payer has budget again. */
+  waitingBudget: boolean;
+  /** The last exchange that answered this row; null before the first. */
+  syncedAt: number | null;
+};
 
 /** One job on the board. Numbers grow per cell and are never reused. */
 export type JobRow = {
@@ -487,6 +515,8 @@ export type JobRow = {
   stop: JobStop | null;
   /** How often the person resumed the job after a stop or a block; never counted as a restart. */
   resumes: number;
+  /** The link to the household's job when this job is shared by both people; null otherwise. */
+  shared: SharedLink | null;
 };
 
 /** Who stopped a job with the stop command, and when. */
@@ -531,7 +561,7 @@ type Board = {
  */
 export const JobBoardDoc = defineDoc<Board>({
   kind: "secbot.job-board",
-  version: 4,
+  version: 5,
   scope: "session",
   initial: () => ({ nextNumber: 1, jobs: {}, byConversation: {}, queue: [] }),
   migrate: (value) => migrateJobBoard(value),

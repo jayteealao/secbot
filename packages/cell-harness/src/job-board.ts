@@ -19,6 +19,7 @@ import {
   priorityKey,
   type Receipt,
   type ResultKind,
+  type SharedLink,
   StopDoc,
   TierSettingsDoc,
 } from "./docs.ts";
@@ -206,6 +207,24 @@ export async function createJobRow(tx: Tx, fields: NewJob): Promise<JobRow> {
   };
   placeInQueue(board, number);
   return board.jobs[String(number)] as JobRow;
+}
+
+/**
+ * Adds a shared job's row on this person's board: owned by the person, on the household template,
+ * with no local task (the job runs in the household). It gets its own ledger conversation, so the
+ * person's share of the cost is booked where the month and the limits already count it.
+ */
+export async function createSharedRow(
+  tx: Tx,
+  fields: Omit<NewJob, "template" | "turn"> & { readonly shared: SharedLink },
+): Promise<JobRow> {
+  const row = await createJobRow(tx, { ...fields, template: "household", turn: null });
+  row.shared = fields.shared;
+  const ledger = await tx.createConversation({ ownership: { kind: "ownerless" } });
+  row.conversationId = ledger.id;
+  (await tx.doc(JobBoardDoc)).byConversation[String(ledger.id)] = row.number;
+  await tx.doc(UsageDoc, ledger.id);
+  return row;
 }
 
 /** Moves a job's tier and effort; the cap follows the tier, the applied effort is stored as given. */

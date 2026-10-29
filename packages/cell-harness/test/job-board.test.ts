@@ -20,6 +20,7 @@ import {
   blockReason,
   blockRow,
   createJobRow,
+  createSharedRow,
   ENDED,
   EXHAUSTED,
   endRow,
@@ -88,6 +89,7 @@ const row: JobRow = {
   block: null,
   stop: null,
   resumes: 0,
+  shared: null,
 };
 
 /** A row with every field this slice adds set. */
@@ -131,11 +133,24 @@ const fullRow: JobRow = {
   block: { cause: "hit", kind: "page", tool: "read_fixture_page", chunk: 3, at: 2_500 },
   stop: { at: 2_600, by: "owner" },
   resumes: 2,
+  shared: {
+    household: 3,
+    role: "requester",
+    with: "second",
+    consent: "joined",
+    payer: "half",
+    estimateUsd: 0.25,
+    outbox: [{ kind: "restart", opId: "sync-1", person: "owner", household: 3, note: "retry" }],
+    charges: ["shared:3:1:owner"],
+    resultAt: null,
+    waitingBudget: false,
+    syncedAt: 2_700,
+  },
 };
 
 describe("the job board upgrade", () => {
-  it("is version 4 and migrates a version-1 board, field by field", () => {
-    expect(JobBoardDoc.definition.version).toBe(4);
+  it("is version 5 and migrates a version-1 board, field by field", () => {
+    expect(JobBoardDoc.definition.version).toBe(5);
     const {
       pause,
       question,
@@ -149,6 +164,7 @@ describe("the job board upgrade", () => {
       block,
       stop,
       resumes,
+      shared,
       ...v1
     } = row;
     const migrated = JobBoardDoc.definition.migrate?.(
@@ -177,7 +193,7 @@ describe("the job board upgrade", () => {
   });
 
   it("migrates a version-2 board, keeping every field and adding the outside and block fields", () => {
-    const { outside, block, stop, resumes, ...v2 } = fullRow;
+    const { outside, block, stop, resumes, shared, ...v2 } = fullRow;
     const migrated = JobBoardDoc.definition.migrate?.(
       { nextNumber: 2, jobs: { "1": v2 }, byConversation: {} } as never,
       2,
@@ -192,7 +208,7 @@ describe("the job board upgrade", () => {
 
   it("migrates a version-3 board field by field, with the live jobs queued by priority", () => {
     const v3 = (number: number, change: Partial<JobRow>) => {
-      const { stop, resumes, ...rest } = { ...fullRow, ...change, number };
+      const { stop, resumes, shared, ...rest } = { ...fullRow, ...change, number };
       return rest;
     };
     const jobs = {
@@ -227,6 +243,27 @@ describe("the job board upgrade", () => {
       4,
     );
     expect(migrated?.queue).toEqual([1]);
+  });
+
+  it("migrates a version-4 board with every row's shared link empty", () => {
+    const { shared, ...v4 } = fullRow;
+    const migrated = JobBoardDoc.definition.migrate?.(
+      {
+        nextNumber: 3,
+        jobs: { "1": v4, "2": { ...v4, number: 2 } },
+        byConversation: {},
+        queue: [2, 1],
+      } as never,
+      4,
+    );
+    expect(migrated?.queue).toEqual([2, 1]);
+    for (const key of ["1", "2"]) {
+      expect(migrated?.jobs[key]?.shared).toBeNull();
+      for (const [field, value] of Object.entries(v4)) {
+        if (field === "number") continue;
+        expect(migrated?.jobs[key]?.[field as keyof JobRow]).toEqual(value);
+      }
+    }
   });
 
   it("round-trips every new field through a commit and a snapshot", async () => {
@@ -366,6 +403,50 @@ const fields = (title: string, tier: "cheap" | "mid" | "frontier" = "mid") => ({
 });
 
 describe("board operations", () => {
+  it("creates a shared row with the next number, a ledger conversation, and a queue place", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell();
+    const { harness } = test.cell;
+    const made = await harness.commit(async (tx) => {
+      await createJobRow(tx, fields("own job"));
+      const shared = await createSharedRow(tx, {
+        title: "plan the May trip",
+        brief: "Plan the May trip for both of us.",
+        priority: "routine",
+        deadline: null,
+        tier: "cheap",
+        effort: { requested: "medium", applied: "medium" },
+        owner: "owner",
+        createdAt: 6_000,
+        shared: {
+          household: null,
+          role: "requester",
+          with: "second",
+          consent: "asking",
+          payer: "half",
+          estimateUsd: 0.25,
+          outbox: [],
+          charges: [],
+          resultAt: null,
+          waitingBudget: false,
+          syncedAt: null,
+        },
+      });
+      return { ...shared, shared: shared.shared === null ? null : { ...shared.shared } };
+    }, BACKGROUND_CONTEXT);
+    expect(made.number).toBe(2);
+    expect(made.status).toBe("queued");
+    expect(made.template).toBe("household");
+    expect(made.taskId).toBeNull();
+    expect(made.cap).toBe(0.25);
+    expect(made.shared?.consent).toBe("asking");
+    expect(made.conversationId).not.toBeNull();
+    const board = await harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT);
+    expect(board?.byConversation[String(made.conversationId)]).toBe(2);
+    expect(board?.queue).toEqual([1, 2]);
+    expect(board?.nextNumber).toBe(3);
+  });
+
   it("numbers jobs without reuse and puts cost and the tier's cap on every row", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     test = await openTestCell();

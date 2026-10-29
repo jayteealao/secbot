@@ -126,3 +126,46 @@ export interface HouseholdClient {
   setBudget?(change: Partial<BudgetSettings>): Promise<BudgetSettings>;
   alertSent?(outcome: BudgetAlertSent): Promise<void>;
 }
+
+/**
+ * One operation a person cell sends the household about a shared job. Each carries an operation id,
+ * so an exchange sent again after a crash or a lost answer applies it once.
+ */
+export type SharedOp =
+  | {
+      readonly kind: "propose";
+      readonly opId: string;
+      readonly person: string;
+      /** The job's number on the requesting person's board. */
+      readonly local: number;
+      readonly title: string;
+      readonly brief: string;
+      readonly priority: "urgent" | "deadline" | "routine" | "research";
+      readonly deadline: string | null;
+      readonly tier: "cheap" | "mid" | "frontier";
+      readonly effort: "low" | "medium" | "high";
+      readonly estimateUsd: number;
+    }
+  | {
+      readonly kind: "answer";
+      readonly opId: string;
+      readonly person: string;
+      readonly household: number;
+      /** The job's number on the answering person's board. */
+      readonly local: number;
+      readonly join: boolean;
+    }
+  | {
+      readonly kind: "restart";
+      readonly opId: string;
+      readonly person: string;
+      readonly household: number;
+      readonly note: string;
+    }
+  | {
+      readonly kind: "resume";
+      readonly opId: string;
+      readonly person: string;
+      readonly household: number;
+    }
+  | { readonly kind: "stop"; readonly opId: string; readonly person: string };
