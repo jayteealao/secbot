@@ -1,6 +1,7 @@
 // Test-cell deployment: the person-cell routes, the household cell, the secrets cell,
-// ConformanceCell, the durability lab, and the guard bench. Never deployed to a person cell. The
-// empty vars are names only: secbot-release fills them on the VPS at deploy time.
+// ConformanceCell, the durability lab, the guard bench, and the capacity bench. Never deployed to
+// a person cell. The empty vars are names only: secbot-release fills them on the VPS at deploy
+// time.
 // SECBOT_MARK_THRESHOLD_CAPS is a test-cell setting, not a secret: it lowers the reminder tool's
 // mark threshold to 0, so every reminder the decision model answers reaches the reviewer (a cap
 // can only lower a threshold). The production config (wrangler.jsonc) never carries it.
@@ -19,7 +20,8 @@
       { "name": "HOUSEHOLD_CELL", "class_name": "HouseholdCell" },
       { "name": "LAB", "class_name": "DurabilityLabCell" },
       { "name": "SECRETS_CELL", "class_name": "SecretsCell" },
-      { "name": "GUARD_BENCH", "class_name": "GuardBenchCell" }
+      { "name": "GUARD_BENCH", "class_name": "GuardBenchCell" },
+      { "name": "CAPACITY_BENCH", "class_name": "CapacityBenchCell" }
     ]
   },
   "migrations": [
@@ -27,7 +29,8 @@
     { "tag": "v2", "new_sqlite_classes": ["PersonCell"] },
     { "tag": "v3", "new_sqlite_classes": ["HouseholdCell", "DurabilityLabCell"] },
     { "tag": "v4", "new_sqlite_classes": ["SecretsCell"] },
-    { "tag": "v5", "new_sqlite_classes": ["GuardBenchCell"] }
+    { "tag": "v5", "new_sqlite_classes": ["GuardBenchCell"] },
+    { "tag": "v6", "new_sqlite_classes": ["CapacityBenchCell"] }
   ],
   "r2_buckets": [{ "binding": "SNAPSHOTS", "bucket_name": "secbot-snapshots" }],
   "vars": {
