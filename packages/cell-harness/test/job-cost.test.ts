@@ -9,6 +9,7 @@ import {
   conversationTotal,
   ensureMonth,
   ledgerConversations,
+  ledgerListing,
   readMonth,
 } from "../src/month-ledger.ts";
 import { roleOf } from "../src/telemetry.ts";
@@ -346,17 +347,20 @@ describe("jobs that ended before the month", () => {
         doc === UsageDoc ? costs[String(rest[0])] : docs.get(doc),
       commit: async (work: (value: typeof tx) => Promise<unknown>) => work(tx),
     } as unknown as Parameters<typeof ensureMonth>[0];
-    const conversations = await ledgerConversations(harness, BACKGROUND_CONTEXT);
+    const { included: conversations, excluded } = await ledgerListing(harness, BACKGROUND_CONTEXT);
     expect(conversations.filter((each) => each.job !== undefined).map((each) => each.job)).toEqual([
       1, 2, 3,
     ]);
-    const { ledger: rolled } = await ensureMonth(
+    expect(excluded.map((each) => each.job)).toEqual([4]);
+    const { ledger: rolled, roll } = await ensureMonth(
       harness,
       now,
       "UTC",
       conversations,
       BACKGROUND_CONTEXT,
+      excluded,
     );
+    expect(roll).toMatchObject({ closedMonth: "2026-10", retired: 2 });
     expect(rolled.month).toBe("2026-11");
     // The lead's own conversation is listed too; only the job conversations matter here.
     const jobIds = Object.keys(rolled.baseline).filter((id) => id.startsWith("4"));
@@ -366,6 +370,62 @@ describe("jobs that ended before the month", () => {
     expect(ledger).toMatchObject({ closed: { "2026-10": 0.7 } });
     const after = await ledgerConversations(harness, BACKGROUND_CONTEXT);
     expect(after.filter((each) => each.job !== undefined).map((each) => each.job)).toEqual([2, 3]);
+  });
+
+  it("does not retire a review made between the listing and the roll", async () => {
+    const { JobBoardDoc, MonthLedgerDoc } = await import("../src/docs.ts");
+    const usage = (cost: number) => ({ models: { x: { cost: { total: cost } } }, tools: {} });
+    // Job 1 ended in October; its risky result is pulled while November's roll runs.
+    const row: Record<string, unknown> = {
+      number: 1,
+      template: "research",
+      endedAt: Date.UTC(2026, 9, 20),
+      conversationId: 61,
+      runs: [],
+      review: null,
+    };
+    const ledger: Record<string, unknown> = {
+      month: "2026-10",
+      zone: "UTC",
+      startsAt: Date.UTC(2026, 9, 1),
+      endsAt: Date.UTC(2026, 10, 1),
+      nextZone: null,
+      baseline: {},
+      hours: {},
+      seen: {},
+      retired: {},
+    };
+    const costs: Record<string, unknown> = { "61": usage(0.3) };
+    const docs = new Map<unknown, unknown>([
+      [JobBoardDoc, { jobs: { "1": row } }],
+      [MonthLedgerDoc, ledger],
+    ]);
+    const tx = {
+      doc: async (doc: unknown, id?: unknown) =>
+        doc === UsageDoc ? costs[String(id)] : docs.get(doc),
+    };
+    const harness = {
+      snapshot: async (doc: unknown, ...rest: unknown[]) =>
+        doc === UsageDoc ? costs[String(rest[0])] : docs.get(doc),
+      commit: async (work: (value: typeof tx) => Promise<unknown>) => work(tx),
+    } as unknown as Parameters<typeof ensureMonth>[0];
+    const { included, excluded } = await ledgerListing(harness, BACKGROUND_CONTEXT);
+    // The review starts after the listing and before the roll's commit.
+    row.review = { conversationId: 62 };
+    costs["62"] = usage(0.1);
+    await ensureMonth(
+      harness,
+      Date.UTC(2026, 10, 2),
+      "UTC",
+      included,
+      BACKGROUND_CONTEXT,
+      excluded,
+    );
+    expect(Object.keys(ledger.retired as Record<string, true>)).toEqual([]);
+    costs["62"] = usage(0.25);
+    const november = await readMonth(harness, Date.UTC(2026, 10, 3), "UTC", BACKGROUND_CONTEXT);
+    // The review's whole cost counts in November; job 1's own run is baselined at 0.3.
+    expect(november.person.spentUsd).toBeCloseTo(0.25, 6);
   });
 
   it("counts none of a resumed job's earlier cost after the roll retired it", async () => {

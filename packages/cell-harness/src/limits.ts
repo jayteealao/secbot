@@ -118,6 +118,17 @@ export async function budgetState(
     await startZone(parts, context),
     context,
   );
+  if (spend.roll !== undefined) {
+    // Counts only: a wrongly retired conversation shows as lower spend, and this line dates it.
+    logEvent("month.rolled", {
+      cell: parts.person,
+      month: spend.month,
+      closed_month: spend.roll.closedMonth,
+      closed_usd: spend.roll.closedUsd,
+      baselined: spend.roll.baselined,
+      retired: spend.roll.retired,
+    });
+  }
   const household = await householdSettings(parts.harness, context);
   const limit = await readLimit(parts.harness, context);
   return {
