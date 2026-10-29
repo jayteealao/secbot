@@ -20,9 +20,13 @@ import {
   fauxToolCall,
   until,
 } from "@secbot/cell-harness/testing";
+import { CellClient } from "../../cli/src/client.ts";
+import { type Frame, frameRenderer } from "../../cli/src/commands/chat.ts";
+import { answerShared, SHARED_NOT_SENT, sharedOf } from "../../cli/src/commands/shared-confirm.ts";
 import type { Io } from "../../cli/src/io.ts";
 import { run } from "../../cli/src/main.ts";
 import { sha256Hex } from "../src/device-auth.ts";
+import type { SocketLike } from "../src/person-cell.ts";
 import { route, type WorkerEnv } from "../src/routes.ts";
 import {
   closeAll,
@@ -302,8 +306,119 @@ export async function sharedSetup(options: {
     },
     close: async () => {
       restoreFetch?.();
+      delete (globalThis as { WebSocketPair?: unknown }).WebSocketPair;
       await closeAll(setup);
       for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true });
     },
   };
+}
+
+/** A scripted `secbot chat` session of one person on the stand-in. */
+export interface ChatSession {
+  /** Opens the person's real session route with their device key; frames print as chat prints them. */
+  open(): Promise<void>;
+  /** Sends one line as `secbot chat` routes it: a join or decline to its route, others to the lead. */
+  say(line: string): Promise<void>;
+  /** Drops the connection and opens it again, with the same renderer (as chat keeps one). */
+  reconnect(): Promise<void>;
+  close(): Promise<void>;
+  /** What the session printed to stdout, with the person's own lines as `> <line>`. */
+  out(): string;
+  err(): string;
+  /** How many route calls the session's own client made (the join and decline routes). */
+  routed(): number;
+}
+
+/**
+ * `secbot chat` for `person`, driven in process: one CLI renderer for the whole session, a stand-in
+ * socket pair on the person cell's real session route, and the CLI's own join and decline path.
+ */
+export function chatSession(setup: SharedSetup, person: string): ChatSession {
+  let out = "";
+  let err = "";
+  const io: Io = {
+    stdout: (text) => {
+      out += text;
+    },
+    stderr: (text) => {
+      err += text;
+    },
+    lines: async function* () {},
+  };
+  const renderer = frameRenderer(io);
+  let routed = 0;
+  const client = new CellClient(
+    `http://${HOST}`,
+    {
+      name: person === "owner" ? "laptop" : "laptop2",
+      person,
+      key: person === "owner" ? KEY : SECOND_KEY,
+    },
+    (input, init) => {
+      routed += 1;
+      return setup.fetchFor(person)(input, init);
+    },
+  );
+  let socket: (SocketLike & { closed: boolean }) | undefined;
+  let requestNo = 0;
+  const cell = () => {
+    const found = setup.cells.get(person);
+    if (found === undefined) throw new Error(`the ${person} cell is not open`);
+    return found;
+  };
+  const session: ChatSession = {
+    async open() {
+      const server = {
+        closed: false,
+        send(data: string) {
+          if (!this.closed) renderer.handle(JSON.parse(data) as Frame);
+        },
+        close() {
+          this.closed = true;
+        },
+      };
+      socket = server;
+      (globalThis as { WebSocketPair?: unknown }).WebSocketPair = class {
+        0 = { send() {}, close() {} };
+        1 = server;
+      };
+      // Node refuses a 101 Response, so the opening settles as a rejection after the frames.
+      await setup
+        .fetchFor(person)(`http://${HOST}${client.path("/session")}`, { headers: client.headers })
+        .catch(() => undefined);
+    },
+    async say(line) {
+      out += `> ${line}\n`;
+      const shared = sharedOf(line.trim());
+      if (shared.kind === "join" || shared.kind === "decline") {
+        renderer.print("");
+        await answerShared(client, io, shared.job, shared.kind === "join");
+        return;
+      }
+      if (shared.kind === "malformed") {
+        io.stderr(`${SHARED_NOT_SENT}\n`);
+        return;
+      }
+      if (socket === undefined) throw new Error("no open chat");
+      await cell().webSocketMessage(
+        socket,
+        JSON.stringify({ type: "input", text: line, requestId: `${person}-chat-${++requestNo}` }),
+      );
+    },
+    async reconnect() {
+      await session.close();
+      await session.open();
+    },
+    async close() {
+      const current = socket;
+      if (current === undefined) return;
+      await cell().webSocketClose(current, 1000);
+      current.closed = true;
+      socket = undefined;
+    },
+    out: () => out,
+    err: () => err,
+    routed: () => routed,
+  };
+  return session;
 }

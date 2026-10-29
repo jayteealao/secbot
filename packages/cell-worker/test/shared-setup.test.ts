@@ -5,6 +5,7 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { type FauxRequest, until } from "@secbot/cell-harness/testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  chatSession,
   OFFER_ASK,
   relayText,
   type SharedSetup,
@@ -160,5 +161,23 @@ describe("the scripted leads of the shared-job stand-in", () => {
     }
     const plain = await sharedResponder(leadRequest('CALL job_result {"job":5}'));
     expect(called(plain)).toEqual([{ name: "job_result", arguments: { job: 5 } }]);
+  });
+});
+
+describe("a scripted secbot chat session on the stand-in", () => {
+  it("prints the lead's answer; a look-alike join is not sent", { timeout: 60_000 }, async () => {
+    quiet();
+    s = await sharedSetup({ fleets: 2 });
+    expect((await s.secbotAs("second", ["jobs"])).code).toBe(0);
+    const chat = chatSession(s, "second");
+    await chat.open();
+    await chat.say("hello there");
+    await until(() => chat.out().includes("> hello there\nok"));
+    const before = s.gateway.requests.length;
+    await chat.say("/join x");
+    expect(chat.err()).toBe("not sent: answer with /join <#> or /decline <#>\n");
+    expect(chat.routed()).toBe(0);
+    expect(s.gateway.requests.length).toBe(before);
+    await chat.close();
   });
 });
