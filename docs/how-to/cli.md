@@ -209,8 +209,18 @@ $ secbot jobs restart 14
 
 When nothing runs, the stop prints `[ stopped ] nothing was running. Routines and reminders keep
 their schedule.` The stop waits up to 15 seconds for its aborted jobs to end; a job that has not
-ended by then is not counted as stopped, and the stop adds ` 1 job still ending; run secbot stop
-again to check.` Running the stop again is safe. A paused job is the lead's to go on with: `secbot
+ended by then is not counted as stopped, and the stop adds `  1 job still ending; run secbot stop
+again to check.` When every aborted job is still ending and no lead turn was stopped, the first
+line reads `[ stopped ] nothing yet. Their state is kept.`, followed by that line:
+
+```
+$ secbot stop
+[ stopped ] nothing yet. Their state is kept.
+  2 jobs still ending; run secbot stop again to check.
+  Routines and reminders keep their schedule.
+```
+
+Running the stop again is safe, and shows whether they ended. A paused job is the lead's to go on with: `secbot
 jobs restart` prints `[ restarted ] #12 compare broadband deals is paused, not stopped; ask the
 lead` (exit 1). A number with no stopped or blocked job prints `no stopped job #<n>` (exit 1). While
 a stop runs, a restart prints `secbot: a stop is running; try again` (exit 1). You can also ask the
@@ -374,6 +384,10 @@ $ secbot stop --all
   sam       1 job, lead turn
   household 1 shared job
 ```
+
+A cell whose aborted jobs had not ended within its wait ends its line with `, N still ending`,
+for example `  sam       1 job, lead turn, 1 still ending`; those jobs are not in the counts.
+Running `secbot stop --all` again shows whether they ended.
 
 When a fleet does not answer, the cells that stopped are listed, and stderr says which did not
 (exit 1); running it again is safe:
