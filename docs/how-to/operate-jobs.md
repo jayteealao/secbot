@@ -134,10 +134,11 @@ stretch alerts again, at most once a day. When the line shows often, stop or mov
 A cell uses the release's measured number unless it has its own. With the operator key, set a
 person cell's own number (the jobs at once and the day it was measured, in milliseconds since
 1970) or clear it. `cell` is the person's cell name, `owner` or `second`. The first line turns the
-day of the measurement into milliseconds:
+day of the measurement into milliseconds with Node.js, so it works in any shell; replace
+`2026-10-29` with the day you measured:
 
 ```
-$ at=$(date -u -d 2026-10-29 +%s)000
+$ at=$(node -e 'console.log(Date.parse("2026-10-29"))')
 $ curl -X PUT "$SECBOT_CELL_URL/ops/capacity?cell=owner" \
     -H "x-secbot-operator: $SECBOT_OPERATOR_KEY" -H "content-type: application/json" \
     -d "{\"measured\": 6, \"at\": $at}"
