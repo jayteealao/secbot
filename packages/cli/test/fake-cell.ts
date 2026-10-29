@@ -81,6 +81,8 @@ export interface FakeCell {
   answers: Record<number, [number, unknown]>;
   /** The job answer route: job -> [status, body]; an unknown job answers 404. */
   jobAnswers: Record<number, [number, unknown]>;
+  /** The shared-job join and decline routes: `<join|decline>:<job>` -> [status, body]; else 404. */
+  sharedAnswers: Record<string, [number, unknown]>;
   /** The guard routes: both rule levels, the activity answer, and a refusal for the next add. */
   rules: { owner: Record<string, unknown>[]; person: Record<string, unknown>[]; timeZone: string };
   activity: Record<string, unknown>;
@@ -153,6 +155,7 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     held: [],
     answers: {},
     jobAnswers: {},
+    sharedAnswers: {},
     rules: { owner: [], person: [], timeZone: "UTC" },
     activity: { person, month: "2026-10", timeZone: "UTC", total: 0, records: [], next: null },
     activityOf: undefined,
@@ -368,6 +371,14 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
         const [status, value] = cell.restartAnswers[job] ?? [
           404,
           { error: `no stopped job #${job}`, reason: "no-job" },
+        ];
+        return reply(status, value);
+      }
+      const shared = /^\/jobs\/(\d+)\/(join|decline)$/.exec(route);
+      if (shared !== null && request.method === "POST") {
+        const [status, value] = cell.sharedAnswers[`${shared[2]}:${shared[1]}`] ?? [
+          404,
+          { error: `no shared job #${shared[1]} waits for you` },
         ];
         return reply(status, value);
       }

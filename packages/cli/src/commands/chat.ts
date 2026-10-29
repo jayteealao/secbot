@@ -16,6 +16,7 @@ import type { CellClient } from "../client.ts";
 import type { Io } from "../io.ts";
 import { answerHeld, answerOf, type HeldCall, heldBlock, NOT_SENT } from "./held.ts";
 import { ANSWER_NOT_SENT, answerJob, answerJobOf, questionLine } from "./job-answer.ts";
+import { answerShared, SHARED_NOT_SENT, sharedLine, sharedOf } from "./shared-confirm.ts";
 import { type Notice, noticeBlock, type Usage, usageLine, type Waiting } from "./usage.ts";
 
 export type Frame =
@@ -31,7 +32,8 @@ export type Frame =
   | { type: "held"; call: HeldCall; count: number }
   | { type: "usage"; usage: Usage }
   | { type: "notice"; notice: Notice; waiting: Waiting[] }
-  | { type: "question"; job: number; title: string };
+  | { type: "question"; job: number; title: string }
+  | { type: "shared"; job: number; title: string; from: string; payer: "half" | "all" };
 
 /** The widest line a missed message prints at; longer ones continue indented by two spaces. */
 const MISSED_WIDTH = 79;
@@ -85,6 +87,7 @@ export function frameRenderer(
   const shown = new Set<number>();
   const noticed = new Set<number>();
   const asked = new Set<number>();
+  const offered = new Set<number>();
 
   const print = (text: string) => {
     if (midAnswer) io.stdout("\n");
@@ -149,6 +152,12 @@ export function frameRenderer(
         if (asked.has(frame.job)) break;
         asked.add(frame.job);
         print(`\n${questionLine(frame.job)}\n`);
+        break;
+      case "shared":
+        // Once per job in this session, one blank line after the lead's words.
+        if (offered.has(frame.job)) break;
+        offered.add(frame.job);
+        print(`\n${sharedLine(frame.job, frame.from, frame.payer)}\n`);
         break;
     }
   };
@@ -221,6 +230,18 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
     }
     // An answer to a job's question goes to the cell's answer route, never to the lead; a line
     // that only looks like one is not sent at all.
+    // A join or decline of a shared job goes to the cell's routes, never to the lead; a line that
+    // only looks like one is not sent at all.
+    const shared = sharedOf(text);
+    if (shared.kind === "join" || shared.kind === "decline") {
+      print("");
+      await answerShared(client, io, shared.job, shared.kind === "join");
+      continue;
+    }
+    if (shared.kind === "malformed") {
+      io.stderr(`${SHARED_NOT_SENT}\n`);
+      continue;
+    }
     const job = answerJobOf(text);
     if (job.kind === "answer") {
       print("");
