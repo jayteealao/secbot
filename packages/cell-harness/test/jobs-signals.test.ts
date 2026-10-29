@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { DecisionModels } from "../src/decision-model.ts";
+import { DecisionFailure, type DecisionModels } from "../src/decision-model.ts";
 import { JobBoardDoc, StopDoc } from "../src/docs.ts";
 import { createJobRow } from "../src/job-board.ts";
 import { QUEUED_LONG_MS } from "../src/job-task.ts";
@@ -479,6 +479,39 @@ describe("the content check signals", () => {
     ]);
     expect(JSON.stringify(events)).not.toContain(FIXTURE_ORDER);
     expect(JSON.stringify(events)).not.toContain("lentil");
+  });
+
+  it("logs why the check failed when it stops a job on a failure", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const failingCheck: DecisionModels = (adapter) => ({
+      ...passingDecision(adapter),
+      checkContent: async () => {
+        throw new DecisionFailure("http-429", 1);
+      },
+    });
+    test = await openTestCell({
+      gateway: createFauxGateway(reads("injected")),
+      fixturePages: FIXTURE_PAGES,
+      guard: { decision: failingCheck },
+    });
+    const t = test;
+    await (await t.cell.submit(RESEARCH_JOB, "c-3")).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await job(t))?.status === "blocked");
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    const events = loggedEvents(warn.mock.calls);
+    expect(events.filter((each) => each.event === "content.check_failed")).toEqual([
+      {
+        event: "content.check_failed",
+        level: "warn",
+        cell: "owner",
+        job: 1,
+        tool: "read_fixture_page",
+        outcome: "error",
+        cause: "http-429",
+        chunk: 0,
+      },
+    ]);
   });
 
   it("marks the guard's verdict line of a reviewed outside action", async () => {

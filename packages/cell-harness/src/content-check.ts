@@ -21,7 +21,7 @@ import {
   type Wrap,
   wrapTool,
 } from "@earendil-works/pi-durable";
-import { logEvent } from "./cell-parts.ts";
+import { errorFields, logEvent } from "./cell-parts.ts";
 import {
   buildContentState,
   DecisionFailure,
@@ -446,6 +446,21 @@ export function createContentCheckExtension(deps: ContentCheckDeps): Extension {
               duration_ms: Date.now() - started,
             });
             if (verdict.outcome !== "clean") {
+              if (verdict.outcome !== "hit") {
+                // Why the check failed: a provider outage and a code fault read differently.
+                logEvent(
+                  "content.check_failed",
+                  {
+                    cell: person,
+                    job: n,
+                    tool: call.name,
+                    outcome: verdict.outcome,
+                    cause: verdict.cause,
+                    chunk: verdict.chunk,
+                  },
+                  "warn",
+                );
+              }
               const stop = failed(verdict.outcome, verdict.chunk);
               await block(n, api, stop, verdict.usages, size, context);
               return withheld();
@@ -467,6 +482,19 @@ export function createContentCheckExtension(deps: ContentCheckDeps): Extension {
             };
           } catch (error) {
             if (context.abortSignal?.aborted) throw error;
+            logEvent(
+              "content.check_failed",
+              {
+                cell: person,
+                job: n,
+                tool: call.name,
+                outcome: "error",
+                cause: "thrown",
+                chunk: null,
+                ...errorFields(error),
+              },
+              "warn",
+            );
             await block(n, api, failed("error", null), [], UNKNOWN_SIZE, context);
             return withheld();
           }
