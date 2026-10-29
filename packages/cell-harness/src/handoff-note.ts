@@ -29,6 +29,7 @@ import {
   HANDOFF_NOTE_MAX_CHARS,
   HANDOFF_NOTE_PROMPT,
   HANDOFF_NOTE_SOURCE_CHARS,
+  HANDOFF_NOTE_TIMEOUT_MS,
   HANDOFF_USAGE_KEY,
   LEAD_ROLE,
 } from "./release-defaults.ts";
@@ -80,7 +81,17 @@ export function createHandoffNoteExtension(deps: HandoffNoteDeps): Extension {
                     },
                   ],
                 },
-                context.abortSignal === undefined ? {} : { signal: context.abortSignal },
+                // Bounded: a call that never answers falls through to the previous note, so the
+                // compaction and the lead's next request do not wait on it.
+                {
+                  signal:
+                    context.abortSignal === undefined
+                      ? AbortSignal.timeout(HANDOFF_NOTE_TIMEOUT_MS)
+                      : AbortSignal.any([
+                          context.abortSignal,
+                          AbortSignal.timeout(HANDOFF_NOTE_TIMEOUT_MS),
+                        ]),
+                },
               );
               if (message.stopReason === "error" || message.stopReason === "aborted") {
                 throw new Error(message.errorMessage ?? "the note call failed");

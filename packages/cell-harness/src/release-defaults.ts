@@ -182,6 +182,8 @@ export const HANDOFF_NOTE_PROMPT = [
 
 /** The longest hand-off note kept, in characters. */
 export const HANDOFF_NOTE_MAX_CHARS = 1_200;
+/** How long the hand-off note's model call may take before the previous note is kept. */
+export const HANDOFF_NOTE_TIMEOUT_MS = 30_000;
 
 /** The most transcript text the note call reads, in characters (the newest part). */
 export const HANDOFF_NOTE_SOURCE_CHARS = 24_000;
