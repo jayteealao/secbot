@@ -646,7 +646,6 @@ describe("the shared-job signals", () => {
     await leadCalls(pair.owner, "propose_shared_job", {
       title: TITLE,
       brief: SHARED_BRIEF,
-      estimate_usd: 0.2,
     });
     await until(async () => (await pair.row("owner", 1))?.shared?.household === 1);
     await pair.sync("second");
@@ -666,7 +665,6 @@ describe("the shared-job signals", () => {
       cell: "owner",
       job: 1,
       tier: "cheap",
-      estimate_usd: 0.2,
     });
     expect(one("shared.offered")[0]).toMatchObject({
       cell: "second",

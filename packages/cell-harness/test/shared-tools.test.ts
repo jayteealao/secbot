@@ -20,7 +20,6 @@ import { answerFrom, openPair, type SharedPair } from "./shared-pair.ts";
 const PROPOSAL = {
   title: "plan the May trip",
   brief: "Plan the May trip for both of us.",
-  estimate_usd: 0.8,
 };
 
 let alone: TestCell | undefined;
@@ -38,7 +37,7 @@ async function offered(pair: SharedPair) {
 }
 
 describe("propose_shared_job and offer_shared", () => {
-  it("proposes a waiting shared row with its estimate capped at the tier's cap, and delivers it in the background", async () => {
+  it("proposes a waiting shared row whose estimate is the tier's cap, and delivers it in the background", async () => {
     const pair = await openPair();
     await offered(pair);
     const row = await pair.row("owner", 1);

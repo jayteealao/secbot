@@ -219,7 +219,8 @@ reached, it waits for the limit without holding up later exchanges.
 into charges per person: half each; when one person's monthly limit is reached, the other pays
 all; while both are reached, the job waits and spends nothing until a limit is raised or the month
 resets. Each person cell books its own charges once on its own month, where its limit and its cost
-view count them under `household`.
+view count them under `household`. The cost the other person agrees to is the job's tier cap, the
+most the job can spend, so their half of the real cost never passes the half they were shown.
 
 **Escalation.** A shared job keeps the tier and the estimate the other person agreed to, so no
 lead may raise it. Only the requesting person's lead may restart it, once, with a failure note;

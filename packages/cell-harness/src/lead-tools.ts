@@ -676,9 +676,6 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
       ),
       tier: Type.Optional(literals(TIERS, "Default: the household template's tier.")),
       effort: Type.Optional(literals(JOB_EFFORTS, `Default ${DEFAULT_JOB_EFFORT}.`)),
-      estimate_usd: Type.Optional(
-        Type.Number({ minimum: 0, description: "The whole job's likely cost; default its cap." }),
-      ),
     }),
     // A crash mid-call gives the model an interrupted result instead of a second proposal.
     replay: "unsafe",
@@ -699,7 +696,9 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         const tier = args.tier ?? template.tier;
         const requested = args.effort ?? DEFAULT_JOB_EFFORT;
         const cap = capOf(tier, (await tx.doc(TierSettingsDoc)).caps);
-        const estimate = Math.min(args.estimate_usd ?? cap, cap);
+        // The other person agrees to the most the job can cost them: the estimate is the tier's
+        // cap, never a lower figure, because their half of the real cost is charged up to it.
+        const estimate = cap;
         const row = await createSharedRow(tx, {
           title: args.title.trim(),
           brief: args.brief,
