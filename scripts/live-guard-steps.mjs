@@ -667,6 +667,13 @@ export function check(text, { expect = [], reject = [] } = {}) {
   };
 }
 
+/** The job number `pattern` names in `text` (its first group, newest match), or undefined. Pure. */
+export function keptNumber(text, pattern) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const last = [...String(text).matchAll(new RegExp(pattern.source, flags))].at(-1);
+  return last?.[1] === undefined ? undefined : Number(last[1]);
+}
+
 /** The newest held call number in `text`, or undefined. Pure. */
 export function newestHeld(text) {
   const all = [...text.matchAll(new RegExp(CONTRACT.held.source, "g"))];

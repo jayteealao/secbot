@@ -42,6 +42,7 @@ import {
   fillArgv,
   fixedLimit,
   isOpus,
+  keptNumber,
   literalHits,
   MODEL_TURN_MS,
   modelsProblem,
@@ -320,12 +321,25 @@ async function runStep(step, deps, context, state) {
   const scale = deps.scale ?? 1;
   const chunk = [`## ${step.id}`];
   let answerMark;
+  // Where each chat stood when the step began: a watch reads what it printed since.
+  const marks = new Map(
+    [deps.chat, ...Object.values(deps.chatAs ?? {})].map((chat) => [chat, chat.text().length]),
+  );
+  /** Keeps the job number `action.keep.from` names in `text` as `{job:<name>}`. */
+  const keep = (action, text) => {
+    if (action.keep === undefined || action.keep === "pending") return;
+    const number = keptNumber(text, action.keep.from);
+    if (number === undefined) return;
+    state.jobs = { ...(state.jobs ?? {}), [action.keep.name]: number };
+  };
 
   const cmd = async (argv, stdin, run = (...args) => deps.cli(...args), as = "owner") => {
-    const result = await run(fillArgv(argv, context), stdin === undefined ? {} : { stdin });
+    const filled = fillArgv(argv, context).map((word) => fillLine(word, state));
+    const result = await run(filled, stdin === undefined ? {} : { stdin });
     const err = result.err ? `[stderr]\n${result.err}` : "";
     const who = as === "owner" ? "" : `(as ${as}) `;
-    chunk.push(`${who}$ secbot ${argv.join(" ")}`, `${result.out}${err}[exit ${result.code}]`);
+    const shown = argv.map((word) => fillLine(word, state));
+    chunk.push(`${who}$ secbot ${shown.join(" ")}`, `${result.out}${err}[exit ${result.code}]`);
     return result;
   };
 
@@ -358,6 +372,7 @@ async function runStep(step, deps, context, state) {
       found = check(`${result.out}${result.err}`, patterns);
     }
     if (result.code === 0 && found.missing.length === 0 && found.present.length === 0) {
+      keep(action, `${result.out}${result.err}`);
       return { ok: true };
     }
     const detail = result.code !== 0 ? `exit ${result.code}` : describeMissing(found);
@@ -399,6 +414,7 @@ async function runStep(step, deps, context, state) {
       await chatTurn(fillLine(line, state), patterns, ms, chat);
     }
     if (action.keep === "pending") state.pendingHeld = newestHeld(since());
+    keep(action, since());
     const found = check(since(), patterns);
     if (found.missing.length > 0) {
       const detail = `the model did not: ${describeMissing(found)}`;
@@ -406,6 +422,21 @@ async function runStep(step, deps, context, state) {
     }
     if (found.present.length > 0)
       return { ok: false, detail: describeMissing(found), text: since() };
+    return { ok: true };
+  };
+
+  const watchAction = async (action, patterns) => {
+    const chat = chatOf(deps, action.as);
+    if (chat === undefined) return { ok: false, detail: `no chat for ${action.as}` };
+    const mark = marks.get(chat) ?? 0;
+    const since = () => chat.text().slice(mark);
+    const found = await waitFor(since, patterns, (action.timeoutMs ?? MODEL_TURN_MS) * scale, deps);
+    chunk.push(`(watching the ${action.as ?? "owner"} chat)`);
+    if (found.missing.length > 0) {
+      const detail = `the model did not: ${describeMissing(found)}`;
+      return { ok: false, notRun: true, detail, text: since() };
+    }
+    keep(action, since());
     return { ok: true };
   };
 
@@ -455,6 +486,7 @@ async function runStep(step, deps, context, state) {
     if (action.kind === "open") return openAction(action, patterns);
     if (action.kind === "chat") return chatAction(action, patterns);
     if (action.kind === "answer") return answerAction(action, patterns);
+    if (action.kind === "watch") return watchAction(action, patterns);
     if (action.kind === "limit") return limitAction(action, patterns);
     if (action.kind === "close") return closeAction(patterns);
     if (action.kind === "pause") {
