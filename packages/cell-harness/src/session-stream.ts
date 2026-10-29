@@ -16,8 +16,8 @@ import { type HeldCallView, readHeld, viewOf } from "./approvals.ts";
 import { leadMessageOf } from "./delivery.ts";
 import {
   ApprovalsDoc,
-  type JobRow,
   JobBoardDoc,
+  type JobRow,
   type LimitNotice,
   LimitNoticesDoc,
   ModelHealthDoc,
@@ -71,7 +71,20 @@ export type Frame =
    * A job's question put to the person: sent once, after the lead's answer that asks it, and for
    * each open one when a session opens. The person answers with the job's answer route.
    */
-  | { readonly type: "question"; readonly job: number; readonly title: string };
+  | { readonly type: "question"; readonly job: number; readonly title: string }
+  /**
+   * A shared job the other person proposed, given to the person by their lead: sent once, after the
+   * lead's answer that gives it, and for each open offer when a session opens. `payer` is `all`
+   * when the person's own limit is reached, so the proposing person pays all. The person answers
+   * with the job's join or decline route.
+   */
+  | {
+      readonly type: "shared";
+      readonly job: number;
+      readonly title: string;
+      readonly from: string;
+      readonly payer: "half" | "all";
+    };
 
 /** Every frame type, for checks that the documented protocol matches this union. */
 export const FRAME_TYPES = [
@@ -88,6 +101,7 @@ export const FRAME_TYPES = [
   "usage",
   "notice",
   "question",
+  "shared",
 ] as const satisfies readonly Frame["type"][];
 
 /** The open job questions put to the person, as `<job>:<question number>` keys with their rows. */
@@ -99,6 +113,30 @@ export function personQuestions(
     return open === null || !open.toPerson || open.personAskedAt === null
       ? []
       : [{ key: `${row.number}:${open.number}`, job: row.number, title: row.title }];
+  });
+}
+
+/** The shared-job offers the lead gave the person and they have not answered, as `shared:<job>` keys. */
+export function personOffers(jobs: Readonly<Record<string, JobRow>>): {
+  readonly key: string;
+  readonly job: number;
+  readonly title: string;
+  readonly from: string;
+  readonly payer: "half" | "all";
+}[] {
+  return Object.values(jobs).flatMap((row) => {
+    const link = row.shared;
+    return link === null || link.role !== "other" || link.consent !== "shown"
+      ? []
+      : [
+          {
+            key: `shared:${row.number}`,
+            job: row.number,
+            title: row.title,
+            from: link.with,
+            payer: link.payer === "them" ? ("all" as const) : ("half" as const),
+          },
+        ];
   });
 }
 
@@ -125,10 +163,10 @@ export async function openSessionStream(
 ): Promise<SessionStream> {
   const context = BACKGROUND_CONTEXT;
   // Questions open when the stream starts are sent by each session as it opens.
+  // Offers open when the stream starts are sent the same way.
+  const opening = (await harness.snapshot(JobBoardDoc, context))?.jobs ?? {};
   const asked = new Set(
-    personQuestions((await harness.snapshot(JobBoardDoc, context))?.jobs ?? {}).map(
-      (question) => question.key,
-    ),
+    [...personQuestions(opening), ...personOffers(opening)].map((open) => open.key),
   );
   const askQuestions = async () => {
     const board = await harness.snapshot(JobBoardDoc, context);
@@ -136,6 +174,12 @@ export async function openSessionStream(
       if (asked.has(question.key)) continue;
       asked.add(question.key);
       send({ type: "question", job: question.job, title: question.title });
+    }
+    for (const offer of personOffers(board?.jobs ?? {})) {
+      if (asked.has(offer.key)) continue;
+      asked.add(offer.key);
+      const { job, title, from, payer } = offer;
+      send({ type: "shared", job, title, from, payer });
     }
   };
   const events = await watchEvents(harness, ROOT_CONVERSATION_ID, context);

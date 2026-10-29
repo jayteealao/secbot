@@ -3,9 +3,11 @@
 // person; the delivered callback lets the cell advance the device's cursor.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { JobBoardDoc, type JobRow } from "../src/docs.ts";
+import { createSharedRow } from "../src/job-board.ts";
 import { questionNotice } from "../src/job-tools.ts";
 import { askPersonText } from "../src/lead-tools.ts";
-import type { Frame } from "../src/session-stream.ts";
+import { type Frame, personOffers } from "../src/session-stream.ts";
 import {
   createFauxGateway,
   fauxAssistantMessage,
@@ -137,5 +139,82 @@ describe("the question frame", () => {
       { type: "question", job: 1, title: "renew passport form" },
     ]);
     expect(frames.filter((frame) => frame.type === "question")).toHaveLength(1);
+  });
+});
+
+describe("the shared frame", () => {
+  const link = (consent: "offered" | "shown", payer: "half" | "them" | "you" = "half") => ({
+    household: 4,
+    role: "other" as const,
+    with: "sam",
+    consent,
+    payer,
+    estimateUsd: 0.25,
+    outbox: [],
+    charges: [],
+    resultAt: null,
+    waitingBudget: false,
+    syncedAt: 1,
+  });
+
+  it("lists the offers the lead gave the person, with who pays", () => {
+    const row = (number: number, shared: ReturnType<typeof link>) =>
+      ({ number, title: `trip ${number}`, shared }) as unknown as JobRow;
+    expect(
+      personOffers({
+        "1": row(1, link("offered")),
+        "2": row(2, link("shown")),
+        "3": row(3, link("shown", "them")),
+        "4": row(4, { ...link("shown"), role: "requester" } as never),
+      }),
+    ).toEqual([
+      { key: "shared:2", job: 2, title: "trip 2", from: "sam", payer: "half" },
+      { key: "shared:3", job: 3, title: "trip 3", from: "sam", payer: "all" },
+    ]);
+  });
+
+  it("follows the lead's answer that gives the offer, once", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const gateway = createFauxGateway(() =>
+      fauxAssistantMessage([fauxText("Sam asked me to plan the May trip for both of you.")]),
+    );
+    test = await openTestCell({ gateway });
+    const cell = test.cell;
+    const n = await cell.harness.commit(async (tx) => {
+      const row = await createSharedRow(tx, {
+        title: "plan the May trip",
+        brief: "plan the May trip",
+        priority: "routine",
+        deadline: null,
+        tier: "cheap",
+        effort: { requested: "low", applied: "low" },
+        owner: "owner",
+        createdAt: 1,
+        shared: link("offered"),
+      });
+      return row.number;
+    }, BACKGROUND_CONTEXT);
+    const frames: Frame[] = [];
+    const session = await cell.session((frame) => frames.push(frame));
+    await cell.harness.commit(async (tx) => {
+      const shared = (await tx.doc(JobBoardDoc)).jobs[String(n)]?.shared;
+      if (shared) shared.consent = "shown";
+    }, BACKGROUND_CONTEXT);
+    await (await cell.submit("anything new?", "sh-1")).wait(BACKGROUND_CONTEXT);
+    await until(() => frames.some((frame) => frame.type === "shared"));
+    await (await cell.submit("and now?", "sh-2")).wait(BACKGROUND_CONTEXT);
+    await until(() => frames.filter((frame) => frame.type === "answer").length === 2);
+    await session.stop();
+    const kinds = frames
+      .filter((frame) => frame.type === "answer" || frame.type === "shared")
+      .map((frame) => frame.type);
+    expect(kinds).toEqual(["answer", "shared", "answer"]);
+    expect(frames.find((frame) => frame.type === "shared")).toEqual({
+      type: "shared",
+      job: n,
+      title: "plan the May trip",
+      from: "sam",
+      payer: "half",
+    });
   });
 });

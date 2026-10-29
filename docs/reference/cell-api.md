@@ -260,10 +260,11 @@ The cell sends these, as JSON text frames:
 | `usage` | `usage`: `{month, zone, resetsAt, spentUsd, limitUsd, percent, line, mode}` | The person's month against their limit and the guard mode: right after `connected`, and after each `answer`. |
 | `notice` | `notice` (a `LimitNotice`), `waiting` (`[Waiting]`) | A limit line reached: once when it is recorded, and at connect for each notice this device has not seen. A device that took it does not see it again in `GET /missed`. |
 | `question` | `job`, `title` | A job's question the lead put to the person: once, right after the lead's `answer` that asks it, and at connect for each question still open. The client answers through `POST /jobs/{n}/answer`; a chat line is never an answer. |
+| `shared` | `job`, `title`, `from`, `payer` (`half` or `all`) | A shared job the other person proposed, given to this person by their lead: once, right after the lead's `answer` that gives it, and at connect for each offer still open. `payer` is `all` when this person's limit is reached, so `from` pays all. The client answers through `POST /jobs/{n}/join` or `POST /jobs/{n}/decline`; a chat line is never an answer. |
 
 Ordering and reconnects: `connected`, then `usage`, then a `held` frame for every waiting call,
 then a `notice` frame for every notice this device has not seen, then every `missed` frame, then a
-`question` frame for every open job question, then live frames. An input with no `accepted` or `rejected` frame is resent on the
+`question` frame for every open job question, then a `shared` frame for every open offer, then live frames. An input with no `accepted` or `rejected` frame is resent on the
 next connection under the same `requestId`.
 
 ## Host routes
