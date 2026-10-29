@@ -19,9 +19,11 @@
 //   node scripts/vps.mjs integration --env test-cell
 //   node scripts/vps.mjs lease acquire|release --holder H [--seconds N]
 //   node scripts/vps.mjs measure-heap --env test-cell [--seconds 180]
+//   node scripts/vps.mjs measure-heap --env test-cell --parallel-jobs 1,4,8,16 --out DIR [--slow-seconds 60]
 //   node scripts/vps.mjs measure-write-delay --env test-cell [--writes 200]
 //   node scripts/vps.mjs measure-guard --env test-cell [--calls 100] [--adapter clef|clef-flash|jev]
 //   node scripts/vps.mjs measure-guard --env test-cell --examples [--repeat 2] [--adapter ...]
+//   node scripts/vps.mjs measure-guard --env test-cell --corpus [--adapter ...]
 //
 // Cell names follow the release workflows: owner, person (the second person's cell), household,
 // and secrets. With no --cells, a command covers every cell of the environment. The secrets cell
