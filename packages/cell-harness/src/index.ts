@@ -378,6 +378,14 @@ export {
   secretsReason,
 } from "./secret-tools.ts";
 export { FRAME_TYPES, type Frame, type SessionStream } from "./session-stream.ts";
+export {
+  kickShared,
+  type SharedParts,
+  type SyncOutcome,
+  sharedOpId,
+  syncShared,
+} from "./shared-relay.ts";
+export { payerOf, payerText, type Split, splitCharge } from "./shared-split.ts";
 export { STOP_RUNNING, type StopAnswer, stopJobs } from "./stop.ts";
 export { capOf, isEffort, isTier, templatesOf, tierModelOf } from "./templates.ts";
 export {
