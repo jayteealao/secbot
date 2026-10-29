@@ -143,13 +143,13 @@ function mirrorOf(
   return local?.shared !== null && local?.shared?.household === null ? local : undefined;
 }
 
+/** Whether two plain values are equal, field by field. */
+const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+
 /**
  * The reconcile commit: acks clear their operations; each household row updates or creates its
  * mirror; new results are stored once; new charges are booked once. Returns the notices to send.
  */
-/** Whether two plain values are equal, field by field. */
-const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
-
 async function reconcile(
   tx: Tx,
   parts: SharedParts,
