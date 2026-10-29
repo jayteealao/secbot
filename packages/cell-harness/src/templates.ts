@@ -4,15 +4,14 @@
  * name), a tier's per-job cap, and the effort a model applies after pi-ai clamps the request.
  */
 import { clampThinkingLevel, type Models, type ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { JOB_EFFORTS, TIERS } from "./household-contract.ts";
 import {
   GATEWAY_PROVIDER,
-  JOB_EFFORTS,
   JOB_TEMPLATES,
   type JobEffort,
   type JobTemplate,
   TIER_CAPS_USD,
   TIER_MODELS,
-  TIERS,
   type Tier,
 } from "./release-defaults.ts";
 

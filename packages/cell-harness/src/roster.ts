@@ -14,8 +14,9 @@ import {
 } from "@earendil-works/pi-durable";
 import { type CellParts, logEvent, RefusedChange } from "./cell-parts.ts";
 import { RoleModelsDoc, RosterDoc, TemplatesDoc } from "./docs.ts";
+import { TIERS } from "./household-contract.ts";
 import { defaultModelFor, modelRef } from "./model-map.ts";
-import { LEAD_INSTRUCTIONS, LEAD_ROLE, REVIEWER_ROLE, TIERS } from "./release-defaults.ts";
+import { LEAD_INSTRUCTIONS, LEAD_ROLE, REVIEWER_ROLE } from "./release-defaults.ts";
 import { templatesOf } from "./templates.ts";
 
 export const SPECIALIST_NAME = /^[a-z][a-z0-9-]{1,31}$/;

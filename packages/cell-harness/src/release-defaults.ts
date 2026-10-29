@@ -2,6 +2,7 @@
  * Release defaults. A cell stores only the owner's changes (the role-to-model map and added
  * specialists); everything here ships with the release and applies wherever no change exists.
  */
+import type { JOB_EFFORTS, TIERS } from "./household-contract.ts";
 
 /** The one model gateway: every model call goes through OpenRouter with one key. */
 export const GATEWAY_PROVIDER = "openrouter";
@@ -43,11 +44,7 @@ export const STARTER_SPECIALISTS: readonly StarterSpecialist[] = [
   },
 ];
 
-import { JOB_EFFORTS, TIERS } from "./household-contract.ts";
-
-/** The job tiers, cheapest first (owned by the household contract, which checks them too). */
-export { JOB_EFFORTS, TIERS };
-
+/** A job tier: the household contract owns the tiers, cheapest first, and checks them too. */
 export type Tier = (typeof TIERS)[number];
 
 /** The release model of each tier (the owner changes it in the role-to-model map, by tier name). */

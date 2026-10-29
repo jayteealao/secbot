@@ -9,6 +9,7 @@ import type { Context } from "@earendil-works/chord";
 import { configure, ROOT_CONVERSATION_ID } from "@earendil-works/pi-durable";
 import { type CellParts, logEvent, RefusedChange } from "./cell-parts.ts";
 import { RoleModelsDoc, RosterDoc, TierSettingsDoc } from "./docs.ts";
+import { TIERS } from "./household-contract.ts";
 import { checkAmount } from "./limits.ts";
 import {
   DEFAULT_LEAD_MODEL,
@@ -17,7 +18,6 @@ import {
   GATEWAY_PROVIDER,
   LEAD_ROLE,
   REVIEWER_ROLE,
-  TIERS,
   type Tier,
 } from "./release-defaults.ts";
 import { capOf, isTier, tierModelOf } from "./templates.ts";

@@ -27,6 +27,7 @@ import {
   TierSettingsDoc,
 } from "./docs.ts";
 import type { SharedOp } from "./household-contract.ts";
+import { JOB_EFFORTS, TIERS } from "./household-contract.ts";
 import {
   answerQuestion,
   blockReason,
@@ -75,7 +76,7 @@ import {
   type RemoteDeps,
   remoteWraps,
 } from "./receipts.ts";
-import { DEFAULT_JOB_EFFORT, JOB_EFFORTS, TIERS } from "./release-defaults.ts";
+import { DEFAULT_JOB_EFFORT } from "./release-defaults.ts";
 import { createReviewTask, type ReviewTask, reviewHold, startReview } from "./result-review.ts";
 import { logResumed, resumeInCommit } from "./resume-job.ts";
 import { createSharedLeadTools } from "./shared-lead-tools.ts";

@@ -1,6 +1,7 @@
 // Release defaults of the job model: tiers, their models and caps, efforts, the four templates,
 // the 30-minute wake, the lead's instructions, and the guard table entries of start_job.
 import { describe, expect, it } from "vitest";
+import { JOB_EFFORTS, TIERS } from "../src/household-contract.ts";
 import {
   ALWAYS_KEY_FIELD,
   CONTENT_CHECK_MAX_BYTES,
@@ -20,7 +21,6 @@ import {
   HOUSEHOLD_AGENT_TOOLS,
   INJECTION_MARK_THRESHOLD,
   INJECTION_MAX_MISS_RATE,
-  JOB_EFFORTS,
   JOB_TEMPLATES,
   LEAD_INSTRUCTIONS,
   LOOP_LIMIT,
@@ -42,7 +42,6 @@ import {
   sharedOfferText,
   TIER_CAPS_USD,
   TIER_MODELS,
-  TIERS,
 } from "../src/release-defaults.ts";
 import {
   appliedEffort,

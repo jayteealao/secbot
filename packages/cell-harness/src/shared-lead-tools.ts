@@ -6,7 +6,7 @@ import { type Models, Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import { logEvent } from "./cell-parts.ts";
 import { RoleModelsDoc, StopDoc, TemplatesDoc, TierSettingsDoc } from "./docs.ts";
-import { isSharedTitle } from "./household-contract.ts";
+import { isSharedTitle, JOB_EFFORTS, TIERS } from "./household-contract.ts";
 import { createSharedRow } from "./job-board.ts";
 import {
   ISO_DATE,
@@ -18,7 +18,7 @@ import {
   rowOrError,
   text,
 } from "./lead-texts.ts";
-import { DEFAULT_JOB_EFFORT, JOB_EFFORTS, TIERS } from "./release-defaults.ts";
+import { DEFAULT_JOB_EFFORT } from "./release-defaults.ts";
 import { sharedOpId } from "./shared-relay.ts";
 import { STOP_RUNNING } from "./stop.ts";
 import { appliedEffort, capOf, templateNamed, templatesOf, tierModelOf } from "./templates.ts";

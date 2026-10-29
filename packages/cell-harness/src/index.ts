@@ -192,6 +192,7 @@ export {
   type HouseholdDocument,
   type HouseholdItem,
   isSharedTitle,
+  JOB_EFFORTS,
   JOB_PRIORITIES,
   type ReportSpendResult,
   SHARED_OPS_MAX,
@@ -201,6 +202,7 @@ export {
   type SharedSyncRequest,
   type SharedSyncRow,
   type SpendReport,
+  TIERS,
 } from "./household-contract.ts";
 export {
   costFromReport,
@@ -316,7 +318,6 @@ export {
   FIXTURE_SLOW_MS,
   GUARD_USAGE_KEYS,
   HOLD_MS,
-  JOB_EFFORTS,
   JOB_TEMPLATES,
   LEAD_ROLE,
   LIMIT_LINES,
@@ -328,7 +329,6 @@ export {
   SECRET_WORD_PATTERN,
   STARTER_SPECIALISTS,
   TIER_MODELS,
-  TIERS,
 } from "./release-defaults.ts";
 export { REMINDER_PREFIX, type ReminderPayload, scheduleReminder } from "./reminder.ts";
 export { createReviewTask, type ReviewTask, reviewModelFor } from "./result-review.ts";
