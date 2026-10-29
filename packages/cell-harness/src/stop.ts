@@ -45,6 +45,19 @@ export interface StopSeams {
 /** The refusal a job start, restart, or resume gets while a stop runs. */
 export const STOP_RUNNING = "Everything is being stopped; start it again once the stop is done.";
 
+/** How long a stop waits for its aborted jobs to end before it lifts the lock. */
+export const STOP_WAIT_MS = 15_000;
+
+/** Waits for `work`, or for `ms`, whichever comes first. */
+async function within(ms: number, work: Promise<unknown>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([work, new Promise((resolve) => (timer = setTimeout(resolve, ms)))]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function stopJobs(
   parts: StopParts,
   by: JobStop["by"],
@@ -90,10 +103,14 @@ export async function stopJobs(
   await seams.afterLock?.();
   const quiet = withoutAbortSignal(context);
   try {
-    for (const job of marked) await harness.abortTask(job.taskId, quiet);
+    await Promise.all(marked.map((job) => harness.abortTask(job.taskId, quiet)));
     // Not `background: true`: that would also abort routines, reminders, and reviews.
     await root.abort(quiet);
-    for (const job of marked) await harness.waitForTask(job.taskId, quiet);
+    // A job that has not ended by the bound is counted as left running below.
+    await within(
+      STOP_WAIT_MS,
+      Promise.all(marked.map((job) => harness.waitForTask(job.taskId, quiet))),
+    );
   } catch (error) {
     // The lock is lifted below whatever an abort did: a lock left set would refuse every later
     // start, restart, and resume until another stop.

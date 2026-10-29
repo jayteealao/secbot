@@ -166,44 +166,69 @@ export type CellStop = {
 
 /** How long the owner's stop waits for another fleet to answer. */
 export const REMOTE_STOP_TIMEOUT_MS = 30_000;
+/** How long one cell of this fleet has to answer the owner's stop; under the remote bound. */
+export const CELL_STOP_TIMEOUT_MS = 20_000;
 /** How long a board read waits for another fleet to answer. */
 export const REMOTE_JOBS_TIMEOUT_MS = 10_000;
 
 /**
- * Stops the cells this fleet serves: each person cell's jobs and lead turn (by the owner), then
- * the household cell's shared jobs. A cell that fails to answer is in `missing`.
+ * Stops the cells this fleet serves, all at once: each person cell's jobs and lead turn (by the
+ * owner), and the household cell's shared jobs. A cell that fails to answer, or does not answer
+ * within CELL_STOP_TIMEOUT_MS, is in `missing`.
  */
 export async function stopServed(deps: OpsDeps): Promise<{ cells: CellStop[]; missing: string[] }> {
+  const served = deps.cells.filter((cell) => cell !== SECRETS_CELL);
+  // Every cell at once, each bounded: one slow cell never holds back the stop of the others.
+  const answers = await Promise.all(
+    served.map((cell) =>
+      bounded(CELL_STOP_TIMEOUT_MS, stopOne(deps, cell)).catch((error: unknown) => {
+        logEvent("ops.stop_failed", { cell, ...errorFields(error) }, "warn");
+        return null;
+      }),
+    ),
+  );
   const cells: CellStop[] = [];
   const missing: string[] = [];
-  for (const cell of deps.cells) {
-    if (cell === SECRETS_CELL) continue;
-    try {
-      if (cell === HOUSEHOLD_CELL_NAME) {
-        const household = deps.householdJobs?.();
-        if (household?.stopJobs === undefined) {
-          missing.push(cell);
-          continue;
-        }
-        const stopped = await household.stopJobs();
-        cells.push({ cell, jobs: stopped.jobs, turn: stopped.turn, shared: true });
-        continue;
-      }
-      const guard = deps.guardOf?.(cell);
-      if (guard?.stopOf === undefined) {
-        missing.push(cell);
-        continue;
-      }
-      const answer = await guard.stopOf(cell);
-      if (answer.ok) {
-        cells.push({ cell, jobs: answer.value.jobs, turn: answer.value.turn, shared: false });
-      } else missing.push(cell);
-    } catch (error) {
-      logEvent("ops.stop_failed", { cell, ...errorFields(error) }, "warn");
-      missing.push(cell);
-    }
-  }
+  served.forEach((cell, index) => {
+    const answer = answers[index];
+    if (answer === null || answer === undefined) missing.push(cell);
+    else cells.push(answer);
+  });
   return { cells, missing };
+}
+
+/** One served cell's stop, or null when it has no binding or refused. */
+async function stopOne(deps: OpsDeps, cell: string): Promise<CellStop | null> {
+  if (cell === HOUSEHOLD_CELL_NAME) {
+    const household = deps.householdJobs?.();
+    if (household?.stopJobs === undefined) return null;
+    const stopped = await household.stopJobs();
+    return { cell, jobs: stopped.jobs, turn: stopped.turn, shared: true };
+  }
+  const guard = deps.guardOf?.(cell);
+  if (guard?.stopOf === undefined) return null;
+  const answer = await guard.stopOf(cell);
+  return answer.ok
+    ? { cell, jobs: answer.value.jobs, turn: answer.value.turn, shared: false }
+    : null;
+}
+
+/** `work`, or a rejection once `ms` have passed. */
+async function bounded<T>(ms: number, work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`the cell did not answer the stop in ${ms} ms`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** A served cell's board, for the owner: a person's view, or the household's shared jobs. */
@@ -219,42 +244,40 @@ export async function jobsServed(deps: OpsDeps, cell: string): Promise<Response>
   return answer.ok ? json(answer.value) : json({ error: answer.error }, answer.status);
 }
 
+/** The cells another fleet serves, stopped through its `/internal/stop`. */
+async function stopElsewhere(deps: OpsDeps): Promise<{ cells: CellStop[]; missing: string[] }> {
+  const elsewhere = (deps.elsewhere ?? []).filter((cell) => cell !== SECRETS_CELL);
+  if (elsewhere.length === 0) return { cells: [], missing: [] };
+  const remote = deps.remote?.();
+  if (remote === undefined) return { cells: [], missing: elsewhere };
+  const outcome = await postInternal<{ cells: CellStop[]; missing: string[] }>({
+    url: remote.url,
+    key: remote.key,
+    path: "/internal/stop",
+    body: {},
+    attempts: INTERNAL_ATTEMPTS,
+    timeoutMs: REMOTE_STOP_TIMEOUT_MS,
+    fetcher: remote.fetcher,
+  });
+  if (outcome.kind === "ok") return outcome.value;
+  logEvent(
+    "ops.stop_unanswered",
+    { status: outcome.status, attempts: outcome.attempts, ...errorFields(outcome.cause) },
+    "warn",
+  );
+  return { cells: [], missing: elsewhere };
+}
+
 /**
- * The owner's stop across the household: this fleet's cells, then the cells another fleet serves
+ * The owner's stop across the household: this fleet's cells and, at the same time, the cells another fleet serves
  * through its `/internal/stop` (a stop is safe to repeat, so the call is retried). A cell that
  * did not answer, or that no fleet address reaches, is in `missing`.
  */
 async function stopRoute(deps: OpsDeps): Promise<Response> {
-  const here = await stopServed(deps);
-  const cells = [...here.cells];
-  const missing = [...here.missing];
-  const elsewhere = (deps.elsewhere ?? []).filter((cell) => cell !== SECRETS_CELL);
-  if (elsewhere.length > 0) {
-    const remote = deps.remote?.();
-    if (remote === undefined) missing.push(...elsewhere);
-    else {
-      const outcome = await postInternal<{ cells: CellStop[]; missing: string[] }>({
-        url: remote.url,
-        key: remote.key,
-        path: "/internal/stop",
-        body: {},
-        attempts: INTERNAL_ATTEMPTS,
-        timeoutMs: REMOTE_STOP_TIMEOUT_MS,
-        fetcher: remote.fetcher,
-      });
-      if (outcome.kind === "ok") {
-        cells.push(...outcome.value.cells);
-        missing.push(...outcome.value.missing);
-      } else {
-        logEvent(
-          "ops.stop_unanswered",
-          { status: outcome.status, attempts: outcome.attempts, ...errorFields(outcome.cause) },
-          "warn",
-        );
-        missing.push(...elsewhere);
-      }
-    }
-  }
+  // This fleet and the other at the same time.
+  const [here, there] = await Promise.all([stopServed(deps), stopElsewhere(deps)]);
+  const cells = [...here.cells, ...there.cells];
+  const missing = [...here.missing, ...there.missing];
   logEvent("ops.stop", { cells: cells.map((each) => each.cell), missing });
   return json({ cells, missing });
 }

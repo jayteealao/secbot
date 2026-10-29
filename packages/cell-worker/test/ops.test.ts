@@ -20,7 +20,7 @@ import type { CellDump } from "@secbot/cell-storage";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OPERATOR_HEADER } from "../src/internal-rpc.ts";
-import type { SnapshotBucket } from "../src/ops.ts";
+import { CELL_STOP_TIMEOUT_MS, type OpsDeps, type SnapshotBucket, stopServed } from "../src/ops.ts";
 import { PERSON_HEADER, PersonCell } from "../src/person-cell.ts";
 import { route, type WorkerEnv } from "../src/routes.ts";
 
@@ -510,5 +510,49 @@ describe("a person cell's measured number", () => {
     expect((await call(s, "PUT", "/ops/capacity?cell=owner", null, good)).status).toBe(401);
     const alone = setup({ SECBOT_FLEET_CELLS: "owner" });
     expect((await call(alone, "PUT", "/ops/capacity?cell=second", KEY, good)).status).toBe(404);
+  });
+});
+
+describe("the owner's stop of this fleet's cells", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("stops every cell at once and names a cell that does not answer in time", async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const asked: string[] = [];
+    const deps = {
+      cells: ["owner", "second", "household"],
+      stubOf: () => undefined,
+      guardOf: (cell: string) => ({
+        stopOf: async () => {
+          asked.push(cell);
+          // The owner's cell hangs; the second answers.
+          if (cell === "owner") return new Promise<never>(() => {});
+          return { ok: true as const, value: { jobs: 1, turn: false } };
+        },
+      }),
+      householdJobs: () => ({
+        stopJobs: async () => {
+          asked.push("household");
+          return { jobs: 2, turn: false };
+        },
+      }),
+    } as unknown as OpsDeps;
+    const pending = stopServed(deps);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(asked.sort()).toEqual(["household", "owner", "second"]);
+    await vi.advanceTimersByTimeAsync(CELL_STOP_TIMEOUT_MS);
+    expect(await pending).toEqual({
+      cells: [
+        { cell: "second", jobs: 1, turn: false, shared: false },
+        { cell: "household", jobs: 2, turn: false, shared: true },
+      ],
+      missing: ["owner"],
+    });
+    expect(
+      loggedEvents(warn.mock.calls).find((line) => line.event === "ops.stop_failed"),
+    ).toMatchObject({ cell: "owner" });
   });
 });
