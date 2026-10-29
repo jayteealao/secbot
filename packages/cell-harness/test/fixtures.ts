@@ -9,6 +9,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Usage } from "@earendil-works/pi-ai";
 import {
   type AssistantMessage,
+  type AssistantMessageEventStream,
+  createAssistantMessageEventStream,
   createModels,
   type FauxResponseFactory,
   fauxAssistantMessage,
@@ -16,15 +18,18 @@ import {
   fauxText,
   fauxToolCall,
   type Message,
+  type Provider,
   type TranscriptContext,
 } from "@earendil-works/pi-ai";
-import { UsageDoc } from "@earendil-works/pi-durable";
+import { ROOT_CONVERSATION_ID, UsageDoc } from "@earendil-works/pi-durable";
 import { CelldSqliteDatabase } from "../../cell-storage/src/index.ts";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
 import { BudgetBoardStore } from "../../household-cell/src/budget-board.ts";
 import { ChangeLog } from "../../household-cell/src/change-log.ts";
 import { withCreditPause } from "../src/credit-pause.ts";
-import type { DecisionModels } from "../src/decision-model.ts";
+import type { ContentAnswer, DecisionModels } from "../src/decision-model.ts";
+import { RosterDoc } from "../src/docs.ts";
+import { Anchor } from "../src/handoff.ts";
 import type { HouseholdChange, HouseholdClient } from "../src/household-tools.ts";
 import { addGuardUsage, costOnlyUsage, ledgerConversations } from "../src/month-ledger.ts";
 import {
@@ -33,8 +38,17 @@ import {
   type OpenCellOptions,
   openCellHarness,
 } from "../src/open-harness.ts";
-import { DEFAULT_LEAD_MODEL, DEFAULT_SPECIALIST_MODEL } from "../src/release-defaults.ts";
+import {
+  DEFAULT_LEAD_MODEL,
+  DEFAULT_SPECIALIST_MODEL,
+  RESULT_REVIEW_PROMPT,
+  TIER_MODELS,
+} from "../src/release-defaults.ts";
 import { REVIEWER_FIRST_LINE } from "../src/reviewer.ts";
+import type { SecretsClient } from "../src/secret-tools.ts";
+
+/** The first line of the result reviewer's instructions. */
+export const RESULT_REVIEW_FIRST_LINE = RESULT_REVIEW_PROMPT.split("\n")[0] as string;
 
 export { FakeCelldStorage, fauxAssistantMessage, fauxText, fauxToolCall };
 
@@ -54,8 +68,10 @@ export interface FauxRequest {
   readonly last: Message | undefined;
   readonly lastText: string;
   readonly modelId: string;
-  /** "lead", or the specialist named in the system prompt, or "unknown". */
+  /** "lead", "household", or the specialist named in the system prompt, or "unknown". */
   readonly role: string;
+  /** The names of the tools the request offers (the replayed system messages' tool set). */
+  readonly tools?: readonly string[];
 }
 
 export function describeRequest(context: TranscriptContext, modelId: string): FauxRequest {
@@ -76,8 +92,29 @@ export function describeRequest(context: TranscriptContext, modelId: string): Fa
   const custom = /You are the custom specialist "([a-z0-9-]+)"/.exec(system)?.[1];
   const role = system.includes("You are the lead agent")
     ? "lead"
-    : (specialist ?? custom ?? "unknown");
-  return { system, last, lastText: last === undefined ? "" : text(last.content), modelId, role };
+    : system.includes("You are the household agent")
+      ? "household"
+      : (specialist ?? custom ?? "unknown");
+  const tools = new Set(
+    ((context as { tools?: readonly { name: string }[] }).tools ?? []).map((tool) => tool.name),
+  );
+  for (const m of messages) {
+    if ((m.role as string) !== "system") continue;
+    const change = m as {
+      toolsAdded?: readonly { name: string }[];
+      toolsRemoved?: readonly { name: string }[];
+    };
+    for (const tool of change.toolsAdded ?? []) tools.add(tool.name);
+    for (const tool of change.toolsRemoved ?? []) tools.delete(tool.name);
+  }
+  return {
+    system,
+    last,
+    lastText: last === undefined ? "" : text(last.content),
+    modelId,
+    role,
+    tools: [...tools],
+  };
 }
 
 export type Responder = (request: FauxRequest) => AssistantMessage | Promise<AssistantMessage>;
@@ -95,18 +132,68 @@ export const defaultResponder: Responder = (request) => {
   return fauxAssistantMessage([fauxText(`${request.role} says: ${request.lastText.slice(0, 40)}`)]);
 };
 
+/**
+ * Prices each answered step: pi-ai's faux provider reports every cost as 0, so a test that needs
+ * spend sets the cost of one step per model id (`stepCostUsd`) on each finished message.
+ */
+function withStepCost<TApi extends string>(
+  inner: Provider<TApi>,
+  stepCostUsd: (modelId: string) => number,
+): Provider<TApi> {
+  const priced = (stream: AssistantMessageEventStream, modelId: string) => {
+    const outer = createAssistantMessageEventStream();
+    void (async () => {
+      for await (const event of stream) {
+        if (event.type !== "done") {
+          outer.push(event);
+          continue;
+        }
+        const total = stepCostUsd(modelId);
+        const { usage } = event.message;
+        outer.push({
+          ...event,
+          message: { ...event.message, usage: { ...usage, cost: { ...usage.cost, total } } },
+        });
+      }
+      outer.end();
+    })();
+    return outer;
+  };
+  return Object.assign(Object.create(inner) as Provider<TApi>, {
+    stream: ((model, context, options) =>
+      priced(inner.stream(model, context, options), model.id)) as Provider<TApi>["stream"],
+    streamSimple: ((model, context, options) =>
+      priced(
+        inner.streamSimple(model, context, options),
+        model.id,
+      )) as Provider<TApi>["streamSimple"],
+    getModels: () => inner.getModels(),
+  });
+}
+
 export function createFauxGateway(
   respond: Responder = defaultResponder,
-  options: { readonly tokensPerSecond?: number } = {},
+  options: {
+    readonly tokensPerSecond?: number;
+    /** The cost of one answered step of a model, in USD (default 0, as the faux provider). */
+    readonly stepCostUsd?: (modelId: string) => number;
+  } = {},
 ): FauxGateway {
   const faux = fauxProvider({
     provider: "openrouter",
     ...(options.tokensPerSecond === undefined ? {} : { tokensPerSecond: options.tokensPerSecond }),
+    // The three tier models reason, so a job's effort reaches its requests.
     models: [DEFAULT_LEAD_MODEL, DEFAULT_SPECIALIST_MODEL, ALTERNATE_MODEL].map((id) => ({
       id,
+      reasoning: true,
       cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
     })),
   });
+  // The cheap tier's model has no low effort, so pi-ai clamps a cheap job's low up to medium
+  // (a faux model definition has no thinkingLevelMap field, so it is set on the listed model).
+  const cheap = faux.provider.getModels().find((model) => model.id === TIER_MODELS.cheap);
+  if (cheap !== undefined)
+    (cheap as { thinkingLevelMap?: object }).thinkingLevelMap = { low: null };
   const gateway: FauxGateway = {
     models: createModels(),
     requests: [],
@@ -118,7 +205,11 @@ export function createFauxGateway(
     return gateway.respond(request);
   };
   faux.setResponses(Array.from({ length: 5_000 }, () => step));
-  gateway.models.setProvider(withCreditPause(faux.provider));
+  const provider =
+    options.stepCostUsd === undefined
+      ? faux.provider
+      : withStepCost(faux.provider, options.stepCostUsd);
+  gateway.models.setProvider(withCreditPause(provider));
   return gateway;
 }
 
@@ -137,7 +228,20 @@ export const passingDecision: DecisionModels = (adapter) => ({
     costUsd: 0,
     durationMs: 0,
   }),
+  checkContent: cleanContent,
 });
+
+/** A content check that finds every chunk clean (score 0, model id "stand-in", no cost). */
+export async function cleanContent(): Promise<ContentAnswer> {
+  return {
+    outcome: "clean",
+    choice: "clean",
+    score: 0,
+    model: "stand-in",
+    costUsd: 0,
+    durationMs: 0,
+  };
+}
 
 /** True for a request from the guard's reviewer (its system prompt starts with the first line). */
 export const isReviewerRequest = (request: FauxRequest): boolean =>
@@ -160,6 +264,27 @@ export function reviewerResponder(
   };
 }
 
+/** True for a request from the result reviewer (its instructions start with the first line). */
+export const isResultReviewRequest = (request: FauxRequest): boolean =>
+  request.system.includes(RESULT_REVIEW_FIRST_LINE);
+
+/**
+ * Answers result-review requests with `verdict` (default: pass) and every other request with
+ * `others`.
+ */
+export function resultReviewer(
+  others: Responder = defaultResponder,
+  verdict: (request: FauxRequest) => { verdict: "pass" | "reject"; reason: string } = () => ({
+    verdict: "pass",
+    reason: "it does what the brief asks",
+  }),
+): Responder {
+  return (request) =>
+    isResultReviewRequest(request)
+      ? fauxAssistantMessage([fauxText(JSON.stringify(verdict(request)))])
+      : others(request);
+}
+
 /** A reviewer verdict as the reviewer writes it. */
 export const verdictJson = (verdict: "allow" | "block" | "ask", reason: string) =>
   JSON.stringify({ verdict, reason });
@@ -180,11 +305,16 @@ export async function openTestCell(
     readonly now?: () => number;
     readonly fetch?: typeof fetch;
     readonly household?: HouseholdClient;
+    readonly secrets?: SecretsClient;
     readonly onWakeChange?: () => void;
     readonly routines?: OpenCellOptions["routines"];
     readonly storage?: FakeCelldStorage;
     readonly extensions?: OpenCellOptions["extensions"];
+    readonly fixturePages?: OpenCellOptions["fixturePages"];
+    readonly fixtureTools?: OpenCellOptions["fixtureTools"];
+    readonly readers?: OpenCellOptions["readers"];
     readonly guard?: OpenCellOptions["guard"];
+    readonly persons?: OpenCellOptions["persons"];
   } = {},
 ): Promise<TestCell> {
   const storage = options.storage ?? new FakeCelldStorage();
@@ -198,9 +328,14 @@ export async function openTestCell(
       ...(options.now === undefined ? {} : { now: options.now }),
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       ...(options.household === undefined ? {} : { household: options.household }),
+      ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
       ...(options.onWakeChange === undefined ? {} : { onWakeChange: options.onWakeChange }),
       ...(options.routines === undefined ? {} : { routines: options.routines }),
       ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
+      ...(options.fixturePages === undefined ? {} : { fixturePages: options.fixturePages }),
+      ...(options.fixtureTools === undefined ? {} : { fixtureTools: options.fixtureTools }),
+      ...(options.readers === undefined ? {} : { readers: options.readers }),
+      ...(options.persons === undefined ? {} : { persons: options.persons }),
       guard: { decision: passingDecision, ...options.guard },
     });
   const test: TestCell = {
@@ -264,9 +399,13 @@ export async function addSpend(
   options: { readonly role?: string; readonly layer?: "agent" | "decision" | "reviewer" } = {},
 ): Promise<void> {
   const role = options.role ?? "lead";
-  const conversation = (await ledgerConversations(cell.harness, BACKGROUND_CONTEXT)).find(
-    (each) => each.role === role,
-  );
+  const find = async () =>
+    (await ledgerConversations(cell.harness, BACKGROUND_CONTEXT)).find(
+      (each) => each.role === role,
+    );
+  // A role with no conversation of its own (a template with no job yet) gets a frozen one.
+  if ((await find()) === undefined && role !== "lead") await addFrozenSpecialist(cell, role);
+  const conversation = await find();
   if (conversation === undefined) throw new Error(`no conversation for ${role}`);
   const layer = options.layer ?? "agent";
   await cell.harness.commit(async (tx) => {
@@ -281,6 +420,37 @@ export async function addSpend(
   }, BACKGROUND_CONTEXT);
 }
 
+/**
+ * Adds a specialist conversation as a cell opened before jobs had it: anchored, idle, on the
+ * roster. Its spend counts under its name, as a frozen specialist's does.
+ */
+export async function addFrozenSpecialist(
+  cell: CellHarness,
+  name: string,
+  instruction = `You are the ${name} specialist.`,
+  builtIn = true,
+): Promise<void> {
+  await cell.harness.commit(async (tx) => {
+    const roster = await tx.doc(RosterDoc);
+    if (Object.hasOwn(roster.specialists, name)) return;
+    const anchorTaskId = await tx.createTask(Anchor, null, {
+      ownership: { kind: "conversation" },
+      conversationId: ROOT_CONVERSATION_ID,
+      background: true,
+    });
+    const child = await tx.createConversation({
+      ownership: { kind: "task", taskId: anchorTaskId },
+    });
+    roster.specialists[name] = {
+      conversationId: child.id,
+      instruction,
+      anchorTaskId,
+      builtIn,
+      reported: [],
+    };
+  }, BACKGROUND_CONTEXT);
+}
+
 /** Every JSON log line written through console.log while `spy` was active. */
 export function loggedEvents(calls: readonly unknown[][]): Record<string, unknown>[] {
   return calls.flatMap(([line]) => {
@@ -291,4 +461,16 @@ export function loggedEvents(calls: readonly unknown[][]): Record<string, unknow
       return [];
     }
   });
+}
+
+/** Adds `usd` of model spend to job `n`'s own conversation ledger in one commit. */
+export async function addJobSpend(cell: CellHarness, n: number, usd: number): Promise<void> {
+  const id = (await cell.board()).jobs[String(n)]?.conversationId;
+  if (id === null || id === undefined) throw new Error(`job ${n} has no conversation yet`);
+  await cell.harness.commit(async (tx) => {
+    const models = (await tx.doc(UsageDoc, id)).models as Record<string, Usage>;
+    const known = models["test/spend"];
+    if (known === undefined) models["test/spend"] = costOnlyUsage(usd);
+    else known.cost.total += usd;
+  }, BACKGROUND_CONTEXT);
 }

@@ -46,9 +46,15 @@ const STARTS = [0, 7, 18, 43, 57, 67];
 /** Records per page: the route's default page size. */
 export const PAGE_SIZE = 50;
 
-/** `handoff -> research` for a hand-off; the tool name or the job's label otherwise. */
+/**
+ * `start_job -> research` for a job start, `handoff -> research` for a hand-off from before jobs;
+ * the tool name or the job's label otherwise.
+ */
 function toolOrJob(record: ActivityRecord): string {
   const args = record.arguments as Record<string, unknown> | undefined;
+  if (record.tool === "start_job" && typeof args?.template === "string") {
+    return `start_job -> ${args.template}`;
+  }
   if (record.tool === "handoff" && typeof args?.specialist === "string") {
     return `handoff -> ${args.specialist}`;
   }

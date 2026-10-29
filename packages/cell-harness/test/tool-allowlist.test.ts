@@ -1,27 +1,44 @@
-// Each role's resolved tool list. This release allows history search, household document read
-// and write, and the two secrets tools (a granted secret's value, and a brokered call that never
-// shows the agent the token); the lead also holds the hand-off tool, the only routing path, and the
-// reminder tool, which only schedules a message to the lead itself. No built-in
-// pi-durable tool (read, write, edit, bash) is installed.
+// Each role's resolved tool list. The lead starts and reads jobs (the only routing path), reads
+// background results, keeps its bookmark, searches history, reads and changes household documents,
+// uses the two secrets tools, and sets reminders, which only schedule a message to the lead
+// itself. A job's conversation holds history, household, and secrets tools only: no tool starts
+// other agents. No built-in pi-durable tool (read, write, edit, bash) is installed.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RosterDoc } from "../src/docs.ts";
-import { openTestCell, type TestCell } from "./fixtures.ts";
+import { createFauxGateway, openTestCell, type TestCell, until } from "./fixtures.ts";
+import { createHold, jobResponder, startJobLine } from "./responders.ts";
 
 const LEAD_TOOLS = [
+  "answer_job",
+  "ask_person",
   "broker_call",
-  "handoff",
   "household_change",
   "household_read",
+  "job_result",
+  "job_transcript",
+  "mark_risky",
+  "note_bookmark",
+  "offer_shared",
+  "propose_shared_job",
+  "read_job",
+  "read_result",
+  "restart_job",
+  "resume_job",
+  "resume_work",
   "search_history",
   "secret_get",
+  "set_job",
   "set_reminder",
+  "start_job",
 ];
-const SPECIALIST_TOOLS = [
+const JOB_TOOLS = [
+  "ask_lead",
   "broker_call",
   "household_change",
   "household_read",
+  "request_job",
   "search_history",
+  "search_old_job",
   "secret_get",
 ];
 
@@ -32,68 +49,62 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
+/** Starts one research job held at the model and returns its conversation's resolved agent. */
+async function heldJobAgent(t: TestCell, hold: ReturnType<typeof createHold>) {
+  await (
+    await t.cell.submit(startJobLine({ title: "a", brief: "look", template: "research" }), "r-1")
+  ).wait(BACKGROUND_CONTEXT);
+  await until(() => hold.waiting("research") === 1);
+  const id = (await t.cell.board()).jobs["1"]?.conversationId;
+  if (id === null || id === undefined) throw new Error("no job conversation");
+  const conversation = await t.cell.harness.conversation(id, BACKGROUND_CONTEXT);
+  return conversation?.agent(BACKGROUND_CONTEXT);
+}
+
 describe("tool lists", () => {
-  it("gives the lead the hand-off, history, household, secrets, and reminder tools, and each specialist history, household, and secrets only", async () => {
+  it("gives the lead the job, result, bookmark, history, household, secrets, and reminder tools, and a job history, household, and secrets only", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    test = await openTestCell();
+    const hold = createHold();
+    hold.hold("research");
+    test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
     const lead = await test.cell.root.agent(BACKGROUND_CONTEXT);
     expect(lead.tools.map((tool) => tool.name).sort()).toEqual(LEAD_TOOLS);
-    await test.cell.addSpecialist({ name: "garden", instruction: "Plants." });
-    const roster = await test.cell.harness.snapshot(RosterDoc, BACKGROUND_CONTEXT);
-    const records = Object.values(roster?.specialists ?? {});
-    expect(records).toHaveLength(5);
-    for (const record of records) {
-      const conversation = await test.cell.harness.conversation(
-        record.conversationId,
-        BACKGROUND_CONTEXT,
-      );
-      const agent = await conversation?.agent(BACKGROUND_CONTEXT);
-      expect(agent?.tools.map((tool) => tool.name).sort()).toEqual(SPECIALIST_TOOLS);
-    }
     const installed = test.cell.extensions.lead.flatMap((extension) => extension.tools ?? []);
     expect(installed.map((tool) => tool.name).sort()).toEqual(LEAD_TOOLS);
+    const job = await heldJobAgent(test, hold);
+    expect(job?.tools.map((tool) => tool.name).sort()).toEqual(JOB_TOOLS);
+    hold.release("research");
   });
 
-  it("puts the guard first in the lead's list and in every specialist's, one added later included", async () => {
+  it("puts the guard first in the lead's list and in every job's", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    test = await openTestCell();
+    const hold = createHold();
+    hold.hold("research");
+    test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
     expect(test.cell.extensions.lead[0]?.name).toBe("secbot-guard");
-    expect(test.cell.extensions.specialist[0]?.name).toBe("secbot-guard");
+    expect(test.cell.extensions.job[0]?.name).toBe("secbot-guard");
     const lead = await test.cell.root.agent(BACKGROUND_CONTEXT);
     expect(lead.extensions[0]?.name).toBe("secbot-guard");
-    await test.cell.addSpecialist({ name: "garden", instruction: "Plants." });
-    const roster = await test.cell.harness.snapshot(RosterDoc, BACKGROUND_CONTEXT);
-    for (const record of Object.values(roster?.specialists ?? {})) {
-      const conversation = await test.cell.harness.conversation(
-        record.conversationId,
-        BACKGROUND_CONTEXT,
-      );
-      const agent = await conversation?.agent(BACKGROUND_CONTEXT);
-      expect(agent?.extensions[0]?.name).toBe("secbot-guard");
-    }
+    expect((await heldJobAgent(test, hold))?.extensions[0]?.name).toBe("secbot-guard");
+    hold.release("research");
   });
 
-  it("puts the budget check right after the guard on every specialist's list, never the lead's", async () => {
+  it("puts the budget check right after the guard on every job's list, never the lead's", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    test = await openTestCell();
-    expect(test.cell.extensions.specialist[1]?.name).toBe("secbot-budget");
+    const hold = createHold();
+    hold.hold("research");
+    test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
+    expect(test.cell.extensions.job[1]?.name).toBe("secbot-budget");
     expect(test.cell.extensions.lead.map((extension) => extension.name)).not.toContain(
       "secbot-budget",
     );
     const lead = await test.cell.root.agent(BACKGROUND_CONTEXT);
     expect(lead.extensions.map((extension) => extension.name)).not.toContain("secbot-budget");
-    await test.cell.addSpecialist({ name: "garden", instruction: "Plants." });
-    const roster = await test.cell.harness.snapshot(RosterDoc, BACKGROUND_CONTEXT);
-    for (const record of Object.values(roster?.specialists ?? {})) {
-      const conversation = await test.cell.harness.conversation(
-        record.conversationId,
-        BACKGROUND_CONTEXT,
-      );
-      const agent = await conversation?.agent(BACKGROUND_CONTEXT);
-      expect(agent?.extensions.slice(0, 2).map((extension) => extension.name)).toEqual([
-        "secbot-guard",
-        "secbot-budget",
-      ]);
-    }
+    const job = await heldJobAgent(test, hold);
+    expect(job?.extensions.slice(0, 2).map((extension) => extension.name)).toEqual([
+      "secbot-guard",
+      "secbot-budget",
+    ]);
+    hold.release("research");
   });
 });

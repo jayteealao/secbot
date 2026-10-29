@@ -1,9 +1,13 @@
 // Test-cell deployment: the person-cell routes, the household cell, the secrets cell,
-// ConformanceCell, the durability lab, and the guard bench. Never deployed to a person cell. The
-// empty vars are names only: secbot-release fills them on the VPS at deploy time.
+// ConformanceCell, the durability lab, the guard bench, and the capacity bench. Never deployed to
+// a person cell. The empty vars are names only: secbot-release fills them on the VPS at deploy
+// time.
 // SECBOT_MARK_THRESHOLD_CAPS is a test-cell setting, not a secret: it lowers the reminder tool's
 // mark threshold to 0, so every reminder the decision model answers reaches the reviewer (a cap
 // can only lower a threshold). The production config (wrangler.jsonc) never carries it.
+// SECBOT_TEST_FIXTURES is a test-cell setting too: "1" gives every job the fixture page reader and
+// the two fixture lookup tools (one always fails, one answers slowly), and the household agent the
+// slow one, so a live run can make a job fail, read an injected page, or stay running.
 {
   "name": "secbot",
   "main": "index.js",
@@ -16,7 +20,8 @@
       { "name": "HOUSEHOLD_CELL", "class_name": "HouseholdCell" },
       { "name": "LAB", "class_name": "DurabilityLabCell" },
       { "name": "SECRETS_CELL", "class_name": "SecretsCell" },
-      { "name": "GUARD_BENCH", "class_name": "GuardBenchCell" }
+      { "name": "GUARD_BENCH", "class_name": "GuardBenchCell" },
+      { "name": "CAPACITY_BENCH", "class_name": "CapacityBenchCell" }
     ]
   },
   "migrations": [
@@ -24,7 +29,8 @@
     { "tag": "v2", "new_sqlite_classes": ["PersonCell"] },
     { "tag": "v3", "new_sqlite_classes": ["HouseholdCell", "DurabilityLabCell"] },
     { "tag": "v4", "new_sqlite_classes": ["SecretsCell"] },
-    { "tag": "v5", "new_sqlite_classes": ["GuardBenchCell"] }
+    { "tag": "v5", "new_sqlite_classes": ["GuardBenchCell"] },
+    { "tag": "v6", "new_sqlite_classes": ["CapacityBenchCell"] }
   ],
   "r2_buckets": [{ "binding": "SNAPSHOTS", "bucket_name": "secbot-snapshots" }],
   "vars": {
@@ -40,6 +46,7 @@
     "SECBOT_HOUSEHOLD_URL": "",
     "SECBOT_SECRETS_URL": "",
     "SECBOT_KEY_HELPER_URL": "",
-    "SECBOT_MARK_THRESHOLD_CAPS": "{\"set_reminder\":0}"
+    "SECBOT_MARK_THRESHOLD_CAPS": "{\"set_reminder\":0}",
+    "SECBOT_TEST_FIXTURES": "1"
   }
 }

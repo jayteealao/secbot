@@ -71,7 +71,7 @@ describe("DurabilityLabCell", () => {
     expect(armed).toMatchObject({ armed: true, specialistCallStarted: true, holdMs: 200 });
     await until(async () => (await call(first, "GET", "/lab/state")).markerRows === 1);
     const before = await call(first, "GET", "/lab/state");
-    expect(before).toMatchObject({ armed: true, followupReported: false });
+    expect(before).toMatchObject({ armed: true, resultStored: false });
     const tasks = before.tasks as { kind: string; wakeAt?: number }[];
     expect(tasks.find((task) => task.kind === "secbot.routine:reminder")?.wakeAt).toBe(
       armed.reminderAt,
@@ -82,7 +82,7 @@ describe("DurabilityLabCell", () => {
     await first.close();
     const second = lab(storage);
     await until(
-      async () => (await call(second, "GET", "/lab/state")).followupReported === true,
+      async () => (await call(second, "GET", "/lab/state")).resultStored === true,
       20_000,
     );
     const after = await call(second, "GET", "/lab/state");
@@ -154,7 +154,7 @@ describe("DurabilityLabCell", () => {
       // celld takes the cell in again: the next request opens a new harness, which resumes the job.
       storage.gaveBack = undefined;
       await until(
-        async () => (await call(cell, "GET", "/lab/state")).followupReported === true,
+        async () => (await call(cell, "GET", "/lab/state")).resultStored === true,
         20_000,
       );
       expect(count("cell.reopen")).toBe(1);
@@ -225,7 +225,7 @@ describe("DurabilityLabCell", () => {
       for (const harness of hung) await realClose.call(harness).catch(() => {});
       for (const finish of finishes) finish();
       await until(
-        async () => (await call(cell, "GET", "/lab/state")).followupReported === true,
+        async () => (await call(cell, "GET", "/lab/state")).resultStored === true,
         20_000,
       );
       expect(count("cell.reopen")).toBe(1);

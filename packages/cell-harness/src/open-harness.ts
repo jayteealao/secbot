@@ -43,17 +43,25 @@ import {
   listHeld,
   type SetTimer,
 } from "./approvals.ts";
+import { createBookmarkExtension, recordInterruption } from "./bookmark.ts";
 import { BudgetGate, createBudgetExtension } from "./budget-gate.ts";
+import { watchCapacity } from "./capacity-watch.ts";
+import { CellJobs } from "./cell-jobs.ts";
 import { type CellParts, errorFields, logEvent } from "./cell-parts.ts";
+import { createContentCheckExtension } from "./content-check.ts";
 import { createDecisionModels, type DecisionModels, parseThresholdCaps } from "./decision-model.ts";
 import { type MissedPage, markDelivered, missedPage } from "./delivery.ts";
 import {
   ApprovalsDoc,
+  BookmarkDoc,
   BudgetWaitsDoc,
+  CapacityDoc,
   DecisionModelDoc,
   type GuardMode,
   GuardModeDoc,
+  HandoffNoteDoc,
   HouseholdBudgetDoc,
+  JobBoardDoc,
   JobsDoc,
   type LimitNotice,
   LimitNoticesDoc,
@@ -61,7 +69,11 @@ import {
   ModelHealthDoc,
   MonthLedgerDoc,
   NoticeDeliveryDoc,
+  ReceiptsDoc,
   RosterDoc,
+  StopDoc,
+  TemplatesDoc,
+  TierSettingsDoc,
 } from "./docs.ts";
 import { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 import { createGuardExtension, createModelStage, type GuardOptions, ruleStage } from "./guard.ts";
@@ -72,11 +84,18 @@ import {
   setDecisionAdapter,
   setGuardMode,
 } from "./guard-settings.ts";
-import { createHandoffExtension } from "./handoff.ts";
+import { createLegacyHandoffExtension } from "./handoff.ts";
+import { createHandoffNoteExtension } from "./handoff-note.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import { createHistoryExtension } from "./history-search.ts";
 import { createHouseholdExtension, type HouseholdClient } from "./household-tools.ts";
+import { ENDED } from "./job-board.ts";
+import { createJobGate } from "./job-gate.ts";
+import { JobHolds } from "./job-holds.ts";
+import type { JobTask } from "./job-task.ts";
+import { createJobToolsExtension } from "./job-tools.ts";
 import { liveJobs } from "./jobs.ts";
+import { createJobsExtension } from "./lead-tools.ts";
 import {
   type BudgetState,
   budgetState,
@@ -91,17 +110,27 @@ import {
   waitingList,
 } from "./limits.ts";
 import { ModelHealthMonitor } from "./model-health.ts";
-import { listRoleModels, type RoleModel, setRoleModel } from "./model-map.ts";
+import { listRoleModels, type RoleModel, setRoleModel, setTierCap } from "./model-map.ts";
 import { ledgerConversations } from "./month-ledger.ts";
-import { type DecisionAdapter, LEAD_ROLE } from "./release-defaults.ts";
+import {
+  createFixtureReaderExtension,
+  createFixtureToolsExtension,
+  outsideReviewOf,
+} from "./outside-tools.ts";
+import type { ReceiptTask } from "./receipts.ts";
+import {
+  type DecisionAdapter,
+  type OutsideKind,
+  SHARED_SYNC_EVERY_MS,
+} from "./release-defaults.ts";
 import {
   createReminderExtension,
   createReminderRoutine,
   type ReminderPayload,
 } from "./reminder.ts";
 import { createReviewer, type Reviewer } from "./reviewer.ts";
-import { addSpecialist, ensureRoster } from "./roster.ts";
-import { ensureRoutines, type Routine } from "./routines.ts";
+import { addTemplate, ensureRoster } from "./roster.ts";
+import { defineRoutine, ensureRoutines, type Routine } from "./routines.ts";
 import {
   addRule,
   listRules,
@@ -116,7 +145,8 @@ import { createSecretsExtension, redactionLoader, type SecretsClient } from "./s
 import { createLeadExtension, type TimeEnv, timeZoneOf } from "./sections.ts";
 import { type Frame, openSessionStream, type SessionStream } from "./session-stream.ts";
 import { cellSettings } from "./settings.ts";
-import { createTelemetryExtension } from "./telemetry.ts";
+import { kickShared, type SharedParts, syncShared } from "./shared-relay.ts";
+import { agentNames, createTelemetryExtension } from "./telemetry.ts";
 import {
   type NextWake,
   nextWake,
@@ -136,6 +166,8 @@ export interface CellBudget {
   readonly gate: BudgetGate;
   /** Stops the watches of the cell's `pi.usage` documents. */
   readonly stop: () => Promise<void>;
+  /** How many `pi.usage` documents are watched now. */
+  readonly watching: () => number;
 }
 
 export interface OpenCellOptions {
@@ -161,10 +193,28 @@ export interface OpenCellOptions {
   readonly onReport?: (error: unknown) => void;
   /** Tests: how often the count of unlogged storage-gone reports is logged (REPORT_SUMMARY_MS). */
   readonly reportSummaryMs?: number;
+  /** The household's people (person cell names): a shared job is with the other one. */
+  readonly persons?: readonly string[];
   /** More recurring routines beside the heartbeat (for example a morning briefing). */
   readonly routines?: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
   /** Tests: more extensions for every role, after the release ones (the guard stays first). */
   readonly extensions?: readonly Extension[];
+  /**
+   * Tests and the test cell: fixed web pages a job can read with `read_fixture_page`, a reading
+   * tool whose content is checked like any other. A cell without them has no fixture tool.
+   */
+  readonly fixturePages?: Readonly<Record<string, string>>;
+  /**
+   * Tests and the test cell: the fixture lookup tools on every job's list, `fixture_lookup` (always
+   * the same error) and `fixture_slow_lookup` (answers after `slowMs`). A cell without the option
+   * has neither tool.
+   */
+  readonly fixtureTools?: { readonly slowMs: number };
+  /**
+   * Reading tools that later units add with `extensions`, beside the release table: their results
+   * are checked before a job keeps them.
+   */
+  readonly readers?: Readonly<Record<string, OutsideKind>>;
   /**
    * Tests and later inputs: the held-call request id, the hold length, and the lapse timer; tests
    * also replace the decision model (default: the Decisions API with the cell's OpenRouter key)
@@ -214,11 +264,87 @@ export class CellHarness implements CellParts {
     readonly timeZone: string,
     /** The limit watch and the budget gate. */
     readonly budget: CellBudget,
+    /** The job and receipt tasks (job-task.ts, receipts.ts). */
+    readonly tasks: { readonly job: JobTask; readonly receipt: ReceiptTask } | undefined,
+    /** Where paused and questioning jobs wait (job-holds.ts); the gate and the lead share it. */
+    readonly holds: JobHolds,
+    /** The shared-job exchange with the household; undefined in a cell with no household. */
+    readonly shared: SharedParts | undefined,
     /** Routines that spend nothing (the heartbeat): activity does not list them as jobs. */
     readonly quietRoutines: ReadonlySet<string> = new Set(),
     /** The harness's report gate: close logs the count of reports it did not log. */
     private readonly reports?: ReportGate,
-  ) {}
+  ) {
+    this.jobs = new CellJobs({
+      person,
+      harness,
+      root,
+      now,
+      timeZone,
+      tasks,
+      holds,
+      shared,
+      budgetState: (context) => this.budgetState(context),
+    });
+  }
+
+  /**
+   * The job board and shared jobs: the person's and the owner's job moves (cell-jobs.ts). Private:
+   * the one-line methods below are the only route, so callers keep one surface on the cell.
+   */
+  private readonly jobs: CellJobs;
+
+  syncShared(...args: Parameters<CellJobs["syncShared"]>): ReturnType<CellJobs["syncShared"]> {
+    return this.jobs.syncShared(...args);
+  }
+
+  kickShared(...args: Parameters<CellJobs["kickShared"]>): ReturnType<CellJobs["kickShared"]> {
+    return this.jobs.kickShared(...args);
+  }
+
+  answerJob(...args: Parameters<CellJobs["answerJob"]>): ReturnType<CellJobs["answerJob"]> {
+    return this.jobs.answerJob(...args);
+  }
+
+  resumeJob(...args: Parameters<CellJobs["resumeJob"]>): ReturnType<CellJobs["resumeJob"]> {
+    return this.jobs.resumeJob(...args);
+  }
+
+  setCapacity(...args: Parameters<CellJobs["setCapacity"]>): ReturnType<CellJobs["setCapacity"]> {
+    return this.jobs.setCapacity(...args);
+  }
+
+  jobsView(...args: Parameters<CellJobs["jobsView"]>): ReturnType<CellJobs["jobsView"]> {
+    return this.jobs.jobsView(...args);
+  }
+
+  stop(...args: Parameters<CellJobs["stop"]>): ReturnType<CellJobs["stop"]> {
+    return this.jobs.stop(...args);
+  }
+
+  reorderJob(...args: Parameters<CellJobs["reorderJob"]>): ReturnType<CellJobs["reorderJob"]> {
+    return this.jobs.reorderJob(...args);
+  }
+
+  answerShared(
+    ...args: Parameters<CellJobs["answerShared"]>
+  ): ReturnType<CellJobs["answerShared"]> {
+    return this.jobs.answerShared(...args);
+  }
+
+  openOffers(...args: Parameters<CellJobs["openOffers"]>): ReturnType<CellJobs["openOffers"]> {
+    return this.jobs.openOffers(...args);
+  }
+
+  openQuestions(
+    ...args: Parameters<CellJobs["openQuestions"]>
+  ): ReturnType<CellJobs["openQuestions"]> {
+    return this.jobs.openQuestions(...args);
+  }
+
+  board(...args: Parameters<CellJobs["board"]>): ReturnType<CellJobs["board"]> {
+    return this.jobs.board(...args);
+  }
 
   private limitParts() {
     return { person: this.person, harness: this.harness, now: this.now, timeZone: this.timeZone };
@@ -408,22 +534,36 @@ export class CellHarness implements CellParts {
     return { summary, next };
   }
 
-  /** Submits a message to the lead's root conversation, unchanged. Idempotent per request id. */
-  submit(
+  /**
+   * Submits a message to the lead's root conversation, unchanged. Idempotent per request id. A
+   * person's message steers in by default: it enters after the lead's current reply step, and when
+   * the lead is busy the interrupt bookmark records where it was first (bookmark.ts).
+   */
+  async submit(
     text: string,
     requestId: string,
+    options: { readonly whenBusy?: "steer" | "followUp" } = {},
     context: Context = BACKGROUND_CONTEXT,
   ): Promise<Submission> {
-    return this.root.submit({ type: "input", content: text, requestId }, context);
+    const whenBusy = options.whenBusy ?? "steer";
+    const bookmark =
+      whenBusy === "steer" ? await recordInterruption(this, this.now(), context) : null;
+    logEvent("input.steered", {
+      cell: this.person,
+      request_id: requestId,
+      busy: bookmark !== null,
+      when_busy: whenBusy,
+    });
+    return this.root.submit({ type: "input", content: text, requestId, whenBusy }, context);
   }
 
+  /** The cell is up; its roles are the lead, each job template, and each frozen specialist. */
   async status(context: Context = BACKGROUND_CONTEXT): Promise<CellStatus> {
-    const roster = await this.harness.snapshot(RosterDoc, context);
     return {
       status: "up",
       person: this.person,
       version: this.version,
-      roles: [LEAD_ROLE, ...Object.keys(roster?.specialists ?? {})],
+      roles: [...(await agentNames(this.harness, context))],
     };
   }
 
@@ -435,11 +575,16 @@ export class CellHarness implements CellParts {
     return setRoleModel(this, role, modelId, context);
   }
 
+  /** Changes a tier's per-job cap (the owner's `secbot model cap`). */
+  setTierCap(tier: string, usd: unknown, context: Context = BACKGROUND_CONTEXT) {
+    return setTierCap(this, tier, usd, context);
+  }
+
   addSpecialist(
     input: { readonly name: string; readonly instruction: string; readonly model?: string },
     context: Context = BACKGROUND_CONTEXT,
   ): Promise<void> {
-    return addSpecialist(this, input, context);
+    return addTemplate(this, input, context);
   }
 
   /**
@@ -610,7 +755,13 @@ export async function openCellHarness(
   const heartbeat = createHeartbeatRoutine(env, hooks, options.fetch);
   const reminders = createReminderRoutine(hooks);
   const lead = createLeadExtension({ now, timeZone });
-  const handoff = createHandoffExtension(person, () => gate, timeZone);
+  const handoffNote = createHandoffNoteExtension({
+    person,
+    harness: current,
+    models: () => models,
+    now,
+  });
+  const legacy = createLegacyHandoffExtension(person, () => gate, timeZone);
   const history = createHistoryExtension(current);
   const household = createHouseholdExtension(person, () => options.household);
   // Granted values reach the redactor at open (best effort) and before each secrets call.
@@ -623,13 +774,38 @@ export async function openCellHarness(
   );
   loadRedaction().catch(() => {});
   const reminder = createReminderExtension(reminders, { ...hooks, now, timeZone });
-  const recurring = [{ routine: heartbeat }, ...(options.routines ?? [])];
+  // Every person cell with a household exchanges its shared jobs every 2 minutes (no model call).
+  let shared: SharedParts | undefined;
+  const SHARED_SYNC_ROUTINE = "shared-sync";
+  const sharedRoutine =
+    options.household === undefined
+      ? []
+      : [
+          {
+            routine: defineRoutine(
+              {
+                name: SHARED_SYNC_ROUTINE,
+                every: SHARED_SYNC_EVERY_MS,
+                spends: false,
+                run: async (fire) => {
+                  if (shared === undefined) return { outcome: "skipped" };
+                  return { outcome: (await syncShared(shared, fire.context)).outcome };
+                },
+              },
+              hooks,
+            ),
+          },
+        ];
+  const recurring = [{ routine: heartbeat }, ...sharedRoutine, ...(options.routines ?? [])];
   const routines = defineExtension({
     name: "secbot-routines",
     tasks: recurring.map(({ routine }) => routine.task),
   });
   const telemetry = createTelemetryExtension(person, monitor);
   const models = options.models ?? createGatewayModels(env);
+  // Paused and questioning jobs wait here; the job gate, the job tools, and the lead's tools share it.
+  const holds = new JobHolds();
+  const jobGate = createJobGate({ person, harness: current, holds, now });
   const {
     decision: decisionOption,
     reviewer: reviewerOption,
@@ -637,15 +813,88 @@ export async function openCellHarness(
     budgetTimer: _budgetTimer,
     ...guardOptions
   } = options.guard ?? {};
+  // One decision model for the guard and the content check, on the cell's current adapter.
+  const decisionModels =
+    decisionOption ??
+    createDecisionModels({
+      apiKey: env.OPENROUTER_API_KEY,
+      baseUrl: env.OPENROUTER_BASE_URL,
+      thresholdCaps: parseThresholdCaps(env.SECBOT_MARK_THRESHOLD_CAPS),
+    });
+  const readers = options.readers ?? {};
+  // The fixture reading tool exists only where fixture pages are given (tests, the test cell).
+  const fixtureReader = [
+    ...(options.fixturePages === undefined
+      ? []
+      : [createFixtureReaderExtension(options.fixturePages)]),
+    ...(options.fixtureTools === undefined
+      ? []
+      : [createFixtureToolsExtension(options.fixtureTools)]),
+  ];
+  // Every web page, mail, or file a job reads is checked before the job keeps it, in every mode.
+  const contentCheck = createContentCheckExtension({
+    person,
+    harness: current,
+    decision: decisionModels,
+    readers,
+    now,
+  });
+  // A job's own tools: search its earlier attempts (no tool that starts a subagent); every tool
+  // a job calls is recorded on its row, so a result is marked risky by the tools it used.
+  const jobTools = createJobToolsExtension({
+    person,
+    harness: current,
+    holds,
+    now,
+    wrapped: [
+      ...new Set([
+        ...[history, household, secrets, ...fixtureReader, ...(options.extensions ?? [])].flatMap(
+          (extension) => (extension.tools ?? []).map((tool) => tool.name),
+        ),
+        ...Object.keys(readers),
+      ]),
+    ],
+  });
+  let jobList: readonly Extension[] = [];
+  const jobs = createJobsExtension({
+    person,
+    gate: () => gate,
+    timeZone,
+    models: () => models,
+    jobExtensions: () => jobList,
+    // After a job starts or ends: warn the owner once when more jobs run than the cell was
+    // measured to run at once; nothing is held back.
+    onJobsChanged: (context) => watchCapacity({ harness: current, person, alerts, now }, context),
+    now,
+    holds,
+    harness: current,
+    // A result reviewer has no tools: it waits above a limit like a job, and its calls are logged.
+    reviewExtensions: () => [budget, telemetry],
+    shared: () => {
+      const other = options.persons?.find((name) => name !== person);
+      if (options.household === undefined || other === undefined) return undefined;
+      return {
+        other,
+        kick: () => {
+          if (shared !== undefined) kickShared(shared, BACKGROUND_CONTEXT);
+        },
+      };
+    },
+    remote: {
+      person,
+      household: () => options.household,
+      secrets: {
+        person,
+        client: () => options.secrets,
+        options: { now, timeZone },
+        loadRedaction,
+      },
+    },
+  });
+  const bookmark = createBookmarkExtension(person, now);
   // The decision model and the reviewer run after the rules, on calls the rules passed.
   const modelStage = createModelStage({
-    decision:
-      decisionOption ??
-      createDecisionModels({
-        apiKey: env.OPENROUTER_API_KEY,
-        baseUrl: env.OPENROUTER_BASE_URL,
-        thresholdCaps: parseThresholdCaps(env.SECBOT_MARK_THRESHOLD_CAPS),
-      }),
+    decision: decisionModels,
     reviewer:
       reviewerOption ??
       createReviewer({
@@ -653,6 +902,8 @@ export async function openCellHarness(
         reader: current,
         ...(reviewerTimeoutMs === undefined ? {} : { timeoutMs: reviewerTimeoutMs }),
       }),
+    // An outside action of a job that read outside content always goes to the reviewer.
+    mustReview: outsideReviewOf,
     // A guard model call that answers 402 or 403 puts the cell in the credit pause, as an agent
     // call does; the call's own outcome stays the guard's (fail closed).
     onCredit: (status) =>
@@ -668,14 +919,33 @@ export async function openCellHarness(
     ...guardOptions,
   });
   const extra = options.extensions ?? [];
-  // The budget extension is on every specialist's list, after the guard, and never on the lead's:
-  // above a limit a specialist's job waits before its next request; chat with the lead runs.
+  // The budget extension is on every job's list, after the guard, and never on the lead's: above a
+  // limit a job waits before its next request; chat with the lead runs.
   const budget = createBudgetExtension(() => gate);
+  // The job gate is after the budget: above a limit a job waits there first; then the gate pauses
+  // a job at its cap or after three failing steps. The content check is on job lists only: no
+  // reading tool is on the lead's list.
+  const job = [
+    guard,
+    budget,
+    jobGate,
+    contentCheck,
+    jobTools,
+    history,
+    household,
+    secrets,
+    telemetry,
+    ...fixtureReader,
+    ...extra,
+  ];
+  jobList = job;
   const extensions = {
     lead: [
       guard,
       lead,
-      handoff,
+      jobs.extension,
+      bookmark,
+      handoffNote,
       history,
       household,
       secrets,
@@ -684,10 +954,12 @@ export async function openCellHarness(
       telemetry,
       ...extra,
     ],
-    specialist: [guard, budget, history, household, secrets, telemetry, ...extra],
+    specialist: job,
+    job,
   };
   const registry = createRegistry();
-  for (const extension of new Set([...extensions.lead, ...extensions.specialist])) {
+  // The retired hand-off's tasks stay registered so a hand-off in flight at upgrade finishes once.
+  for (const extension of new Set([...extensions.lead, ...extensions.job, legacy])) {
     registry.install(extension);
   }
   const durable = await openCelldStorageWithDatabase(storage);
@@ -712,6 +984,11 @@ export async function openCellHarness(
       gate,
       onReport,
       reports,
+      tasks: { job: jobs.JobTask, receipt: jobs.ReceiptTask },
+      holds,
+      onShared: (parts) => {
+        shared = parts;
+      },
     });
   } catch (error) {
     // A failure after the open (roster, routines, inspect) must not leave this harness running on
@@ -746,11 +1023,15 @@ async function finishOpen(
     readonly database: CelldSqliteDatabase;
     readonly reminders: Routine<ReminderPayload>;
     readonly recurring: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
+    /** The shared-job exchange's parts, once the cell is built (the routine reads them). */
+    readonly onShared: (parts: SharedParts) => void;
     readonly timeZone: string;
     readonly alerts: ReturnType<typeof createAlerts>;
     readonly gate: BudgetGate;
     readonly onReport: (error: unknown) => void;
     readonly reports: ReportGate;
+    readonly tasks: { readonly job: JobTask; readonly receipt: ReceiptTask };
+    readonly holds: JobHolds;
   },
 ): Promise<CellHarness> {
   const { person } = options;
@@ -768,7 +1049,17 @@ async function finishOpen(
     onChange: () => parts.gate.wake(),
     onReport: parts.onReport,
   });
-  let stopWatches: () => Promise<void> = async () => {};
+  let spendWatch: SpendWatch = { stop: async () => {}, count: () => 0 };
+  const shared: SharedParts | undefined =
+    options.household === undefined
+      ? undefined
+      : {
+          harness,
+          person,
+          household: () => options.household,
+          now,
+          gate: () => parts.gate,
+        };
   const cell = new CellHarness(
     person,
     options.version,
@@ -781,7 +1072,15 @@ async function finishOpen(
     reminders,
     now,
     parts.timeZone,
-    { watch, gate: parts.gate, stop: () => stopWatches() },
+    {
+      watch,
+      gate: parts.gate,
+      stop: () => spendWatch.stop(),
+      watching: () => spendWatch.count(),
+    },
+    parts.tasks,
+    parts.holds,
+    shared,
     new Set(
       [...recurring.map(({ routine }) => routine), reminders]
         .filter((routine) => !routine.spends)
@@ -789,11 +1088,12 @@ async function finishOpen(
     ),
     parts.reports,
   );
+  if (shared !== undefined) parts.onShared(shared);
 
   // What the last run left: live work, and routines whose time passed while the cell was down.
   // Read before this open creates anything and before resume(), so nothing has run yet.
   const left = (await harness.inspect(context)).tasks;
-  const created = await ensureRoster(cell, context);
+  const migrated = await ensureRoster(cell, context);
   const releaseRules = await harness.commit(async (tx) => {
     await tx.doc(ModelHealthDoc);
     // Sessions watch the held-call list from the start.
@@ -812,8 +1112,26 @@ async function finishOpen(
     await tx.doc(NoticeDeliveryDoc);
     await tx.doc(BudgetWaitsDoc);
     await tx.doc(HouseholdBudgetDoc);
-    // The cost marks of hand-off jobs (activity).
+    // The cost marks of hand-offs in flight at upgrade (activity).
     await tx.doc(JobsDoc);
+    // The job board, receipts, bookmark, custom templates, and tier caps.
+    const board = await tx.doc(JobBoardDoc);
+    await tx.doc(ReceiptsDoc);
+    await tx.doc(BookmarkDoc);
+    await tx.doc(TemplatesDoc);
+    await tx.doc(TierSettingsDoc);
+    // The stop's lock, the lead's hand-off note, and the measured capacity.
+    // No stop runs while the cell opens (a stop lives in the process that started it), so a lock
+    // left by a stop that died mid-way is stale: lift it, or every later start would be refused.
+    const stop = await tx.doc(StopDoc);
+    if (stop.active !== null) stop.active = null;
+    await tx.doc(HandoffNoteDoc);
+    await tx.doc(CapacityDoc);
+    for (const row of Object.values(board.jobs)) {
+      if (row.conversationId !== null && !ENDED.has(row.status)) {
+        await tx.doc(UsageDoc, row.conversationId);
+      }
+    }
     // Each conversation's ledger exists, so the limit watch can watch it from the start.
     await tx.doc(UsageDoc, ROOT_CONVERSATION_ID);
     for (const record of Object.values((await tx.doc(RosterDoc)).specialists)) {
@@ -827,7 +1145,7 @@ async function finishOpen(
   const pendingWork = left.length - routineTasks.length;
   await ensureRoutines(harness, recurring, now(), context);
   const pending = (await harness.inspect(context)).tasks.length;
-  stopWatches = await watchSpend(harness, () => watch.trigger(), context);
+  spendWatch = await watchSpend(person, harness, () => watch.trigger(), context);
   // The first evaluation starts (or rolls) the month.
   watch.trigger();
   harness.resume();
@@ -847,26 +1165,62 @@ async function finishOpen(
     cell: person,
     version: options.version,
     roles: (await cell.status(context)).roles,
-    specialists_created: created,
+    templates_migrated: migrated,
     pending_tasks_resumed: pending,
     duration_ms: Date.now() - started,
   });
   return cell;
 }
 
+/** The spend watches of one open harness. */
+interface SpendWatch {
+  readonly stop: () => Promise<void>;
+  readonly count: () => number;
+}
+
 /**
- * Calls `trigger` after every committed change of any conversation's `pi.usage` (a specialist
- * added later included, through a watch of the roster). Returns a function that stops the watches.
+ * Calls `trigger` after every committed change of any conversation's `pi.usage`: the lead's, each
+ * specialist's (one added later included, through a watch of the roster), and each live
+ * conversation of a job (through a watch of the board): its current run, an earlier run, and its
+ * result review. A watch stops in the pass that sees its conversation done (a run when its row
+ * ended or a restart replaced it, a review when its verdict is in), after one last trigger, so the
+ * watches of a busy cell do not grow with every job it ever ran.
  */
 async function watchSpend(
+  person: string,
   harness: Harness,
   trigger: () => void,
   context: Context,
-): Promise<() => Promise<void>> {
+): Promise<SpendWatch> {
   const watches = new Map<string, DocumentWatch<UsageState>>();
+  const ended = new Set<string>();
+  let pass = Promise.resolve();
   const ensure = async () => {
+    const board = await harness.snapshot(JobBoardDoc, context);
+    for (const row of Object.values(board?.jobs ?? {})) {
+      const done = row.runs.map((run) => run.conversationId);
+      if (ENDED.has(row.status)) done.push(row.conversationId);
+      if (row.review !== null && row.review.status !== "running") {
+        done.push(row.review.conversationId);
+      }
+      for (const id of done) {
+        if (id === null) continue;
+        const key = String(id);
+        ended.add(key);
+        const watch = watches.get(key);
+        if (watch === undefined) continue;
+        watches.delete(key);
+        await watch.stop();
+        logEvent("job.watch_closed", {
+          cell: person,
+          job: row.number,
+          conversation_id: key,
+          open_watches: watches.size,
+        });
+      }
+    }
     for (const { id, conversationId } of await ledgerConversations(harness, context)) {
-      if (watches.has(conversationId)) continue;
+      if (watches.has(conversationId) || ended.has(conversationId)) continue;
       let watch = await harness.watchDoc(UsageDoc, id, context);
       if (watch === undefined) {
         // A conversation created after the open has no ledger document until its first cost.
@@ -880,14 +1234,29 @@ async function watchSpend(
       watch.start(async () => trigger());
     }
   };
+  // One pass at a time: the roster and the board change together when a job starts.
+  const again = () => {
+    pass = pass
+      .then(ensure)
+      .then(trigger)
+      // A failed pass is logged; the next change runs the next one.
+      .catch((error: unknown) =>
+        logEvent("spend.watch_failed", { cell: person, ...errorFields(error) }, "warn"),
+      );
+    return pass;
+  };
   await ensure();
   const roster = await harness.watchDoc(RosterDoc, context);
-  roster?.start(async () => {
-    await ensure();
-    trigger();
-  });
-  return async () => {
-    await roster?.stop();
-    for (const watch of watches.values()) await watch.stop();
+  roster?.start(again);
+  const jobs = await harness.watchDoc(JobBoardDoc, context);
+  jobs?.start(again);
+  return {
+    count: () => watches.size,
+    stop: async () => {
+      await roster?.stop();
+      await jobs?.stop();
+      await pass.catch(() => {});
+      for (const watch of watches.values()) await watch.stop();
+    },
   };
 }

@@ -12,8 +12,24 @@ import type { AddressInfo } from "node:net";
 /** The HTTP failures the Decisions API documents, plus the ones the chat routes already used. */
 export const STUB_STATUSES = [400, 401, 402, 403, 413, 429, 500, 502, 503, 524, 529] as const;
 
+/** OpenRouter's transient 402 body when the key's in-flight budget is full (its limits page). */
+export const INFLIGHT_BODY = {
+  error: {
+    code: 402,
+    message: "Too many requests in flight",
+    metadata: {
+      reason: "in_flight_budget_exhausted",
+      limit_source: "openrouter_in_flight_budget",
+    },
+  },
+};
+
+/** The error text pi-ai gives for that 402 (status, then the body). */
+export const INFLIGHT_402 = `402 ${JSON.stringify(INFLIGHT_BODY)}`;
+
 export type StubMode =
   | "answer"
+  | "402-inflight"
   | (typeof STUB_STATUSES)[number]
   | "malformed"
   | "unknown-choice"
@@ -109,18 +125,28 @@ function completionsAnswer(text: string): string {
   ])}data: [DONE]\n\n`;
 }
 
-/** The decisions route's answer: the dated model id, one choice answer, and usage. */
-function decisionAnswer(model: unknown, decision: StubDecision, choice = decision.choice): string {
+/**
+ * The decisions route's answer: the dated model id, the scripted choice answer under the key of
+ * every question the request asks (`risk` when it names none), and usage.
+ */
+function decisionAnswer(
+  body: Record<string, unknown>,
+  decision: StubDecision,
+  choice = decision.choice,
+): string {
+  const asked =
+    body.questions !== null && typeof body.questions === "object"
+      ? Object.keys(body.questions)
+      : [];
+  const answer = {
+    type: "choice",
+    choice,
+    probabilities: decision.probabilities,
+    confidence: Math.max(...Object.values(decision.probabilities)),
+  };
   return JSON.stringify({
-    model: `${String(model)}-20261001`,
-    answers: {
-      risk: {
-        type: "choice",
-        choice,
-        probabilities: decision.probabilities,
-        confidence: Math.max(...Object.values(decision.probabilities)),
-      },
-    },
+    model: `${String(body.model)}-20261001`,
+    answers: Object.fromEntries((asked.length > 0 ? asked : ["risk"]).map((key) => [key, answer])),
     usage: { input_tokens: 400, output_tokens: 0 },
   });
 }
@@ -157,6 +183,22 @@ export function riskyAt(score: number): StubDecision {
   };
 }
 
+/** A clean answer to the content question, with injection plus unclear at `score`. */
+export function cleanAt(score: number): StubDecision {
+  return {
+    choice: "clean",
+    probabilities: { clean: 1 - score, injection: score / 2, unclear: score / 2 },
+  };
+}
+
+/** An injection answer to the content question, with injection plus unclear at `score`. */
+export function injectionAt(score: number): StubDecision {
+  return {
+    choice: "injection",
+    probabilities: { clean: 1 - score, injection: score * 0.8, unclear: score * 0.2 },
+  };
+}
+
 export async function startStubOpenRouter(): Promise<StubOpenRouter> {
   const seen: SeenRequest[] = [];
   const hanging = new Set<() => void>();
@@ -171,6 +213,11 @@ export async function startStubOpenRouter(): Promise<StubOpenRouter> {
       hanging.add(() => response.destroy());
       return;
     }
+    if (stub.mode === "402-inflight") {
+      response.writeHead(402, { "content-type": "application/json", "retry-after": "1" });
+      response.end(JSON.stringify(INFLIGHT_BODY));
+      return;
+    }
     if (typeof stub.mode === "number") {
       response.writeHead(stub.mode, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: { code: stub.mode, message: ERROR_TEXT[stub.mode] } }));
@@ -183,7 +230,7 @@ export async function startStubOpenRouter(): Promise<StubOpenRouter> {
         return;
       }
       const choice = stub.mode === "unknown-choice" ? "maybe" : undefined;
-      response.end(decisionAnswer(body.model, stub.decide?.(body) ?? stub.decision, choice));
+      response.end(decisionAnswer(body, stub.decide?.(body) ?? stub.decision, choice));
       return;
     }
     response.writeHead(200, { "content-type": "text/event-stream" });

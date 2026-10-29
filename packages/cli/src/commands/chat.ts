@@ -5,7 +5,9 @@
  * line the cell has not acknowledged, under the same request id, so nothing is submitted twice.
  * Calls held for the person arrive first, as `held` frames, then messages the lead sent while no
  * session was open, as `missed` frames. Only an exact `/allow N`, `/always N`, or `/deny N`
- * answers a held call; every other line goes to the lead unchanged. The usage line (the month's
+ * answers a held call, and only an exact `/answer <#> <text>` answers a job's question the lead
+ * put to the person (printed after the lead's words as `[ job <n> asks ]`); every other line goes
+ * to the lead unchanged. The usage line (the month's
  * spend against the person's limit) prints on connect and after each answer; a limit notice prints
  * when a limit line is reached, or at connect when this device has not seen it.
  */
@@ -13,6 +15,8 @@ import { randomUUID } from "node:crypto";
 import type { CellClient } from "../client.ts";
 import type { Io } from "../io.ts";
 import { answerHeld, answerOf, type HeldCall, heldBlock, NOT_SENT } from "./held.ts";
+import { ANSWER_NOT_SENT, answerJob, answerJobOf, questionLine } from "./job-answer.ts";
+import { answerShared, SHARED_NOT_SENT, sharedLine, sharedOf } from "./shared-confirm.ts";
 import { type Notice, noticeBlock, type Usage, usageLine, type Waiting } from "./usage.ts";
 
 export type Frame =
@@ -27,7 +31,38 @@ export type Frame =
   | { type: "error"; message: string; requestId?: string }
   | { type: "held"; call: HeldCall; count: number }
   | { type: "usage"; usage: Usage }
-  | { type: "notice"; notice: Notice; waiting: Waiting[] };
+  | { type: "notice"; notice: Notice; waiting: Waiting[] }
+  | { type: "question"; job: number; title: string }
+  | { type: "shared"; job: number; title: string; from: string; payer: "half" | "all" };
+
+/** The widest line a missed message prints at; longer ones continue indented by two spaces. */
+const MISSED_WIDTH = 79;
+
+/**
+ * `prefix` and one line of `said` as it fits in MISSED_WIDTH columns, the rest on lines indented
+ * by two spaces. A line that fits, or one with line breaks of its own, prints unchanged. Display
+ * only: the result goes to stdout and routes nothing.
+ */
+export function wrapped(prefix: string, said: string): string {
+  const whole = prefix + said;
+  if (whole.length <= MISSED_WIDTH || whole.split("\n").length > 1) return whole;
+  const lines: string[] = [];
+  let line = prefix;
+  // No word on the line yet: the next one goes on it whatever its length.
+  let empty = true;
+  for (const word of said.split(" ").filter((each) => each !== "")) {
+    const next = empty ? line + word : `${line} ${word}`;
+    if (empty || next.length <= MISSED_WIDTH) {
+      line = next;
+    } else {
+      lines.push(line);
+      line = `  ${word}`;
+    }
+    empty = false;
+  }
+  lines.push(line);
+  return lines.join("\n");
+}
 
 /** The longest line the cell accepts, in characters. */
 export const INPUT_LIMIT = 20_000;
@@ -51,6 +86,8 @@ export function frameRenderer(
   let noted = false;
   const shown = new Set<number>();
   const noticed = new Set<number>();
+  const asked = new Set<number>();
+  const offered = new Set<number>();
 
   const print = (text: string) => {
     if (midAnswer) io.stdout("\n");
@@ -81,9 +118,7 @@ export function frameRenderer(
         print(frame.on ? "waiting for the model\n" : "the model is answering again\n");
         break;
       case "missed":
-        print(
-          frame.from === null ? `lead: ${frame.text}\n` : `[from ${frame.from}] ${frame.text}\n`,
-        );
+        print(`${wrapped(frame.from === null ? "lead: " : `[from ${frame.from}] `, frame.text)}\n`);
         if (frame.remaining > 0 && !noted) {
           noted = true;
           print(`${frame.remaining} more missed message(s); run "secbot missed"\n`);
@@ -111,6 +146,18 @@ export function frameRenderer(
         if (noticed.has(frame.notice.seq)) break;
         noticed.add(frame.notice.seq);
         print(`\n${noticeBlock(frame.notice, frame.waiting ?? []).join("\n")}\n`);
+        break;
+      case "question":
+        // Once per job in this session, one blank line after the lead's words.
+        if (asked.has(frame.job)) break;
+        asked.add(frame.job);
+        print(`\n${questionLine(frame.job)}\n`);
+        break;
+      case "shared":
+        // Once per job in this session, one blank line after the lead's words.
+        if (offered.has(frame.job)) break;
+        offered.add(frame.job);
+        print(`\n${sharedLine(frame.job, frame.from, frame.payer)}\n`);
         break;
     }
   };
@@ -179,6 +226,30 @@ export async function chat(client: CellClient, io: Io, options: ChatOptions = {}
     if (text === "") continue;
     if (text.length > INPUT_LIMIT) {
       io.stderr(`not sent: a message is at most ${INPUT_LIMIT} characters\n`);
+      continue;
+    }
+    // An answer to a job's question goes to the cell's answer route, never to the lead; a line
+    // that only looks like one is not sent at all.
+    // A join or decline of a shared job goes to the cell's routes, never to the lead; a line that
+    // only looks like one is not sent at all.
+    const shared = sharedOf(text);
+    if (shared.kind === "join" || shared.kind === "decline") {
+      print("");
+      await answerShared(client, io, shared.job, shared.kind === "join");
+      continue;
+    }
+    if (shared.kind === "malformed") {
+      io.stderr(`${SHARED_NOT_SENT}\n`);
+      continue;
+    }
+    const job = answerJobOf(text);
+    if (job.kind === "answer") {
+      print("");
+      await answerJob(client, io, job.job, job.text);
+      continue;
+    }
+    if (job.kind === "malformed") {
+      io.stderr(`${ANSWER_NOT_SENT}\n`);
       continue;
     }
     // An answer to a held call goes to the cell's approval route, never to the lead; a line that

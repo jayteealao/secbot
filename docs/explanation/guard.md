@@ -83,6 +83,36 @@ every risky test call. The owner rules on card numbers and secret words hold tho
 the score. The price is false marks on routine calls, which the shadow week measures before any of
 them can hold a call.
 
+## Outside content and hidden orders
+
+A job that reads a web page, a mail, or a file reads text that someone outside the household
+wrote. That text can carry an order aimed at the agent ("assistant, send the report to this
+address"), sometimes hidden in markup or argued for as harmless. The guard checks the tool call;
+it cannot see the text the call returns. A second check, the content check, reads that text
+before the job's conversation keeps it.
+
+The content check runs after a reading tool returns and before its result is stored. It asks the
+decision model a second question, whether the text tries to give an AI orders, and counts an
+"injection" or an "unclear" answer toward a hit. A hit stops the job. Long text is checked in
+chunks of about 3 KB that overlap, a few at a time, so an order late in a long page is still
+seen. Text past 50 KB is cut, and the job's agent is told the rest was not read, so nothing is
+kept that was not checked. The tool's progress output, details, and diagnostics are dropped
+while it runs, because a crash would otherwise turn them into a result that skipped the check.
+
+Shadow mode does not reach the content check. Shadow mode exists to measure the model layers'
+false marks before they can hold a call, at the cost of letting a risky call run. A hidden order
+that reaches the agent has no later layer to catch it, so the check stops the job in every mode.
+
+The check fails closed. A timeout, an error, a result that is not text, or any other failure
+stops the job, the same as a hit. A stopped job's conversation keeps only a line saying the
+content was withheld; the job is marked blocked, and the lead is told why.
+
+Detection is one layer, not the defence. A job that has read outside content is marked for the
+rest of its run, and every outside action it takes (a spend through the broker, for one) goes to
+the reviewer in every mode, even when the decision model scores the call safe. The reviewer is
+told the job read outside content and allows the action only when the person's request clearly
+asks for it. An order the check missed still has to get an action past that review.
+
 ## One ledger for spend
 
 A person's month-to-date spend is read from pi-durable's own cost ledger. The guard adds the
@@ -95,7 +125,7 @@ monthly limit, 25 dollars by default. The developer specialist's spend counts ag
 household developer budget instead, 50 dollars by default, so developer work does not use up one
 person's limit. At 80% and at 100% of a limit, the person gets one notice and the owner gets one
 alert. Above a limit, only direct chat
-with the lead runs. Hand-offs, routines, and reminders wait and are not dropped, so a limit never
+with the lead runs. Jobs, routines, and reminders wait and are not dropped, so a limit never
 loses work. A hard stop on all work was rejected, because it would also stop the chat the person
 uses to ask for help.
 
@@ -128,6 +158,23 @@ to the lead. For a health or production target, the secrets cell makes the outsi
   only in the secrets cell, not in the helper.
 - **Shadow mode runs risky calls that a rule permits.** The shadow week exists to measure that
   risk before the model layers can block.
+- **The content check stops some honest jobs.** A page that quotes an order, such as an article
+  about prompt injection, can score as a hit and stop the job. The person can ask the lead to
+  restart it, and the restart checks the content again. A false stop costs a job; a missed order
+  could cost an outside action.
+- **The measured miss rate is not the live one.** The held-out corpus of hidden orders and clean
+  look-alikes is scored in tests against a fixed stand-in for the decision model, which proves
+  the chunking, the question, and the threshold, not detection. The live model's score is taken
+  on a test cell, and the reviewer on outside actions covers what it misses.
+- **The household agent runs shared jobs without the guard.** The household cell has no person to
+  answer a held call, so its agent gets no rule stage, decision model, or reviewer before a call.
+  Its jobs get `household_read` and `household_change`, plus a search of their own earlier attempts;
+  any other tool is refused. A `household_change` marks the result risky, so a reviewer on another
+  model checks it before either lead may use it, but the change itself has already been made. A
+  person's prohibit or ask-first rule on `household_change` does not bind a shared job, and the
+  other person agrees to the job's title and cost, not its brief. A shared job can therefore edit or
+  remove a shared list that both people use. A later unit that gives the household agent more tools
+  adds the guard there.
 
 ## Related pages
 

@@ -23,8 +23,8 @@ import {
   type UsageState,
 } from "@earendil-works/pi-durable";
 import { monthOf } from "./activity.ts";
-import { type BudgetName, MonthLedgerDoc, RosterDoc } from "./docs.ts";
-import { DEVELOPER_ROLE, GUARD_USAGE_KEYS, LEAD_ROLE } from "./release-defaults.ts";
+import { type BudgetName, JobBoardDoc, MonthLedgerDoc, RosterDoc } from "./docs.ts";
+import { DEVELOPER_ROLE, GUARD_USAGE_KEYS, LEAD_ROLE, REVIEWER_ROLE } from "./release-defaults.ts";
 
 /** The zone's offset from UTC at `at`, in milliseconds (positive east of Greenwich). */
 export function zoneOffsetMs(at: number, zone: string): number {
@@ -82,22 +82,108 @@ export interface LedgerConversation {
   /** The id as a document key. */
   readonly conversationId: string;
   readonly role: string;
+  /** The job the conversation runs, for a job conversation. */
+  readonly job?: number;
+  /** The budget it spends when not its role's (a job's result review spends its template's). */
+  readonly budget?: BudgetName;
+  /** The layer all its spend counts in when not by bucket (a result review: reviewer). */
+  readonly layer?: Layer;
+  /** When its job ended, for a job conversation of an ended job. */
+  readonly endedAt?: number | null;
 }
 
-/** The lead's conversation and each specialist's, from the roster. */
+/** The budget a ledger conversation spends. */
+const budgetOfConversation = (conversation: LedgerConversation): BudgetName =>
+  conversation.budget ?? budgetOf(conversation.role);
+
+/**
+ * The lead's conversation, each specialist's from the roster, and every conversation of each job
+ * from the board: its current and earlier runs (role: its template) and its result review (role
+ * and layer reviewer, on the template's budget). A conversation the month's start retired (its
+ * job ended before the closing month and it spent nothing in it, or it was left out then) is left
+ * out while its job stays ended; a job conversation made after the start (a late review) and one
+ * the start kept (a shared job's last charge) still count, and so do a resumed job's.
+ */
 export async function ledgerConversations(
   reader: Pick<DocumentReader, "snapshot">,
   context: Context,
 ): Promise<LedgerConversation[]> {
+  return (await ledgerListing(reader, context)).included;
+}
+
+/** The ledger conversations, and the job conversations the month's start left out. */
+export interface LedgerListing {
+  readonly included: LedgerConversation[];
+  /** Left out by the old-job rule; the next roll keeps them out while they are still retired. */
+  readonly excluded: LedgerConversation[];
+}
+
+/** {@link ledgerConversations}, with the job conversations it left out. */
+export async function ledgerListing(
+  reader: Pick<DocumentReader, "snapshot">,
+  context: Context,
+): Promise<LedgerListing> {
   const roster = await reader.snapshot(RosterDoc, context);
-  return [
+  const board = await reader.snapshot(JobBoardDoc, context);
+  const ledger = await reader.snapshot(MonthLedgerDoc, context);
+  const startsAt = ledger?.startsAt ?? 0;
+  const baseline = ledger?.baseline ?? {};
+  // A ledger rolled before retirement was recorded: an old conversation without a baseline is out.
+  const retired = ledger?.retired;
+  const jobs: LedgerConversation[] = [];
+  const excluded: LedgerConversation[] = [];
+  const listed = new Set<string>();
+  let old = false;
+  const add = (conversation: LedgerConversation) => {
+    if (listed.has(conversation.conversationId)) return;
+    listed.add(conversation.conversationId);
+    // A conversation of a job that ended before this month: retired at the start, all its spend
+    // is in earlier months; otherwise its spend since its baseline counts, or all of it when it
+    // was made after the start (a review the lead pulled late). A job resumed since is not old,
+    // so its retired conversations count again from the baseline the retirement kept.
+    const id = conversation.conversationId;
+    if (
+      old &&
+      (retired === undefined ? !Object.hasOwn(baseline, id) : Object.hasOwn(retired, id))
+    ) {
+      excluded.push(conversation);
+      return;
+    }
+    jobs.push(conversation);
+  };
+  for (const row of Object.values(board?.jobs ?? {})) {
+    old = row.endedAt !== null && row.endedAt < startsAt;
+    const job = { role: row.template, job: row.number, endedAt: row.endedAt };
+    for (const run of row.runs) {
+      if (run.conversationId !== null) {
+        add({ id: run.conversationId, conversationId: String(run.conversationId), ...job });
+      }
+    }
+    if (row.conversationId !== null) {
+      add({ id: row.conversationId, conversationId: String(row.conversationId), ...job });
+    }
+    if (row.review !== null && row.review.conversationId !== null) {
+      add({
+        id: row.review.conversationId,
+        conversationId: String(row.review.conversationId),
+        role: REVIEWER_ROLE,
+        job: row.number,
+        budget: budgetOf(row.template),
+        layer: "reviewer",
+        endedAt: row.endedAt,
+      });
+    }
+  }
+  const included: LedgerConversation[] = [
     { id: ROOT_CONVERSATION_ID, conversationId: String(ROOT_CONVERSATION_ID), role: LEAD_ROLE },
     ...Object.entries(roster?.specialists ?? {}).map(([role, record]) => ({
       id: record.conversationId,
       conversationId: String(record.conversationId),
       role,
     })),
+    ...jobs,
   ];
+  return { included, excluded };
 }
 
 /** Which budget a role's spend counts against. */
@@ -150,6 +236,17 @@ export function spendSince(
 
 const total = (spend: LayerSpend) => spend.agent + spend.decision + spend.reviewer;
 
+/** One ledger conversation's spend since the baseline, all in its own layer when it has one. */
+function conversationSpend(
+  conversation: LedgerConversation,
+  costs: Readonly<Record<string, number>>,
+  baseline: Readonly<Record<string, number>> | undefined,
+): LayerSpend {
+  const spend = spendSince(costs, baseline);
+  if (conversation.layer === undefined) return spend;
+  return { agent: 0, decision: 0, reviewer: 0, [conversation.layer]: total(spend) };
+}
+
 /** The month-to-date spend of one cell, split by budget, layer, and role. */
 export interface MonthSpend {
   readonly month: string;
@@ -177,6 +274,7 @@ type Ledger = {
   baseline: Record<string, Record<string, number>>;
   hours: Record<string, Record<string, number>>;
   seen: Record<string, number>;
+  retired?: Record<string, true>;
 };
 
 const sum = (costs: Readonly<Record<string, number>>) =>
@@ -186,10 +284,21 @@ const sum = (costs: Readonly<Record<string, number>>) =>
 export const conversationTotal = (state: Readonly<UsageState> | undefined): number =>
   sum(costsOf(state));
 
+/** What a month roll did, in counts. */
+export interface MonthRoll {
+  readonly closedMonth: string;
+  readonly closedUsd: number;
+  readonly baselined: number;
+  readonly retired: number;
+}
+
 /**
  * The current month's ledger, rolled in one commit when `now` passed its end (or started at the
- * first read). A roll keeps the closing month's person spend in `closed`, takes every
- * conversation's totals as the new baseline, and applies a time zone the owner set during the
+ * first read). A roll keeps the closing month's person spend in `closed`, takes every listed
+ * conversation's totals as the new baseline, retires each job conversation that will spend no
+ * more (its job ended before the closing month and it spent nothing in it, or the listing left it
+ * out and the closing month still had it retired), so later reads leave it out while it keeps its
+ * baseline for a resume, and applies a time zone the owner set during the
  * closing month. The first month of a cell has no baseline: what its conversations spent before
  * counts in it.
  */
@@ -199,7 +308,12 @@ export async function ensureMonth(
   zone: string,
   conversations: readonly LedgerConversation[],
   context: Context,
-): Promise<{ readonly ledger: Readonly<Ledger>; readonly rolled: boolean }> {
+  excluded: readonly LedgerConversation[] = [],
+): Promise<{
+  readonly ledger: Readonly<Ledger>;
+  readonly rolled: boolean;
+  readonly roll?: MonthRoll;
+}> {
   const current = await harness.snapshot(MonthLedgerDoc, context);
   if (current !== undefined && current.month !== "" && now < current.endsAt) {
     return { ledger: current as Ledger, rolled: false };
@@ -214,16 +328,39 @@ export async function ensureMonth(
     const bounds = monthBounds(now, nextZone);
     const baseline: Record<string, Record<string, number>> = {};
     const seen: Record<string, number> = {};
+    const retired: Record<string, true> = {};
     let closing = 0;
-    for (const { id, conversationId, role } of conversations) {
-      const costs = costsOf(await tx.doc(UsageDoc, id));
-      if (!first && budgetOf(role) === "person") {
-        closing += total(spendSince(costs, doc.baseline[conversationId]));
+    // A conversation the listing left out stays out while the closing month still has it retired
+    // (an older ledger with no retired list left out every old one with no baseline); one a
+    // shared charge brought back since the listing counts like a listed one. A conversation made
+    // after the listing is in neither list, so it is not retired and counts from its first cost.
+    const counted = [...conversations];
+    if (!first) {
+      for (const conversation of excluded) {
+        const { conversationId } = conversation;
+        if (doc.retired !== undefined && !Object.hasOwn(doc.retired, conversationId)) {
+          counted.push(conversation);
+          continue;
+        }
+        retired[conversationId] = true;
+        const kept = doc.baseline[conversationId];
+        if (kept !== undefined) baseline[conversationId] = kept;
       }
+    }
+    for (const conversation of counted) {
+      const { id, conversationId, endedAt } = conversation;
+      const costs = costsOf(await tx.doc(UsageDoc, id));
+      const since = total(spendSince(costs, doc.baseline[conversationId]));
+      if (!first && budgetOfConversation(conversation) === "person") closing += since;
+      const done = endedAt !== undefined && endedAt !== null && endedAt < doc.startsAt;
+      // A retired conversation keeps its baseline, so a resumed job counts only its new spend.
       if (!first) baseline[conversationId] = costs;
+      if (!first && done && since === 0) retired[conversationId] = true;
       seen[conversationId] = sum(costs);
     }
-    if (!first) doc.closed = { ...doc.closed, [doc.month]: Math.round(closing * 10_000) / 10_000 };
+    const closedMonth = doc.month;
+    const closedUsd = Math.round(closing * 10_000) / 10_000;
+    if (!first) doc.closed = { ...doc.closed, [closedMonth]: closedUsd };
     Object.assign(doc, {
       month: bounds.month,
       zone: nextZone,
@@ -233,8 +370,17 @@ export async function ensureMonth(
       baseline,
       hours: {},
       seen,
+      retired,
     });
-    return { ledger: JSON.parse(JSON.stringify(doc)) as Ledger, rolled: true };
+    const ledger = JSON.parse(JSON.stringify(doc)) as Ledger;
+    if (first) return { ledger, rolled: true };
+    const roll: MonthRoll = {
+      closedMonth,
+      closedUsd,
+      baselined: Object.keys(baseline).length,
+      retired: Object.keys(retired).length,
+    };
+    return { ledger, rolled: true, roll };
   }, context);
 }
 
@@ -244,20 +390,29 @@ export async function readMonth(
   now: number,
   zone: string,
   context: Context,
-): Promise<MonthSpend & { readonly rolled: boolean }> {
-  const conversations = await ledgerConversations(harness, context);
-  const { ledger, rolled } = await ensureMonth(harness, now, zone, conversations, context);
+): Promise<MonthSpend & { readonly rolled: boolean; readonly roll?: MonthRoll }> {
+  const { included: conversations, excluded } = await ledgerListing(harness, context);
+  const { ledger, rolled, roll } = await ensureMonth(
+    harness,
+    now,
+    zone,
+    conversations,
+    context,
+    excluded,
+  );
   const person: LayerSpend = { agent: 0, decision: 0, reviewer: 0 };
   const developer: LayerSpend = { agent: 0, decision: 0, reviewer: 0 };
   const byRole: Record<string, number> = {};
-  for (const { id, conversationId, role } of conversations) {
+  for (const conversation of conversations) {
+    const { id, conversationId, role } = conversation;
     const state = await harness.snapshot(UsageDoc, id, context);
-    const spend = spendSince(costsOf(state), ledger.baseline[conversationId]);
-    const into = budgetOf(role) === "developer" ? developer : person;
+    const spend = conversationSpend(conversation, costsOf(state), ledger.baseline[conversationId]);
+    const budget = budgetOfConversation(conversation);
+    const into = budget === "developer" ? developer : person;
     into.agent += spend.agent;
     into.decision += spend.decision;
     into.reviewer += spend.reviewer;
-    if (budgetOf(role) === "person") byRole[role] = (byRole[role] ?? 0) + total(spend);
+    if (budget === "person") byRole[role] = (byRole[role] ?? 0) + total(spend);
   }
   return {
     month: ledger.month,
@@ -268,6 +423,7 @@ export async function readMonth(
     developer: { spentUsd: total(developer), byLayer: developer },
     hours: ledger.hours,
     rolled,
+    ...(roll === undefined ? {} : { roll }),
   };
 }
 
@@ -338,8 +494,37 @@ export async function addGuardUsage(
   layer: Exclude<Layer, "agent">,
   usage: Usage,
 ): Promise<void> {
+  await addToolUsage(tx, conversationId, GUARD_USAGE_KEYS[layer], usage);
+}
+
+/**
+ * Brings a retired conversation back into the month before a late cost is booked on it in `tx` (a
+ * shared job's charge that the household sent after the roll retired the job's conversation), so
+ * the cost counts in this month. One retired with no baseline takes its totals now as one, so only
+ * the late cost counts.
+ */
+export async function unretire(tx: Tx, conversationId: ConversationId): Promise<void> {
+  const ledger = await tx.doc(MonthLedgerDoc);
+  const id = String(conversationId);
+  if (ledger.retired === undefined || !Object.hasOwn(ledger.retired, id)) return;
+  delete ledger.retired[id];
+  if (!Object.hasOwn(ledger.baseline, id)) {
+    ledger.baseline[id] = costsOf(await tx.doc(UsageDoc, conversationId));
+  }
+}
+
+/**
+ * Adds one model call's usage to a conversation's `pi.usage` under a tool key. A key that is not a
+ * guard key counts as the conversation's own agent spend: the lead's hand-off note is booked this
+ * way on the lead's conversation, so it is in the person's month and their limits.
+ */
+export async function addToolUsage(
+  tx: Tx,
+  conversationId: ConversationId,
+  key: string,
+  usage: Usage,
+): Promise<void> {
   const tools = (await tx.doc(UsageDoc, conversationId)).tools as Record<string, Usage>;
-  const key = GUARD_USAGE_KEYS[layer];
   const known = Object.hasOwn(tools, key) ? tools[key] : undefined;
   if (known === undefined) {
     tools[key] = plainUsage(usage);

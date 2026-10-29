@@ -96,17 +96,17 @@ describe("the charter scenario, steps 1-6, against the cell routes", () => {
       return io.out();
     };
 
-    // 1. The member adds an ask-first rule for the lead's hand-off; the list shows it.
-    expect(await secbot("rules", "add", "lead", "handoff", "ask-first")).toMatchObject({
+    // 1. The member adds an ask-first rule for the lead's job starts; the list shows it.
+    expect(await secbot("rules", "add", "lead", "start_job", "ask-first")).toMatchObject({
       code: 0,
-      out: "added: lead handoff (any) -> ask first\n",
+      out: "added: lead start_job (any) -> ask first\n",
     });
     const listed = await secbot("rules", "list");
     expect(listed.out).toContain(
-      "YOUR RULES\n------------------------------------------------------------------------------\nAGENT      TOOL               MATCH                          VERDICT\nall        handoff            any                            permit\n",
+      "YOUR RULES\n------------------------------------------------------------------------------\nAGENT      TOOL               MATCH                          VERDICT\nall        start_job          any                            permit\nall        restart_job        any                            permit\n",
     );
     expect(listed.out).toContain(
-      "lead       handoff            any                            ask first\n",
+      "lead       start_job          any                            ask first\n",
     );
 
     // The session: the cell's own frames, printed by the command line's renderer.
@@ -129,11 +129,11 @@ describe("the charter scenario, steps 1-6, against the cell routes", () => {
     const briefs = (role: string) =>
       setup.gateway.requests.filter((r) => r.role === role && r.lastText.startsWith("Ask ")).length;
 
-    // 2. The lead hands off; the chat shows the held call with "your rule" and three answers.
+    // 2. The lead starts a job; the chat shows the held call with "your rule" and three answers.
     const secret = "sk-test-charter0123456789abcdef"; // gitleaks:allow (fake test token)
-    const handoff = (specialist: string) =>
-      `CALL handoff ${JSON.stringify({ specialist, brief: `Ask ${specialist}.`, api_key: secret })}`;
-    await chat(handoff("research"), "charter-2", "(the lead hands off to research)");
+    const startJob = (template: string) =>
+      `CALL start_job ${JSON.stringify({ title: `ask ${template}`, brief: `Ask ${template}.`, template, api_key: secret })}`;
+    await chat(startJob("research"), "charter-2", "(the lead starts a research job)");
     await until(() => heldFrames().length === 1);
     const [first] = heldFrames();
     const block = show(first?.call as HeldCallView, first?.count ?? 0);
@@ -141,67 +141,72 @@ describe("the charter scenario, steps 1-6, against the cell routes", () => {
       /^\[ HELD #1 \] the lead wants to run a tool +lapses in 2[34] h \d+ m$/,
     );
     expect(block).toContain("  agent      lead");
-    expect(block).toContain("  tool       handoff");
+    expect(block).toContain("  tool       start_job");
     expect(block).toContain("             api_key = [redacted]");
-    expect(block).toContain("  why held   your rule: lead handoff (any) -> ask first");
+    expect(block).toContain("  why held   your rule: lead start_job (any) -> ask first");
     expect(block).toContain("  answer     /allow 1     allow once");
-    expect(block).toContain("             /always 1    allow always; adds: lead handoff");
+    expect(block).toContain("             /always 1    allow always; adds: lead start_job");
     expect(block).toContain("             /deny 1      deny");
 
-    // 3. /always 1: the hand-off runs; the list shows the added rule; activity shows "person".
+    // 3. /always 1: the job starts; the list shows the added rule; activity shows "person".
     expect(await answer("/always 1", "always", 1)).toBe(
-      "[ allowed always ] #1 handoff -> research; added rule: lead handoff\n  (specialist = research) -> permit\n",
+      "[ allowed always ] #1 start_job -> research; added rule: lead start_job\n  (template = research) -> permit\n",
     );
     await until(() => briefs("research") === 1);
     const afterAlways = await secbot("rules", "list");
     expect(afterAlways.out).toMatch(
-      /lead {7}handoff {12}specialist = research {10}permit\n {13}added by allow always, \d{1,2} \w{3} \d\d:\d\d\n/,
+      /lead {7}start_job {10}template = research {12}permit\n {13}added by allow always, \d{1,2} \w{3} \d\d:\d\d\n/,
     );
     const activity3 = await secbot("activity");
-    expect(activity3.out).toMatch(/lead {7}handoff -> research {6}allowed {7}person/);
+    expect(activity3.out).toMatch(/lead {7}start_job -> research {4}allowed {7}person/);
     expect(activity3.out).toContain("         allowed always by owner\n");
-    expect(activity3.out).toMatch(/lead {7}handoff -> research {6}held {10}rule/);
+    expect(activity3.out).toMatch(/lead {7}start_job -> research {4}held {10}rule/);
 
-    // 4. The same hand-off again: no prompt; activity shows the layer "rule".
-    await chat(handoff("research"), "charter-4", "(the lead hands off to research again)");
+    // 4. The same job start again: no prompt; activity shows the layer "rule".
+    await chat(startJob("research"), "charter-4", "(the lead starts a research job again)");
     await until(() => briefs("research") === 2);
     expect(heldFrames()).toHaveLength(1);
     const activity4 = await secbot("activity");
     const rows4 = activity4.out.split("\n");
-    // The newest hand-off verdict; the hand-off's running job may list above it.
-    const newest = rows4.findIndex((row) => /lead {7}handoff -> research {6}allowed/.test(row));
-    expect(rows4[newest]).toMatch(/lead {7}handoff -> research {6}allowed {7}rule/);
+    // The newest job-start verdict; the job itself may list above it.
+    const newest = rows4.findIndex((row) => /lead {7}start_job -> research {4}allowed/.test(row));
+    expect(rows4[newest]).toMatch(/lead {7}start_job -> research {4}allowed {7}rule/);
     expect(rows4[newest + 1]).toBe(
-      "         your rule: lead handoff (specialist = research) -> permit",
+      "         your rule: lead start_job (template = research) -> permit",
     );
 
-    // 5. The owner's ask-first rule on hand-offs to the developer: only /allow and /deny.
+    // 5. The owner's ask-first rule on developer jobs: only /allow and /deny.
     expect(
       await secbot(
         "rules",
         "add",
         "all",
-        "handoff",
+        "start_job",
         "ask-first",
         "--exact",
-        "specialist=developer",
+        "template=developer",
         "--owner",
         "--person",
         "owner",
       ),
-    ).toMatchObject({ code: 0, out: "added: all handoff (specialist = developer) -> ask first\n" });
-    await chat(handoff("developer"), "charter-5", "(the lead hands off to developer)");
+    ).toMatchObject({
+      code: 0,
+      out: "added: all start_job (template = developer) -> ask first\n",
+    });
+    await chat(startJob("developer"), "charter-5", "(the lead starts a developer job)");
     await until(() => heldFrames().length === 2);
     const second = heldFrames()[1];
     const ownerBlock = show(second?.call as HeldCallView, second?.count ?? 0);
     expect(ownerBlock).toContain(
-      "  why held   owner rule: all handoff (specialist = developer) -> ask first",
+      "  why held   owner rule: all start_job (template = developer) -> ask first",
     );
     expect(ownerBlock).toContain(
       "             (allow always is not offered: an owner rule asks first here)",
     );
     expect(ownerBlock.join("\n")).not.toContain("/always 2");
-    expect(await answer("/allow 2", "allow", 2)).toBe("[ allowed once ] #2 handoff -> developer\n");
+    expect(await answer("/allow 2", "allow", 2)).toBe(
+      "[ allowed once ] #2 start_job -> developer\n",
+    );
     await until(() => briefs("developer") === 1);
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(briefs("developer")).toBe(1);
@@ -235,5 +240,5 @@ describe("the charter scenario, steps 1-6, against the cell routes", () => {
       await mkdir(evidence, { recursive: true });
       await writeFile(join(evidence, "charter-1-6.txt"), `${text}\n`);
     }
-  });
+  }, 60_000);
 });

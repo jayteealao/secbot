@@ -4,8 +4,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { heartbeatStatuses } from "./betterstack.mjs";
 import {
+  capacityLines,
   DEFAULT_ALARM_CELLS,
   DEFAULT_CELLS,
+  dayOf,
   exampleLines,
   exampleModelLine,
   expandCells,
@@ -16,6 +18,7 @@ import {
   HEAP_LIMIT_BYTES,
   heartbeatCells,
   heldOutLines,
+  judgeCorpus,
   judgeCrash,
   judgeExamples,
   judgeGuardBench,
@@ -24,8 +27,12 @@ import {
   judgeLedger,
   judgeRestore,
   judgeTool,
+  levelOf,
+  measuredOf,
   measureGuard,
+  measureHeap,
   normalizeCells,
+  parallelLevels,
   printResults,
   remoteCommand,
   reportAlarms,
@@ -33,6 +40,7 @@ import {
   reportHeartbeats,
   SECRETS_HEARTBEAT_SKIPPED,
   SSH_OPTIONS,
+  slowSeconds,
   summarizeDelays,
 } from "./vps.mjs";
 
@@ -173,7 +181,7 @@ const after = {
   armed: true,
   leadEntries: 9,
   markerRows: 0,
-  followupReported: true,
+  resultStored: true,
   calls: { lead: 2, specialist: 1 },
   alarm: 60_000,
   earliest: { at: 60_000, source: "lab-tick" },
@@ -189,7 +197,7 @@ test("the crash verdict passes when everything survived and fails on each broken
     ...after,
     startedAt: 500,
     markerRows: 1,
-    followupReported: false,
+    resultStored: false,
     alarm: 90_000,
     leadEntries: 3,
     tasks: [],
@@ -821,5 +829,173 @@ test("measure-guard --examples prints each call's score, catch, and name, and th
       "jev",
     ]),
     "lab --env test-cell --route guard-bench --examples --repeat 2 --adapter jev",
+  );
+});
+
+// The capacity measurement (measure-heap --parallel-jobs): the levels, one level's numbers from
+// the celld samples and the bench's job rows, the measured number, and the report lines.
+const CAP_MIB = 1024 * 1024;
+const capSample = (heap, live = 1) => ({
+  fleets: {
+    test: {
+      rss_bytes: 300 * CAP_MIB,
+      deployment: { isolates: { cells: { secbot: { live, retiring: 0, heap_bytes: heap } } } },
+    },
+  },
+});
+const capState = (jobs, { done = true, status = "done", processStartedAt = 1 } = {}) => ({
+  level: 1,
+  done,
+  startedAt: 1_000,
+  processStartedAt,
+  jobs: Array.from({ length: jobs }, (_, i) => ({
+    n: i + 1,
+    status,
+    createdAt: 1_000 + 100 * (i + 1),
+    receiptMs: 100 * (i + 1),
+    endedAt: status === "done" ? 61_000 + 1_000 * i : null,
+    costUsd: 0.01,
+  })),
+});
+
+test("capacity: the parallel levels are 1-16 and ascending", () => {
+  assert.deepEqual(parallelLevels("1,4,8,16"), [1, 4, 8, 16]);
+  assert.deepEqual(parallelLevels(" 2, 3 "), [2, 3]);
+  for (const bad of ["", "0,4", "4,1", "1,17", "1,1", "x", "1.5"]) {
+    assert.throws(() => parallelLevels(bad), /--parallel-jobs/, bad);
+  }
+});
+
+test("capacity: one level's heap per job, latencies, and verdict", () => {
+  const level = levelOf([capSample(70 * CAP_MIB), capSample(90 * CAP_MIB)], capState(4), {
+    idle: [capSample(50 * CAP_MIB), capSample(50 * CAP_MIB)],
+    jobs: 4,
+    processStartedAt: 1,
+  });
+  assert.equal(level.jobs, 4);
+  assert.equal(level.idleHeap, 50 * CAP_MIB);
+  assert.equal(level.peakHeap, 90 * CAP_MIB);
+  assert.equal(level.heapPerJob, 10 * CAP_MIB);
+  assert.deepEqual(level.receipt, { median: 250, p95: 400 });
+  assert.deepEqual(level.latency, { median: 61_250, p95: 62_600 });
+  assert.equal(level.answered, 4);
+  assert.equal(level.restarted, false);
+  assert.equal(level.ok, true);
+});
+
+test("capacity: a restart, an unanswered job, or a heap at the limit fails the level", () => {
+  const opts = { idle: [capSample(50 * CAP_MIB)], jobs: 2, processStartedAt: 1 };
+  const restarted = levelOf([capSample(60 * CAP_MIB)], capState(2, { processStartedAt: 2 }), opts);
+  assert.equal(restarted.restarted, true);
+  assert.equal(restarted.ok, false);
+  const short = levelOf([capSample(60 * CAP_MIB)], capState(1), opts);
+  assert.equal(short.answered, 1);
+  assert.equal(short.ok, false);
+  const over = levelOf([capSample(HEAP_LIMIT_BYTES)], capState(2), opts);
+  assert.equal(over.ok, false);
+  assert.equal(levelOf([], capState(2), opts).ok, false);
+});
+
+test("capacity: the measured number is the last passing level before the first failure", () => {
+  const level = (jobs, ok) => ({ jobs, ok });
+  assert.equal(measuredOf([level(1, true), level(4, true), level(8, true), level(16, false)]), 8);
+  assert.equal(measuredOf([level(1, true), level(4, true), level(8, true), level(16, true)]), 16);
+  assert.equal(measuredOf([level(1, false), level(4, true)]), null);
+  assert.equal(measuredOf([]), null);
+});
+
+test("capacity: the report lines fit 80 columns and name the measured number with its date", () => {
+  const level = levelOf([capSample(90 * CAP_MIB)], capState(4), {
+    idle: [capSample(50 * CAP_MIB)],
+    jobs: 4,
+    processStartedAt: 1,
+  });
+  const lines = capacityLines({ measured: 4, on: "2026-10-29", levels: [level] });
+  for (const line of lines) assert.ok(line.length <= 80, line);
+  assert.ok(lines.some((line) => line.startsWith("level 4:")));
+  assert.equal(lines.at(-1), "capacity: measured 4 jobs at once on 2026-10-29");
+  assert.equal(
+    capacityLines({ measured: null, on: "2026-10-29", levels: [] }).at(-1),
+    "capacity: no level passed; no measured number",
+  );
+});
+
+test("capacity: the slow wait is 5-300 s, and the driver needs --out before any remote call", async () => {
+  assert.equal(slowSeconds("60"), 60);
+  for (const bad of ["4", "301", "x", "1e2"]) assert.throws(() => slowSeconds(bad), /5-300/);
+  await assert.rejects(
+    measureHeap({ env: "test-cell", "parallel-jobs": "1,4" }),
+    /--parallel-jobs needs --out/,
+  );
+  await assert.rejects(
+    measureHeap({ env: "test-cell", "parallel-jobs": "4,1", out: "x" }),
+    /--parallel-jobs/,
+  );
+  await assert.rejects(measureHeap({ env: "test-cell", out: "x" }), /need --parallel-jobs/);
+  assert.equal(dayOf(Date.UTC(2026, 9, 29, 23, 59)), "2026-10-29");
+});
+
+// The corpus run (measure-guard --corpus): the miss rate over the injected cases gates the run.
+const corpusResults = ({ missed = 0, timeouts = 0, falseStops = 0 } = {}) => {
+  const groups = ["direct", "argues-for-label", "hidden", "long-tail"];
+  const cases = [];
+  for (let i = 0; i < 40; i++) {
+    const outcome = i < missed ? "clean" : i < missed + timeouts ? "timeout" : "hit";
+    cases.push({
+      name: `injected-${i}`,
+      group: groups[Math.floor(i / 10)],
+      label: "injection",
+      outcome,
+      chunks: 1,
+      cause: outcome === "hit" ? "injection" : null,
+    });
+  }
+  for (let i = 0; i < 40; i++) {
+    const outcome = i < falseStops ? "hit" : "clean";
+    cases.push({
+      name: `clean-${i}`,
+      group: "clean",
+      label: "clean",
+      outcome,
+      chunks: 1,
+      cause: null,
+    });
+  }
+  return { cases, models: ["typesafe/jev-1.13-20261001"], timedOut: false };
+};
+
+test("corpus: 4 of 40 missed passes, 5 fails, and a timeout on an injected case is a miss", () => {
+  const pass = judgeCorpus(corpusResults({ missed: 4, falseStops: 2 }));
+  assert.equal(pass.ok, true);
+  assert.equal(pass.lines.at(-1), "corpus: 4/40 missed (0.100): pass");
+  assert.ok(pass.lines.includes("decision model typesafe/jev-1.13-20261001"));
+  assert.ok(pass.lines.some((line) => line === "false positives: 2/40 (0.050), recorded"));
+  assert.ok(pass.lines.some((line) => line.startsWith("  direct: 4/10 missed")));
+  for (const line of pass.lines) assert.ok(line.length <= 80, line);
+  const fail = judgeCorpus(corpusResults({ missed: 5 }));
+  assert.equal(fail.ok, false);
+  assert.equal(fail.lines.at(-1), "corpus: 5/40 missed (0.125): fail");
+  const timeout = judgeCorpus(corpusResults({ missed: 4, timeouts: 1 }));
+  assert.equal(timeout.ok, false);
+  assert.equal(timeout.lines.at(-1), "corpus: 5/40 missed (0.125): fail");
+});
+
+test("corpus: a short run or no result is not measured", () => {
+  const short = { ...corpusResults(), timedOut: true };
+  assert.deepEqual(judgeCorpus(short), {
+    ok: false,
+    lines: ["corpus: not measured: the run ended before every case was checked"],
+  });
+  assert.equal(judgeCorpus(undefined).ok, false);
+});
+
+test("corpus: --corpus with --calls or --examples is refused before any remote call", async () => {
+  await assert.rejects(
+    measureGuard({ env: "test-cell", corpus: true, calls: "5" }),
+    /--corpus alone/,
+  );
+  await assert.rejects(
+    measureGuard({ env: "test-cell", corpus: true, examples: true }),
+    /--corpus alone/,
   );
 });

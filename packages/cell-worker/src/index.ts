@@ -13,16 +13,17 @@ import {
   type SecretsCellEnv,
   type SecretsCellState,
 } from "@secbot/secrets-cell";
+import { PERSONS } from "./cells.ts";
 import { releaseVersion } from "./health.ts";
 import { PersonCell } from "./person-cell.ts";
 import { route, type WorkerEnv } from "./routes.ts";
 
 export { PersonCell };
 
-/** The household cell with this bundle's release version. */
+/** The household cell with this bundle's release version and the household's people. */
 export class HouseholdCell extends HouseholdCellBase {
   constructor(state: HouseholdCellState, env: HouseholdCellEnv) {
-    super(state, env, { version: releaseVersion() });
+    super(state, env, { version: releaseVersion(), persons: PERSONS });
   }
 }
 

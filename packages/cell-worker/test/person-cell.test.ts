@@ -1,21 +1,60 @@
 // The person cell's routes over the node:sqlite stand-in and a scripted model: status up with
-// the version and five roles, the model and specialist routes, chat
-// input and frames over a socket, and missed messages.
+// the version and its roles, the model, tier-cap, and template routes, chat input (which steers a
+// busy lead) and frames over a socket, missed messages, and the live job tasks.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type CellHarness, openCellHarness } from "@secbot/cell-harness";
+import {
+  type CellHarness,
+  createSharedRow,
+  FIXTURE_SLOW_MS,
+  JobBoardDoc,
+  LIVE_FIXTURE_PAGES,
+  openCellHarness,
+  StopDoc,
+} from "@secbot/cell-harness";
 import {
   ALTERNATE_MODEL,
   createFauxGateway,
   FakeCelldStorage,
   type FauxGateway,
+  fauxAssistantMessage,
+  fauxText,
+  fauxToolCall,
+  loggedEvents,
+  type Responder,
   until,
 } from "@secbot/cell-harness/testing";
+import { createHold, jobResponder, startJobLine } from "@secbot/cell-harness/testing/responders";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "../src/device-auth.ts";
-import { PersonCell, type SocketLike } from "../src/person-cell.ts";
+import {
+  type OpenExtras,
+  PersonCell,
+  type SocketLike,
+  testFixturesOf,
+} from "../src/person-cell.ts";
 import { route, type WorkerEnv } from "../src/routes.ts";
 
 const KEY = "owner-laptop-key-0123456789abcdef0123456789abcdef";
+
+/** A research job asks the lead; the lead puts the question to the person and asks in its words. */
+const asksPerson: Responder = (request) => {
+  if (request.role === "research") {
+    return request.last?.role === "toolResult"
+      ? fauxAssistantMessage([fauxText(`Filled in: ${request.lastText}`)])
+      : fauxAssistantMessage([fauxToolCall("ask_lead", { question: "Home or office address?" })], {
+          stopReason: "toolUse",
+        });
+  }
+  if (request.lastText.startsWith("[job 1 question:")) {
+    return fauxAssistantMessage([fauxToolCall("ask_person", { job: 1 })], {
+      stopReason: "toolUse",
+    });
+  }
+  if (request.lastText.startsWith("Ask the person")) {
+    return fauxAssistantMessage([fauxText("Which address goes on the form, home or the office?")]);
+  }
+  return jobResponder(request);
+};
 const HOST = "cells.example.test";
 
 class FakeSocket implements SocketLike {
@@ -43,8 +82,8 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function setup(): Promise<Setup> {
-  const gateway = createFauxGateway();
+async function setup(respond?: Responder): Promise<Setup> {
+  const gateway = createFauxGateway(respond);
   const sockets: FakeSocket[] = [];
   const opened: CellHarness[] = [];
   const cells = new Map<string, PersonCell>();
@@ -100,7 +139,7 @@ const call = (s: Setup, method: string, path: string, body?: unknown) =>
   );
 
 describe("PersonCell", () => {
-  it("reports up with the version and the five roles, alone and through /health", async () => {
+  it("reports up with the version and its roles, alone and through /health", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = await setup();
     const status = await call(s, "GET", "/v1/cells/owner/status");
@@ -108,7 +147,7 @@ describe("PersonCell", () => {
       status: "up",
       person: "owner",
       version: "v0.0.0-test",
-      roles: ["lead", "household", "developer", "research", "health"],
+      roles: ["lead", "household", "research", "health", "developer"],
     });
     const health = await route(
       new Request(`http://${HOST}/health?cells=owner,second,ghost`),
@@ -123,7 +162,7 @@ describe("PersonCell", () => {
     });
   });
 
-  it("changes a model, refuses an unknown one, and adds a specialist", async () => {
+  it("changes a model and a tier cap, refuses bad ones, and adds a template", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const s = await setup();
     const refused = await call(s, "PUT", "/v1/cells/owner/models/lead", { model: "openai/nope" });
@@ -145,10 +184,33 @@ describe("PersonCell", () => {
       instruction: "Again.",
     });
     expect(duplicate.status).toBe(400);
+    const withModel = await call(s, "POST", "/v1/cells/owner/specialists", {
+      name: "tax",
+      instruction: "Forms.",
+      model: ALTERNATE_MODEL,
+    });
+    expect(withModel.status).toBe(400);
+    expect(((await withModel.json()) as { error: string }).error).toContain("starts on a tier");
+    // A model of any type is refused the same way, never silently ignored.
+    const nullModel = await call(s, "POST", "/v1/cells/owner/specialists", {
+      name: "tax",
+      instruction: "Forms.",
+      model: null,
+    });
+    expect(nullModel.status).toBe(400);
+    expect(((await nullModel.json()) as { error: string }).error).toContain("starts on a tier");
+    expect((await (await call(s, "GET", "/v1/cells/owner/status")).json()) as object).toMatchObject(
+      { roles: expect.arrayContaining(["garden"]) },
+    );
+    const cap = await call(s, "PUT", "/v1/cells/owner/tiers/mid/cap", { usd: 2.5 });
+    expect(await cap.json()).toEqual({ tier: "mid", capUsd: 2.5 });
+    expect((await call(s, "PUT", "/v1/cells/owner/tiers/mid/cap", { usd: 0 })).status).toBe(400);
+    expect((await call(s, "PUT", "/v1/cells/owner/tiers/huge/cap", { usd: 1 })).status).toBe(400);
+    expect((await call(s, "PUT", "/v1/cells/owner/tiers/mid/cap", {})).status).toBe(400);
     const models = (await (await call(s, "GET", "/v1/cells/owner/models")).json()) as {
-      roles: { role: string }[];
+      roles: { role: string; capUsd?: number }[];
     };
-    expect(models.roles.map((entry) => entry.role)).toContain("garden");
+    expect(models.roles.find((entry) => entry.role === "mid")?.capUsd).toBe(2.5);
     expect((await call(s, "PUT", "/v1/cells/owner/models/lead", {})).status).toBe(400);
     expect((await call(s, "GET", "/v1/cells/owner/nothing")).status).toBe(404);
   });
@@ -211,9 +273,9 @@ describe("PersonCell", () => {
       readonly held: () => boolean;
     }
 
-    async function opening(): Promise<Opening> {
+    async function opening(respond?: Responder): Promise<Opening> {
       vi.spyOn(console, "log").mockImplementation(() => {});
-      const s = await setup();
+      const s = await setup(respond);
       s.sockets.splice(0);
       const server = new FakeSocket();
       vi.stubGlobal(
@@ -288,6 +350,113 @@ describe("PersonCell", () => {
         return page.messages.length === 0;
       });
       expect(texts(server)).toHaveLength(2);
+    });
+
+    it("sends each open job question after the missed messages, and answers it through the route", async () => {
+      const { s, harness, server } = await opening(asksPerson);
+      await (
+        await harness.submit(
+          startJobLine({ title: "renew passport form", brief: "fill it", template: "research" }),
+          "q-1",
+        )
+      ).wait(BACKGROUND_CONTEXT);
+      await until(async () => (await harness.board()).jobs["1"]?.question?.toPerson === true);
+      await harness.harness.waitForIdle(BACKGROUND_CONTEXT);
+      await open(s);
+      const kinds = server.sent.map((frame) => String(frame.type));
+      const question = kinds.indexOf("question");
+      expect(question).toBeGreaterThan(kinds.lastIndexOf("missed"));
+      expect(server.sent[question]).toEqual({
+        type: "question",
+        job: 1,
+        title: "renew passport form",
+      });
+      expect(kinds.filter((kind) => kind === "question")).toHaveLength(1);
+
+      const answer = (n: number, body: unknown) =>
+        call(s, "POST", `/v1/cells/owner/jobs/${n}/answer`, body);
+      const missing = await answer(9, { text: "home" });
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toEqual({ error: "no job #9" });
+      expect((await answer(1, { text: "  " })).status).toBe(400);
+      expect((await answer(1, { text: "x".repeat(2_001) })).status).toBe(400);
+      const answered = await answer(1, { text: "home address" });
+      expect(answered.status).toBe(200);
+      expect(await answered.json()).toEqual({ job: 1, title: "renew passport form" });
+      await until(async () => (await harness.board()).jobs["1"]?.status === "done");
+      const again = await answer(1, { text: "home address" });
+      expect(again.status).toBe(409);
+      expect(await again.json()).toEqual({ error: "job 1 has no question waiting" });
+    });
+
+    it("sends each open shared offer after the questions, and joins or declines it through the routes", async () => {
+      const { s, harness, server } = await opening();
+      const offer = (title: string, payer: "half" | "them") =>
+        harness.harness.commit(async (tx) => {
+          const row = await createSharedRow(tx, {
+            title,
+            brief: title,
+            priority: "routine",
+            deadline: null,
+            tier: "cheap",
+            effort: { requested: "low", applied: "low" },
+            owner: "owner",
+            createdAt: 1,
+            shared: {
+              household: 7,
+              role: "other",
+              with: "second",
+              consent: "shown",
+              payer,
+              estimateUsd: 0.25,
+              outbox: [],
+              charges: [],
+              resultAt: null,
+              waitingBudget: false,
+            },
+          });
+          return row.number;
+        }, BACKGROUND_CONTEXT);
+      const first = await offer("plan the May trip", "half");
+      const second = await offer("paint the hall", "them");
+      await open(s);
+      const shared = server.sent.filter((frame) => frame.type === "shared");
+      expect(shared).toEqual([
+        { type: "shared", job: first, title: "plan the May trip", from: "second", payer: "half" },
+        { type: "shared", job: second, title: "paint the hall", from: "second", payer: "all" },
+      ]);
+      const kinds = server.sent.map((frame) => String(frame.type));
+      expect(kinds.indexOf("shared")).toBeGreaterThan(kinds.indexOf("connected"));
+
+      const join = (n: number) => call(s, "POST", `/v1/cells/owner/jobs/${n}/join`);
+      const decline = (n: number) => call(s, "POST", `/v1/cells/owner/jobs/${n}/decline`);
+      const joined = await join(first);
+      expect(joined.status).toBe(200);
+      expect(await joined.json()).toEqual({
+        job: first,
+        title: "plan the May trip",
+        from: "second",
+        payer: "half",
+      });
+      const row = (await harness.board()).jobs[String(first)];
+      expect(row?.shared?.consent).toBe("joined");
+      expect(row?.shared?.outbox).toEqual([
+        expect.objectContaining({ kind: "answer", household: 7, local: first, join: true }),
+      ]);
+      const again = await join(first);
+      expect(again.status).toBe(404);
+      expect(await again.json()).toEqual({ error: `no shared job #${first} waits for you` });
+      const declined = await decline(second);
+      expect(await declined.json()).toEqual({
+        job: second,
+        title: "paint the hall",
+        from: "second",
+        payer: "them",
+      });
+      expect((await harness.board()).jobs[String(second)]?.shared?.outbox).toEqual([
+        expect.objectContaining({ kind: "answer", join: false }),
+      ]);
+      expect((await decline(99)).status).toBe(404);
     });
 
     it("sends an answer once when both the missed page and the live watch carry it", async () => {
@@ -408,12 +577,258 @@ describe("PersonCell", () => {
     expect(s.opened).toHaveLength(1);
   });
 
-  it("shows live tasks with the hand-off brief on request", async () => {
+  it("shows live job tasks with their input on request", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const s = await setup();
+    const hold = createHold();
+    hold.hold("research");
+    const s = await setup(hold.wrap(jobResponder));
+    await call(s, "GET", "/v1/cells/owner/status");
+    const cell = s.cells.get("owner");
+    if (cell === undefined) throw new Error("setup failed");
+    await cell.submitInput(
+      "owner",
+      startJobLine({ title: "a", brief: "look", template: "research" }),
+      "req-job-0001",
+    );
+    await until(() => hold.waiting("research") === 1);
     const body = (await (await call(s, "GET", "/v1/cells/owner/status?tasks=1")).json()) as {
-      tasks: unknown[];
+      tasks: { kind: string; input?: unknown }[];
     };
-    expect(Array.isArray(body.tasks)).toBe(true);
+    expect(body.tasks.find((task) => task.kind === "secbot.job")).toMatchObject({
+      input: { number: 1 },
+    });
+    hold.release("research");
+  });
+
+  it("steers a busy lead with a chat line; an RPC input waits for the turn unless told", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const s = await setup(jobResponder);
+    await call(s, "GET", "/v1/cells/owner/status");
+    const cell = s.cells.get("owner");
+    const socket = s.sockets[0];
+    if (cell === undefined || socket === undefined) throw new Error("setup failed");
+    await cell.webSocketMessage(
+      socket,
+      JSON.stringify({ type: "input", text: "hello lead", requestId: "req-00000002" }),
+    );
+    await cell.submitInput("owner", "from mail", "req-mail-0001");
+    const steered = loggedEvents(log.mock.calls).filter((e) => e.event === "input.steered");
+    expect(steered.map((e) => [e.request_id, e.when_busy])).toEqual([
+      ["req-00000002", "steer"],
+      ["req-mail-0001", "followUp"],
+    ]);
+  });
+});
+
+describe("the job board, stop, restart, and reorder routes", () => {
+  /** Three research jobs, held by the model so they stay running. */
+  async function threeJobs() {
+    const hold = createHold();
+    const s = await setup(hold.wrap(jobResponder));
+    s.sockets.splice(0);
+    await call(s, "GET", "/v1/cells/owner/status");
+    const harness = s.opened[0];
+    if (harness === undefined) throw new Error("setup failed");
+    hold.hold("research");
+    for (const [index, title] of ["flights to Lisbon", "train times", "hotel list"].entries()) {
+      await (
+        await harness.submit(
+          startJobLine({ title, brief: `${title}, please.`, template: "research" }),
+          `route-job-${index}`,
+        )
+      ).wait(BACKGROUND_CONTEXT);
+    }
+    await until(() => hold.waiting("research") === 3);
+    return { s, harness, hold };
+  }
+  const priority = (s: Setup, n: number, body: unknown) =>
+    call(s, "POST", `/v1/cells/owner/jobs/${n}/priority`, body);
+
+  it("answers the board, reorders live jobs, and refuses a bad body, a missing job, and an ended one", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { s, harness, hold } = await threeJobs();
+    const board = await call(s, "GET", "/v1/cells/owner/jobs");
+    expect(board.status).toBe(200);
+    const view = (await board.json()) as { person: string; rows: { number: number }[] };
+    expect(view.person).toBe("owner");
+    expect(view.rows.map((row) => row.number)).toEqual([1, 2, 3]);
+
+    const urgent = await priority(s, 3, { urgent: true });
+    expect(urgent.status).toBe(200);
+    expect(await urgent.json()).toEqual({
+      job: 3,
+      title: "hotel list",
+      priority: "urgent",
+      deadline: null,
+      place: 1,
+      of: 3,
+    });
+    expect(await (await priority(s, 2, { deadline: "2026-10-12" })).json()).toMatchObject({
+      job: 2,
+      priority: "deadline",
+      deadline: "2026-10-12",
+      place: 2,
+      of: 3,
+    });
+    expect(await (await priority(s, 1, { before: 3 })).json()).toMatchObject({
+      job: 1,
+      place: 1,
+      of: 3,
+      before: 3,
+    });
+    expect(await (await priority(s, 2, { deadline: null })).json()).toMatchObject({
+      job: 2,
+      priority: "routine",
+      deadline: null,
+    });
+    for (const body of [
+      {},
+      { urgent: false },
+      { deadline: "2026-02-30" },
+      { deadline: "12/10/2026" },
+      { before: 0 },
+      { before: "1" },
+      { urgent: true, before: 1 },
+    ]) {
+      expect((await priority(s, 1, body)).status).toBe(400);
+    }
+    const missing = await priority(s, 9, { urgent: true });
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "no job #9", reason: "no-job", job: 9 });
+    const missingTarget = await priority(s, 1, { before: 9 });
+    expect(missingTarget.status).toBe(404);
+    expect(await missingTarget.json()).toMatchObject({ error: "no job #9" });
+
+    // The stop ends every job: a reorder of one is refused.
+    const stopping = call(s, "POST", "/v1/cells/owner/stop");
+    await until(
+      async () => (await harness.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.active != null,
+    );
+    hold.release("research");
+    const stopped = await stopping;
+    expect(stopped.status).toBe(200);
+    expect(await stopped.json()).toEqual({ jobs: 3, turn: false });
+    const ended = await priority(s, 1, { urgent: true });
+    expect(ended.status).toBe(409);
+    expect(await ended.json()).toEqual({ error: "job 1 has ended", reason: "ended", job: 1 });
+  }, 60_000);
+
+  it("restarts a stopped job and refuses a missing, a running, and a paused one, and during a stop", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { s, harness, hold } = await threeJobs();
+    const stopping = call(s, "POST", "/v1/cells/owner/stop");
+    await until(
+      async () => (await harness.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.active != null,
+    );
+    hold.release("research");
+    await stopping;
+    const restart = (n: number) => call(s, "POST", `/v1/cells/owner/jobs/${n}/restart`);
+
+    const missing = await restart(9);
+    expect(missing.status).toBe(404);
+    expect(await missing.json()).toEqual({ error: "no stopped job #9", reason: "no-job" });
+
+    const restarted = await restart(1);
+    expect(restarted.status).toBe(200);
+    expect(await restarted.json()).toEqual({ job: 1, title: "flights to Lisbon" });
+    await until(async () => (await harness.board()).jobs["1"]?.status === "done");
+    const again = await restart(1);
+    expect(again.status).toBe(409);
+    expect(await again.json()).toEqual({ error: "no stopped job #1", reason: "not-stopped" });
+
+    await harness.harness.commit(async (tx) => {
+      const board = await tx.doc(JobBoardDoc);
+      const row = board.jobs["2"];
+      if (row === undefined) throw new Error("no job 2");
+      row.status = "paused";
+      row.pause = { reason: "cap", at: 1, detail: "" };
+    }, BACKGROUND_CONTEXT);
+    const paused = await restart(2);
+    expect(paused.status).toBe(409);
+    expect(await paused.json()).toEqual({
+      error: "job 2 is paused, not stopped",
+      reason: "paused",
+      job: 2,
+      title: "train times",
+    });
+
+    await harness.harness.commit(async (tx) => {
+      (await tx.doc(StopDoc)).active = { at: 1, by: "person" };
+    }, BACKGROUND_CONTEXT);
+    const locked = await restart(3);
+    expect(locked.status).toBe(409);
+    expect(await locked.json()).toEqual({
+      error: "a stop is running; try again",
+      reason: "locked",
+    });
+  }, 60_000);
+
+  it("answers the owner's board and stop through RPC", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { s, harness, hold } = await threeJobs();
+    const cell = s.cells.get("owner");
+    if (cell === undefined) throw new Error("setup failed");
+    const view = await cell.jobsOf("owner");
+    expect(view).toMatchObject({ ok: true, value: { person: "owner", operator: true, live: 3 } });
+    const stopping = cell.stopOf("owner");
+    await until(
+      async () => (await harness.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.active != null,
+    );
+    hold.release("research");
+    expect(await stopping).toEqual({ ok: true, value: { jobs: 3, turn: false } });
+    expect((await harness.board()).jobs["1"]).toMatchObject({
+      status: "stopped",
+      stop: { by: "owner" },
+    });
+  }, 60_000);
+});
+
+describe("the test-cell fixture switch", () => {
+  /** Opens a cell with `env` and returns the extras its harness was opened with. */
+  const extrasOf = async (env: Record<string, string>) => {
+    const gateway = createFauxGateway();
+    const seen: OpenExtras[] = [];
+    const opened: CellHarness[] = [];
+    const cell = new PersonCell(
+      {
+        storage: new FakeCelldStorage(),
+        getWebSockets: () => [],
+        getTags: () => [],
+        acceptWebSocket: () => {},
+      },
+      env,
+      async (storage, name, extras) => {
+        seen.push(extras);
+        const harness = await openCellHarness(storage, {
+          person: name,
+          version: "v0.0.0-test",
+          env: {},
+          models: gateway.models,
+          ...extras,
+        });
+        opened.push(harness);
+        return harness;
+      },
+    );
+    await cell.jobsOf("owner");
+    for (const harness of opened) await harness.close();
+    return seen[0];
+  };
+
+  it("opens with the fixture pages and the fixture tools when the switch is 1", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const extras = await extrasOf({ SECBOT_TEST_FIXTURES: "1" });
+    expect(extras?.fixturePages).toBe(LIVE_FIXTURE_PAGES);
+    expect(extras?.fixtureTools).toEqual({ slowMs: FIXTURE_SLOW_MS });
+  });
+
+  it("opens with neither without the switch, or with any other value", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    for (const env of [{}, { SECBOT_TEST_FIXTURES: "true" }]) {
+      const extras = await extrasOf(env);
+      expect(extras).not.toHaveProperty("fixturePages");
+      expect(extras).not.toHaveProperty("fixtureTools");
+    }
+    expect(testFixturesOf({ SECBOT_TEST_FIXTURES: "0" })).toEqual({});
   });
 });

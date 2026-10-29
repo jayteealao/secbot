@@ -105,14 +105,14 @@ const WAITING: Waiting[] = [
 
 /** The two limit notices of the visual contract. */
 const NOTICE_80 = [
-  "[ 80% of limit ] You have used $20.40 of $25.00 this month. At $25.00,",
-  "  hand-offs, routines, and reminders wait. Chat with the lead continues.",
-  "  Your limit resets on 1 Nov.",
+  "[ 80% of limit ] You have used $20.40 of $25.00 this month. At $25.00, jobs,",
+  "  routines, and reminders wait. Chat with the lead continues. Your limit",
+  "  resets on 1 Nov.",
 ];
 const NOTICE_100 = [
-  "[ limit reached ] You have used $25.30 of $25.00 this month. Hand-offs,",
-  "  routines, and reminders wait until the owner raises your limit or the",
-  "  month resets on 1 Nov. Nothing is dropped. Chat with the lead continues.",
+  "[ limit reached ] You have used $25.30 of $25.00 this month. Jobs, routines,",
+  "  and reminders wait until the owner raises your limit or the month resets",
+  "  on 1 Nov. Nothing is dropped. Chat with the lead continues.",
   "  3 waiting: routine morning check (06:00), reminder bins out (19:00),",
   "  handoff research train times (13:58)",
 ];
@@ -237,7 +237,7 @@ describe("the usage line and limit notices", () => {
     };
     const { io, out } = testIo(async function* (output) {
       yield "hello";
-      await waitFor(() => output().includes("Your limit resets on 1 Nov."));
+      await waitFor(() => output().includes("  resets on 1 Nov."));
       yield "and again";
       await waitFor(() => output().includes("train times (13:58)"));
     });

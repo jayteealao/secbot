@@ -97,8 +97,8 @@ export function noticeText(notice: Notice): string {
       : `[ 80% of developer budget ] Developer jobs have used ${spent} of ${limit} this month. At ${limit}, developer jobs wait. Other work continues. The budget resets on ${day}.`;
   } else {
     text = over
-      ? `[ limit reached ] You have used ${spent} of ${limit} this month. Hand-offs, routines, and reminders wait until the owner raises your limit or the month resets on ${day}. Nothing is dropped. Chat with the lead continues.`
-      : `[ 80% of limit ] You have used ${spent} of ${limit} this month. At ${limit}, hand-offs, routines, and reminders wait. Chat with the lead continues. Your limit resets on ${day}.`;
+      ? `[ limit reached ] You have used ${spent} of ${limit} this month. Jobs, routines, and reminders wait until the owner raises your limit or the month resets on ${day}. Nothing is dropped. Chat with the lead continues.`
+      : `[ 80% of limit ] You have used ${spent} of ${limit} this month. At ${limit}, jobs, routines, and reminders wait. Chat with the lead continues. Your limit resets on ${day}.`;
   }
   return text;
 }

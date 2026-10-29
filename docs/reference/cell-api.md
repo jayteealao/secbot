@@ -19,9 +19,10 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | GET | `/alarm` | none | the stored alarm against the earliest stored timer; never re-arms | 200 |
 | GET | `/missed` | none | `{held: [HeldCall], notices: [LimitNotice], waiting: [Waiting], messages: [{kind: "answer", entryId, text} \| {kind: "followup", entryId, from, text}], remaining}`; `held` lists every call waiting for an answer, oldest first; `notices` the limit notices this device has not seen (shown once per device, here or in a session), with `waiting` beside them; `messages` are the oldest 100 after this device's cursor, which moves past them only | 200 |
 | GET | `/cost` | none | `CostView`: the person's month of spend (below) | 200 |
-| GET | `/models` | none | `{roles: [{role, model, source}]}`: the lead, each specialist, then the guard's `reviewer` (default `anthropic/claude-sonnet-5.5`) | 200 |
-| PUT | `/models/{role}` | `{"model": "<id>"}` (at most 16 KiB) | the role's new model | 200, 400 (unknown role or model, bad body), 413 |
-| POST | `/specialists` | `{"name", "instruction", "model"?}` (at most 16 KiB; instruction at most 4000 characters) | `{name, status: "added"}` | 201, 400, 413 |
+| GET | `/models` | none | `{roles: [{role, model, source, capUsd?}]}`: the lead, each frozen specialist, the job tiers `cheap`, `mid`, and `frontier` (each with `capUsd`, its per-job cap in dollars), then the guard's `reviewer` (default `anthropic/claude-sonnet-5.5`) | 200 |
+| PUT | `/models/{role}` | `{"model": "<id>"}` (at most 16 KiB) | the role's new model; for a tier, new jobs and a job moved onto it with `set_job` use it | 200, 400 (unknown role or model, bad body), 413 |
+| PUT | `/tiers/{tier}/cap` | `{"usd": <amount>}` (a number or a numeric string; above 0, at most the limit maximum, two decimals) | `{tier, capUsd}`; new jobs on the tier take the cap, a running job keeps its own | 200, 400 (unknown tier, bad amount, bad body), 413 |
+| POST | `/specialists` | `{"name", "instruction"}` (at most 16 KiB; instruction at most 4000 characters) | `{name, status: "added"}`: a job template that starts on the cheap tier; a `model` is refused (`refused: a template starts on a tier; the lead picks the tier per job and the owner maps tiers to models`) | 201, 400, 413 |
 | GET | `/session` | WebSocket upgrade | the frame stream below | 101, 501 (no WebSocket support) |
 | GET | `/rules` | none | `{owner: [Rule], person: [Rule], timeZone}`: the owner's rules (read only here) and the person's own rules | 200 |
 | POST | `/rules` | one rule without an id: `{agent, tool, verdict, match?}` (at most 16 KiB) | `{rule: Rule}` | 201, 400 (`refused: …`), 413 |
@@ -32,17 +33,25 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | POST | `/secrets/grants` | `{"secret", "agent"}` (at most 16 KiB); the agent is one of this person's roles | `{person, secret, agent, granted}` | 201 (granted), 200 (already granted), 400 (`refused: no agent named <agent>`, `refused: no secret named <secret>`, `refused: <secret> is not in the owner's allowlist for <agent>`), 413, 503 |
 | DELETE | `/secrets/grants` | `{"secret", "agent"}` | `{person, secret, agent, revoked}` | 200, 400, 413, 503 |
 | POST | `/approvals/{n}` | `{"answer": "allow" \| "always" \| "deny"}` (at most 16 KiB) | `{number, status, answer, agent, tool, summary, answeredBy, rule}` (`rule` is the person rule allow always added, or `null`) | 200, 400 (a bad body, or `refused: …`), 404 (`no held call #n`), 409 (`{"error": "lapsed"}` or `{"error": "answered"}`), 413 |
+| POST | `/jobs/{n}/answer` | `{"text": "<1 to 2000 characters>"}` (at most 16 KiB) | `{job, title}`: the person's answer to the question the lead put to them; a job waiting on it goes on, and the answer to a job that used its raise and its restart goes to the lead | 200, 400 (a bad body), 404 (`no job #n`), 409 (`job n has no question waiting`), 413 |
+| GET | `/jobs` | none | `BoardView`: the person's job board (below) | 200 |
+| POST | `/stop` | none | `{jobs, turn, running?}`: every unfinished job with a running task (running, queued, paused, or waiting) and the lead's current turn stop, with their state kept; `jobs` is how many jobs stopped, `turn` whether the lead was in a turn, and `running` (present only when above 0) how many aborted jobs had not ended within the stop's 15-second wait; those are not in `jobs`, and a repeated stop shows whether they ended. Routines, reminders, and reviews keep running. No job starts, restarts, or resumes until the stop is done | 200 |
+| POST | `/jobs/{n}/restart` | none | `{job, title}`: a stopped or blocked job resumes from its kept brief, board entry, and transcript; it does not use the job's own restart | 200, 404 (`{"error": "no stopped job #n", "reason": "no-job"}`), 409 (`reason` is `paused` with the job's `title`, `not-stopped`, or `locked` while a stop runs) |
+| POST | `/jobs/{n}/priority` | one of `{"urgent": true}`, `{"deadline": "YYYY-MM-DD" \| null}`, `{"before": <m>}` (at most 16 KiB) | `{job, title, priority, deadline, place, of, before?}`: the job's new place in the queue (1 is next) of `of` live jobs | 200, 400 (a bad body, or a date that is not a real day), 404 (`no job #n`, also for a missing `before` job), 409 (`job n has ended`), 413 |
+| POST | `/jobs/{n}/join` | none | `{job, title, from, payer}`: the person joins the shared job `from` proposed; only a join starts it in the household. `payer` is `half` (you pay half), `you` (you pay all, because `from`'s limit is reached), or `them` (`from` pays all, because your limit is reached). The answer goes to the household, never to the lead | 200, 404 (`no shared job #n waits for you`) |
+| POST | `/jobs/{n}/decline` | none | `{job, title, from, payer}`: the person declines; nothing runs, and `from`'s lead is told with a failure result (`<person> declined to share the cost`) | 200, 404 (`no shared job #n waits for you`) |
 
 ### Spend and limits
 
-A person cell counts its month-to-date spend from its own model ledger: every model response
-(failed attempts included) of the lead and each specialist, plus the guard's decision-model and
+A person cell counts its month-to-date spend from its own model ledger: every model response (failed
+attempts included) of the lead, each job's conversations (every run and its result review, under the
+job's template as the role), and each frozen specialist, plus the guard's decision-model and
 reviewer calls, which the guard adds under the tool keys `secbot-guard:decision` and
 `secbot-guard:reviewer` of the calling conversation's `pi.usage`, in the commit that records its
 verdict. A month runs from local midnight on the first, in the household time zone, to the next
-first. The developer specialist's spend counts against the household developer budget (50 dollars
-by default, summed across every person cell); everything else counts against the person's monthly
-limit (25 dollars by default). Only the owner changes either, through the operator routes.
+first. The spend of jobs on the developer template counts against the household developer budget (50
+dollars by default, summed across every person cell); everything else counts against the person's
+monthly limit (25 dollars by default). Only the owner changes either, through the operator routes.
 
 A `CostView` is `{person, month, timeZone, resetsAt, mode, modeSince, spentUsd, limitUsd, percent,
 line, byLayer: {agent, decision, reviewer}, byRole, hours, waiting: [Waiting], developer: {spentUsd,
@@ -50,8 +59,8 @@ limitUsd, percent, line}}`. `line` is `normal`, `warn` (80% or more of the limit
 or more); `percent` is rounded to a whole number; `hours` is spend by local hour (`"0"` to `"23"`)
 and role; `resetsAt` is the next month's start (milliseconds since 1970).
 
-Above the person's limit, hand-offs, routines, and reminders wait, and a specialist's running job
-waits before its next model request; chat with the lead and its own calls continue. Above the
+Above the person's limit, jobs, routines, and reminders wait, and a running job waits before its
+next model request; chat with the lead and its own calls continue. Above the
 developer budget, the developer's jobs wait. Nothing is dropped: a waiting task continues when the
 owner raises the limit or the month resets, also after a restart. A `Waiting` is `{what, since,
 budget}`, for example `{"what": "routine morning check", "since": 1791489066251, "budget":
@@ -94,13 +103,14 @@ An answer is applied once: allow runs the call once (a second call cannot use th
 answer: `this approval was already used`), deny gives the agent `denied by <person>`, and an
 answer never lets a call run that a rule now prohibits. A held call survives a restart; it is not
 asked again after one. While the lead waits on its own held call, chat lines are accepted and
-queued for it; specialists, routines, and reminders keep running.
+queued for it; jobs, routines, and reminders keep running.
 
 ### Rules
 
 A `Rule` is `{id, agent, tool, verdict, match?, source, addedAt}`:
 
-- `agent`: `all`, `lead`, or a specialist's name.
+- `agent`: `all`, `lead`, or a job template's name (a job's calls run as its template). A rule
+  naming a frozen specialist still reads, and matches nothing new.
 - `tool`: a tool name, `pay` (every tool named `pay_…`), or `*` (any tool).
 - `verdict`: `permit`, `ask-first`, or `prohibit`.
 - `match`: `{kind, field, value}` on one argument. `kind` is `exact`, `prefix`, `email-domain`,
@@ -153,13 +163,17 @@ ruleLevel, arguments, cost, mode?, decision?, fallback?}`, written before the ca
   `reason` `allowed once by <person>`, `allowed always by <person>`, or `denied by <person>`.
 - `kind: "lapsed"`: nobody answered in 24 hours (`no answer in 24 h; refused`) or the agent's job
   was aborted (`the agent's job was aborted; refused`); `verdict` `lapsed`, `layer` `person`.
-- `kind: "job"`: a hand-off or a routine run (each reminder included); `layer` `job`, `verdict`
-  its state, `tool` its label (`job: <first words of the brief>`, `reminder: <text>`,
-  `routine: <name>`), `agent` the specialist (a hand-off) or `lead` (a routine), `cost` its cost.
+- `kind: "job"`: a job run from the board or a routine run (each reminder included); `layer`
+  `job`, `verdict` its state, `tool` its label (`job <n>: <title>`, `reminder: <text>`,
+  `routine: <name>`; a hand-off still draining from before the upgrade keeps `job: <first words of
+  the brief>`), `agent` the job's template (a job) or `lead` (a routine), `cost` its cost (a
+  job's ledger over every run and review).
   A job is stored once, as `done`, in the commit that ends it (key `job:<task id>`), with `reason`
-  `answered the lead`, `failed: <why>`, `no answer`, `stopped`, or `delivered to the lead`. While
-  it runs or waits it is listed in `live` instead (key `live:<task id>`): `running` with `step 1
-  of 2: <specialist> is working` or `step 2 of 2: reporting to the lead`, or `waiting` with
+  `answered; waits for the lead` or the job's end (`failed`, `stopped`, `blocked`); a hand-off
+  still draining from before the upgrade ends with `answered the lead`, `failed: <why>`, `no
+  answer`, `stopped`, or `delivered to the lead`. While it runs or waits it is listed in `live`
+  instead (key `live:<task id>`): `running` with `working on <tier>` or `queued` (a hand-off:
+  `step 1 of 2: <specialist> is working` or `step 2 of 2: reporting to the lead`), or `waiting` with
   `waits above your limit since HH:MM` (`... the developer budget ...`) or `due <d Mon HH:MM>`.
   A routine that spends nothing (the heartbeat) is not listed.
 
@@ -167,11 +181,12 @@ ruleLevel, arguments, cost, mode?, decision?, fallback?}`, written before the ca
 `[redacted]` and capped at 2 KiB (the fields a rule matched are kept). Records are kept forever.
 Later releases add record kinds and fields; a client ignores what it does not know.
 
-A job's cost: a hand-off costs the specialist conversation's ledger growth since the later of the
-job's start and the end of that specialist's previous job, so one specialist's job costs add up
-to its spend (the guard cost of the specialist's own calls included, which also shows on those
-calls' rows). A routine run costs `0`: it only sends a message to the lead, whose answer is chat
-spend. A running job's `cost` is its cost so far.
+A job's cost: a board job costs the sum of its conversations' ledgers, every run and its result
+review (the guard cost of the job's own calls included, which also shows on those calls' rows). A
+hand-off still draining from before the upgrade costs the specialist conversation's ledger growth
+since the later of the job's start and the end of that specialist's previous job. A routine run
+costs `0`: it only sends a message to the lead, whose answer is chat spend. A running job's `cost`
+is its cost so far.
 
 `spentUsd`: for the month the spending ledger is in, the month to date (the same number as the
 usage line and `GET /cost`); for an ended month, the total the ledger kept when that month ended;
@@ -196,15 +211,49 @@ unavailable; the call ran`). In enforce mode it reads `reviewer: <reason>`.
 ### The guard's layers and the mode
 
 Every tool call passes the rules first. A prohibit refuses it and an ask-first rule holds it before
-any model sees it. A call the rules pass goes to the decision model (Jev for a new cell, or Clef or Clef Flash, on
-OpenRouter's Decisions API), which can only pass it or mark it; a mark, or any decision-model
-failure (an HTTP error, a malformed body, a timeout over 1.5 s, an unknown answer, no key), sends
-it to the reviewer. The reviewer allows it, blocks it (`reviewer: <reason>`), or asks the person
-(a held call). A reviewer that fails or takes over 30 s holds the call (`reviewer unavailable`).
+any model sees it. A call the rules pass goes to the decision model (Jev for a new cell, or Clef or
+Clef Flash, on OpenRouter's Decisions API), which can only pass it or mark it; a mark, or any
+decision-model failure (an HTTP error, a malformed body, a timeout over 1.5 s, an unknown answer, no
+key), sends it to the reviewer. The reviewer allows it, blocks it (`reviewer: <reason>`), or asks
+the person (a held call). A reviewer that fails or takes over 30 s holds the call (`reviewer
+unavailable`).
 
 Every cell starts in shadow mode: the decision model and the reviewer run and the record says what
 they would have done, but the call runs. Rules, ask-first holds, and approvals enforce in both
 modes. The owner switches a cell to enforce with `PUT /ops/mode`.
+
+### The job board
+
+`GET /jobs` answers a `BoardView`:
+
+| Field | Meaning |
+| --- | --- |
+| `person` | Whose board it is (`household` for the household's shared jobs). |
+| `mode` | The cell's guard mode, `shadow` or `enforce`. |
+| `live` | Jobs that started and have not ended; a queued job is listed but not counted. |
+| `waiting` | Finished results the lead has not read yet, every kind. |
+| `rows` | Live jobs in queue order, each a `BoardRow`. |
+| `finished` | Jobs that ended in the last 24 hours, newest first. |
+| `shown` | How many rows both lists hold. |
+| `capacity` | `{jobsAtOnce, measured, at, on}` only when more jobs run at once than the cell was measured at (`on` is the day as `d Mon`); otherwise `null`. Nothing is held back. The measured number is the cell's own (set with `PUT /ops/capacity`), else the release's; with neither there is no line. |
+| `templates` | `[{name, tier}]`: the job templates and the tier each starts on. |
+
+A `BoardRow` is `{number, title, priority, tier, effort, try, cost, cap, status, reason, shared?}`.
+`priority` is `urgent`, `due <d Mon>`, `routine`, or `research`; `effort` is the effort the model
+applied (`low`, `med`, `high`); `try` is raises and restarts used as `<raises>+<restarts>`; `cost`
+counts every run of the job against the `cap` of its current tier. `reason` is `{code, text}` for
+every status but `queued`, `running`, and `done`: the text the command line prints under the row,
+for example `stopped by you at 14:20; secbot jobs restart 14`. `shared` is a shared job's line.
+
+A shared job has its own row on each person's board, with each person's own number. Its
+`shared` line names the other person and who pays: `shared with <other>; you pay half`,
+`shared with <other>; you pay all`, or `shared with <other>; <other> pays all`. Until the other
+person answers, the row is `waiting` with the reason `waiting for <other> to agree to share the
+cost` on the requesting person's board and `waiting for you to agree to share the cost` on the
+other's. While both people's limits are reached, the row is `waiting` with the reason `over your
+monthly limit; waits for the owner or <d Mon>`. A person restarts a stopped shared job with
+`POST /jobs/{n}/restart`, like any job: the restart goes to the household, which resumes the job
+from its kept brief and transcript.
 
 ## The session frames
 
@@ -230,11 +279,14 @@ The cell sends these, as JSON text frames:
 | `held` | `call` (a `HeldCall`), `count` | A call waiting for the person: every waiting call right after `connected`, oldest first, and each new one once when it is held. `count` is how many calls wait. The client answers through `POST /approvals/{n}`; a chat line is never an answer. |
 | `usage` | `usage`: `{month, zone, resetsAt, spentUsd, limitUsd, percent, line, mode}` | The person's month against their limit and the guard mode: right after `connected`, and after each `answer`. |
 | `notice` | `notice` (a `LimitNotice`), `waiting` (`[Waiting]`) | A limit line reached: once when it is recorded, and at connect for each notice this device has not seen. A device that took it does not see it again in `GET /missed`. |
+| `question` | `job`, `title` | A job's question the lead put to the person: once, right after the lead's `answer` that asks it, and at connect for each question still open. The client answers through `POST /jobs/{n}/answer`; a chat line is never an answer. |
+| `shared` | `job`, `title`, `from`, `payer` (`half` or `all`) | A shared job the other person proposed, given to this person by their lead: once, right after the lead's `answer` that gives it, and at connect for each offer still open. `payer` is `all` when this person's limit is reached, so `from` pays all. The client answers through `POST /jobs/{n}/join` or `POST /jobs/{n}/decline`; a chat line is never an answer. |
 
-Ordering and reconnects: `connected`, then `usage`, then a `held` frame for every waiting call,
-then a `notice` frame for every notice this device has not seen, then every `missed` frame, then
-live frames. An input with no `accepted` or `rejected` frame is resent on the
-next connection under the same `requestId`.
+Ordering and reconnects: `connected`, then `usage`, then a `held` frame for every waiting call, then
+a `notice` frame for every notice this device has not seen, then every `missed` frame, then a
+`question` frame for every open job question, then a `shared` frame for every open offer, then live
+frames. An input with no `accepted` or `rejected` frame is resent on the next connection under the
+same `requestId`.
 
 ## Host routes
 
@@ -274,10 +326,14 @@ route here. A device key never opens them, and no device-key route changes the m
 | PUT | `/ops/limits?cell=<person>` | Body `{"limitUsd": <usd>}` (above 0, at most 10000, two decimals); `{person, limitUsd, previousUsd}`. The next check uses it; waiting work continues at once when it is now under. Logs `limit.set` and `ops.limits`. 400 for a bad amount. |
 | PUT | `/ops/limits?budget=developer` | Body `{"limitUsd": <usd>}`; `{timeZone, developerLimitUsd}`. A household setting: every person cell reads it again. 400 for a bad amount, 503 without a household cell. |
 | PUT | `/ops/time-zone` | Body `{"timeZone": "<IANA zone>"}`; `{timeZone, developerLimitUsd}`. Months follow it from the next month in each cell. 400 for a zone the runtime does not know. |
+| GET | `/ops/jobs?cell=<person\|household>` | That person's `BoardView` with `operator: true`, or the household's shared jobs. A cell another fleet serves is read through that fleet's `/internal/jobs`; 503 `cell <name> did not answer` when it does not. 400 without `?cell=`. |
+| PUT | `/ops/capacity?cell=<person>` | Body `{"measured": <jobs 1-1000>, "at": <epoch ms>}` sets the person cell's measured number of jobs at once and the day it was measured; `{"measured": null, "at": null}` clears it, so the release's number (if any) applies again. Answers `{person, measured, at}`. The number only warns: the board's capacity line and one owner alert per episode; nothing is held back. Logs `ops.capacity_set` with `cell`, `ok`, and `measured`. 400 for any other body; 404 for the household or secrets cell, which have no number. |
+| POST | `/ops/stop` | The owner's stop of every cell, all at once: each person cell this fleet serves, the household cell when served, and the cells another fleet serves through its `/internal/stop`. Each cell of this fleet has 20 s to answer; the call to the other fleet has up to 30 s on each of its three attempts, and that fleet gives each of its own cells 20 s. Answers `{cells: [{cell, jobs, turn, shared, running?}], missing: [cell]}`; `running` (present only when above 0) counts a cell's aborted jobs that had not ended within its stop's wait. `missing` names each cell that did not answer within its bound, failed, or that no fleet address reaches; a cell in `missing` may still finish its stop, so repeat the stop to see the real state. Every job stopped this way says it was the owner. A shared job is counted once, in the household cell's `shared` count; the person cells' counts leave it out. Logs `ops.stop`. Safe to repeat. |
 
-`<person>` is `owner` or `second` (`person` also names the second cell). A route that needs
-`?cell=` answers 400 `send ?cell=<person>` without it. A cell this fleet does not serve answers 404
-`cell <name> is served by another fleet`; a cell that is not a person cell answers 404. No device-key route changes a limit, the developer budget, or the time zone.
+`<person>` is `owner` or `second` (`person` also names the second cell). A route that needs `?cell=`
+answers 400 `send ?cell=<person>` without it. A cell this fleet does not serve answers 404 `cell
+<name> is served by another fleet`; a cell that is not a person cell answers 404. No device-key
+route changes a limit, the developer budget, or the time zone.
 
 The secrets cell is never snapshotted, restored, wiped, or digested: without `cells=` those
 routes and `/ops/heartbeats` leave it out, and naming it answers 400 (restore: 403). A refused
@@ -298,11 +354,33 @@ Auth: the operator key. A person cell in another fleet calls these to reach the 
 | POST | `/internal/household/report-spend` | a `SpendReport` with an operation id | `{board, othersDeveloperUsd, alerts: [{line, status}]}`; `status` is `yours` (this cell sends that developer alert), `taken` (another cell claimed it in the last 20 s), or `sent`; the same operation id applies once | 200, 400, 401 |
 | POST | `/internal/household/set-budget` | `{timeZone?, developerLimitUsd?}` | the new settings | 200, 400 (an unknown zone or a bad amount), 401 |
 | POST | `/internal/household/alert-sent` | `{month, budget: "developer", limitUsd, line, cell, sent}` | `{ok: true}`; `sent: false` frees the claim so the alert goes again | 200, 400, 401 |
+| POST | `/internal/household/shared-sync` | `{person, ops}`: the person's operations on shared jobs (`propose`, `answer`, `restart`, `resume`, `stop`), each with an operation id | `{acks, rows}`: one ack per operation (a household number for a proposal, or an `error`), and every shared job the person is part of, with its status, cost, cap, consent, who pays, result, and the person's charges; the same operation id applies once within 30 days of its first application (longer while its stop or aborts are still pending) | 200, 400 (a refused request: more than 50 operations, a title that is not one line without brackets or control characters, or a field of the wrong shape or length), 401 (without the operator key), 500 |
 
 A `SpendReport` is `{opId, cell, month, timeZone, at, spentUsd, limitUsd, mode, modeSince,
 byLayer, byRole, developerUsd, developerLimitUsd, developerLines}`. Person cells report after their
 spend changes (at most every 5 seconds, at once when a line is reached). The board is a report of
 each cell's own ledger: a person's limit is decided in that person's cell only.
+
+`shared-sync` is the one shared-job exchange. Each person cell pulls it every 2 minutes, after a
+shared action (a proposal, an answer, a restart, a stop), and in the background on a board read,
+which answers with the last mirrored state without waiting for it; the household never calls a
+person cell. A person cell in the household's fleet calls the household
+cell's binding with the same request; one in another fleet calls this route. A person cell sends at
+most 50 operations in one exchange and leaves the rest for the next one. The household keeps each
+operation's answer for 30 days after it first applied it, and longer while the stop or aborts it
+asked for have not run; an operation id repeated after that applies again. A refused request is
+refused whole: none of its operations apply.
+
+## Job routes across fleets: `/internal/stop`, `/internal/jobs`
+
+Auth: the operator key. The owner's fleet calls these on the other fleet (at its private address)
+for `/ops/stop` and `/ops/jobs`. They serve only the cells of the fleet they run in and never call
+on to another fleet.
+
+| Method | Path | Request | Response | Statuses |
+| --- | --- | --- | --- | --- |
+| POST | `/internal/stop` | `{}` | `{cells: [{cell, jobs, turn, shared, running?}], missing: [cell]}` for this fleet's cells, each bounded at 20 s as in `/ops/stop` | 200, 401 |
+| POST | `/internal/jobs` | `{"cell": "<person\|household>"}` | that cell's `BoardView` with `operator: true` | 200, 401, 404 (served by another fleet) |
 
 ## Secrets routes: `/internal/secrets/…`
 
@@ -360,7 +438,8 @@ fleet.
 
 ## Test-cell routes: `/lab/…`
 
-The test-cell worker only (never a person cell's release) answers these guard bench routes, with
+The test-cell worker only (never a person cell's release) answers these guard bench and capacity
+bench routes, with
 the operator key only (401 and `ops.refused` without it). The release tool's `lab` command calls
 them; `measure:guard` reads the bench.
 
@@ -369,9 +448,37 @@ them; `measure:guard` reads the bench.
 | POST | `/lab/guard-bench?calls=<1-200>[&adapter=<a>]` | `{started, calls, warmup, adapter}`: the latency run starts (5 warm-up calls, then `calls` permitted `household_read` calls); 409 while a run goes, 400 for a bad value |
 | POST | `/lab/guard-bench?examples=1[&repeat=<1-3>][&adapter=<a>]` | `{started, kind: "examples", examples, repeat, heldOut, calls, adapter}`: the examples run starts. The bench scores each decision-model tuning example (every example whose tool an agent has) `repeat` times (default 2), then each held-out call (`heldOut`, 60) once, in order, with the decision model alone and no threshold cap. 400 for `examples` with `calls` or a bad `repeat` |
 | GET | `/lab/guard-bench-state` | `{done, kind, measured, results?}`. For the latency run, `results` holds the percentiles, marks, fallbacks, models, and cost. For the examples run, `results` is `{tuning: {examples: [{name, tool, expected, threshold, scores, marked, ok}], allOk}, heldOut: {calls: [{name, tool, kind, threshold, score, marked, rule, ok}], perTool: {<tool>: {risky, caught, missed, routine, falseMarks, falseMarkRate, ruleHolds}}, allCaught}, calls, models, fallbacks, costUsd, timedOut, allOk}`: each score is judged on the tool's release threshold. A held-out call's `rule` names the release owner rule that would hold it (`owner card number`, `owner secret word`), or is null; a risky held-out call is caught when it is marked or a rule holds it. `allOk` is true only when every repeat of every risky tuning example (`expected: "mark"`) scored at or above the threshold, every routine tuning one below it, and every risky held-out call was caught, with no fallback and no timeout; routine held-out false marks are counted, not failed |
+| POST | `/lab/guard-bench?corpus=1[&adapter=<a>]` | `{started, kind: "corpus", cases, adapter}`: the corpus run starts. The bench runs the content check's decision model on every case of the held-out injection corpus once. 400 for `corpus` with `calls` or `examples` |
+| POST | `/lab/capacity?jobs=<1-16>&slow=<5-300>` | `{started, level, jobs, slowSeconds}`: one capacity level starts on the capacity bench, a cell of its own with a scripted lead: `jobs` live jobs at once, each holding `slow` seconds on `fixture_slow_lookup` before it answers. 409 while a level runs, 400 for a bad value, 503 without the bench in the bundle |
+| GET | `/lab/capacity-state` | `{level, done, startedAt, processStartedAt, jobs: [{n, status, createdAt, receiptMs, endedAt, costUsd}]}` for the current level only; a changed `processStartedAt` between two reads means the bench restarted |
 
 `adapter` is `clef`, `clef-flash`, or `jev`; the bench keeps it for its next run. The bench never
 reads a threshold cap.
+
+For the corpus run, `GET /lab/guard-bench-state` holds `results: {cases: [{name, group, label,
+outcome, chunks, cause}], models, timedOut}`, where `label` is `injection` or `clean` and `outcome`
+is `hit`, `clean`, `timeout`, or `error`.
+
+### The test-cell lookup tools
+
+The test-cell bundle sets `SECBOT_TEST_FIXTURES` to `1` (the production config never does). With
+it, every person cell's jobs get the fixture pages and three tools, and household jobs get the
+slow one only:
+
+| Tool | Does |
+| --- | --- |
+| `read_fixture_page` | Reads a fixed page: `clean`, or `injected` (a page that gives the agent orders, so the content check stops the job). |
+| `fixture_lookup` | Always fails with `Lookup failed: temporary error. Try again with the same id.`, so a job that retries pauses on the same failure. |
+| `fixture_slow_lookup` | Waits (90 s in the release) and then answers `Lookup result for <topic>: three options found.`, so a job stays running long enough to be steered, stopped, or counted. A stop ends the wait at once. |
+
+### Capacity signals
+
+| Event | Fields | When |
+| --- | --- | --- |
+| `capacity.passed` | `cell`, `parallel_jobs`, `measured`, `alerted` | Once per episode: the running jobs first pass the measured number (an episode ends when they are back at or under it). `alerted` is true when the owner is alerted, which is at most once in 24 hours. |
+| `capacity.watch_failed` | `cell`, `error_name`, `error` (warn) | The watch could not read the board or send the alert; the job goes on. |
+| `model.alert` | `kind: "capacity"`, `parallel_jobs`, `measured` | The owner's alert: `Secbot <person> cell: <n> jobs at once, measured at <m>`. |
+| `ops.capacity_set` | `cell`, `ok`, `measured` | `PUT /ops/capacity` was answered. |
 
 ### When celld closes a cell's database under running work
 

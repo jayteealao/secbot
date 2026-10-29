@@ -1,5 +1,5 @@
-// A specialist on a brief calls history search and receives matching messages from the
-// lead's history, newest first and bounded.
+// A job on a brief calls history search and receives matching messages from the lead's history,
+// newest first and bounded.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { searchHistory } from "../src/history-search.ts";
@@ -23,12 +23,14 @@ afterEach(async () => {
 
 function responder(request: FauxRequest) {
   if (request.role === "lead") {
-    if (request.lastText.startsWith("Hand off")) {
+    if (request.last?.role === "toolResult") return fauxAssistantMessage([fauxText("Started.")]);
+    if (request.lastText.startsWith("Start a job")) {
       return fauxAssistantMessage(
         [
-          fauxToolCall("handoff", {
-            specialist: "household",
+          fauxToolCall("start_job", {
+            title: "the kale plan",
             brief: "What did we plan for the kale?",
+            template: "household",
           }),
         ],
         { stopReason: "toolUse" },
@@ -48,7 +50,7 @@ function responder(request: FauxRequest) {
 }
 
 describe("history search", () => {
-  it("gives a specialist the matching messages from the lead's history", async () => {
+  it("gives a job the matching messages from the lead's history", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     test = await openTestCell({ gateway: createFauxGateway(responder) });
     const t = test;
@@ -60,7 +62,7 @@ describe("history search", () => {
     for (const [index, text] of seeds.entries()) {
       await (await t.cell.submit(text, `seed-${index}`)).wait(BACKGROUND_CONTEXT);
     }
-    await (await t.cell.submit("Hand off the kale question", "ask")).wait(BACKGROUND_CONTEXT);
+    await (await t.cell.submit("Start a job on the kale question", "ask")).wait(BACKGROUND_CONTEXT);
     const sawResult = () =>
       t.gateway.requests.find((r) => r.role === "household" && r.last?.role === "toolResult");
     await until(() => sawResult() !== undefined);
@@ -86,8 +88,8 @@ describe("history search", () => {
 
   // The lead is one endless conversation kept going by compaction. After a compaction summarizes
   // the older part, history search still finds a message from before the cut, and the lead and a
-  // hand-off keep working on the compacted conversation.
-  it("still finds a message from before a compaction, and the lead still hands off", async () => {
+  // job keep working on the compacted conversation.
+  it("still finds a message from before a compaction, and the lead still starts a job", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     test = await openTestCell({ gateway: createFauxGateway(responder) });
     const t = test;
@@ -117,7 +119,9 @@ describe("history search", () => {
     const hits = await searchHistory(t.cell.harness, "kale soup", 5, BACKGROUND_CONTEXT);
     expect(hits.some((hit) => hit.text.includes("We will cook kale soup on Sunday"))).toBe(true);
 
-    await (await t.cell.submit("Hand off the kale question", "ask-after")).wait(BACKGROUND_CONTEXT);
+    await (await t.cell.submit("Start a job on the kale question", "ask-after")).wait(
+      BACKGROUND_CONTEXT,
+    );
     const sawResult = () =>
       t.gateway.requests.find((r) => r.role === "household" && r.last?.role === "toolResult");
     await until(() => sawResult() !== undefined);

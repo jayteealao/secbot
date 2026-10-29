@@ -1,12 +1,36 @@
 /**
- * The lead's prompt sections: the current specialists, and the current time. Sections render
- * before each request from committed documents (pi-durable README "System Prompt"), so a
- * specialist the owner adds is in the lead's next request, and only a changed section is sent
- * again. The time is given to the minute, so it changes at most once a minute.
+ * The lead's prompt sections: the interrupt bookmark (first, only while one exists), the current
+ * time, and the job board. Sections render before each request from committed documents
+ * (pi-durable README "System Prompt"), so a job result or a template the owner adds is in the
+ * lead's next request, and only a changed section is sent again. The time is given to the minute,
+ * so it changes at most once a minute.
  */
 import { defineExtension, type Extension, section } from "@earendil-works/pi-durable";
-import { RosterDoc } from "./docs.ts";
+import { bookmarkText } from "./bookmark.ts";
+import {
+  type Bookmark,
+  BookmarkDoc,
+  HandoffNoteDoc,
+  JobBoardDoc,
+  type JobRow,
+  type Receipt,
+  TemplatesDoc,
+} from "./docs.ts";
+import {
+  type BoardState,
+  blockReason,
+  ENDED,
+  liveRows,
+  openQuestion,
+  restCount,
+  waitingCounts,
+} from "./job-board.ts";
+import { withLiveCosts } from "./job-gate.ts";
+import { openReceipts } from "./receipts.ts";
+import { ESCALATION_LIMITS, type JobTemplate, LOOP_LIMIT } from "./release-defaults.ts";
 import { localTime } from "./reminder.ts";
+import { declinedOffer, payerText } from "./shared-split.ts";
+import { templatesOf } from "./templates.ts";
 
 export interface TimeEnv {
   /** The person's time zone (IANA, for example Europe/London); UTC when unset. */
@@ -33,10 +57,123 @@ export function timeSection(now: number, timeZone: string): string {
   ].join("\n");
 }
 
-const firstSentence = (text: string) => {
-  const end = text.indexOf(". ");
-  return end === -1 ? text : text.slice(0, end + 1);
-};
+/**
+ * The hand-off note section: the lead's note from before its last compaction, with when it was
+ * written; undefined while there is none. Job state is never in the note.
+ */
+export function handoffSection(
+  note: { readonly text: string; readonly at: number } | null,
+  timeZone: string,
+): string | undefined {
+  if (note === null) return undefined;
+  return [
+    `Your hand-off note from before your last compaction (${localTime(note.at, timeZone)}):`,
+    note.text,
+    "Job state is on the job board, not in this note.",
+  ].join("\n");
+}
+
+/** The bookmark section: the bookmark and how to resume; undefined when there is none. */
+export function bookmarkSection(bookmark: Bookmark | null): string | undefined {
+  if (bookmark === null) return undefined;
+  return `${bookmarkText(bookmark)}\nAnswer the person first; call resume_work when you are back on it.`;
+}
+
+/**
+ * What a job's line adds after its title: why it is paused, its open question, its review, who
+ * asked for it, and the escalations it used. Empty for a plain running job.
+ */
+export function jobStateDetails(row: JobRow): string {
+  const details: string[] = [];
+  const link = row.shared;
+  if (link !== null && link.role === "other" && link.consent === "offered") {
+    details.push(`offer from ${link.with}: give it with offer_shared`);
+  }
+  if (row.status === "paused" && row.pause !== null) {
+    details.push(
+      row.pause.reason === "cap"
+        ? `paused: cap $${row.cost.toFixed(2)}/$${row.cap}`
+        : `paused: same step failed ${LOOP_LIMIT} times`,
+    );
+  }
+  const question = openQuestion(row);
+  if (question !== null) {
+    details.push(
+      `waiting: asks "${question.text}"${question.toPerson ? " (asked the person)" : ""}`,
+    );
+  }
+  if (row.review?.status === "running") details.push(`review running on ${row.review.model}`);
+  if (row.review?.status === "rejected") details.push(`review rejected: ${row.review.reason}`);
+  if (row.requestedBy !== null) details.push(`requested by job ${row.requestedBy}`);
+  if (row.status === "blocked" && row.block !== null) {
+    details.push(`blocked: ${blockReason(row.block)}`);
+  }
+  if (link !== null) details.push(`shared with ${link.with}, ${payerText(link.payer, link.with)}`);
+  const { raises, restarts } = row.attempts;
+  if (raises > 0 || restarts > 0) {
+    details.push(
+      `raises ${raises}/${ESCALATION_LIMITS.raises}, restarts ${restarts}/${ESCALATION_LIMITS.restarts}`,
+    );
+  }
+  return details.length === 0 ? "" : ` (${details.join("; ")})`;
+}
+
+/** A job's priority word: `urgent`, `due <date>`, `routine`, or `research`. */
+export const priorityWord = (row: Pick<JobRow, "priority" | "deadline">): string =>
+  row.priority === "deadline"
+    ? row.deadline === null
+      ? "routine"
+      : `due ${row.deadline}`
+    : row.priority;
+
+/** A job's line in the jobs section. */
+const jobLine = (row: JobRow) =>
+  `#${row.number} ${row.template} ${row.tier}/${row.effort.applied} ${row.status} ${priorityWord(row)} $${row.cost.toFixed(2)}/$${row.cap} ${row.title}${jobStateDetails(row)}`;
+
+/**
+ * The jobs section: the templates with their start tiers, each live job (and each whose result is
+ * under review) as `#<n> <template> <tier>/<applied effort> <status> $<cost>/$<cap> <title>` and
+ * its state details, each blocked job with its reason until its result is pulled, how many ended,
+ * and what waits for the lead by kind. Results never enter the lead's conversation by themselves.
+ */
+export function jobsSection(
+  board: BoardState,
+  templates: readonly JobTemplate[],
+  receipts: readonly Pick<Receipt, "status" | "isError" | "readAt">[],
+): string {
+  const lines = [
+    `Job templates (start a job with start_job): ${templates.map((template) => `${template.name} (${template.tier})`).join(", ")}.`,
+  ];
+  const reviewing = Object.values(board.jobs).filter(
+    (row) => ENDED.has(row.status) && row.review?.status === "running",
+  );
+  // Live jobs in the order they run (the person can reorder them), then those under review.
+  const live = [...liveRows(board), ...reviewing].filter((row) => !declinedOffer(row.shared));
+  if (live.length === 0) lines.push("No live jobs.");
+  else {
+    lines.push("Live jobs, in queue order:");
+    for (const row of live) lines.push(jobLine(row));
+  }
+  const blocked = Object.values(board.jobs)
+    .filter((row) => row.status === "blocked" && row.result?.pulledAt === null)
+    .sort((a, b) => a.number - b.number);
+  if (blocked.length > 0) {
+    lines.push(
+      "Blocked jobs (read why with job_result; restart one only when the person asks):",
+      ...blocked.map(jobLine),
+    );
+  }
+  const rest = restCount(board);
+  if (rest > 0) lines.push(`and ${rest} finished or stopped`);
+  const counts = waitingCounts(board, receipts);
+  const total = counts.failure + counts.question + counts.risky + counts.routine;
+  lines.push(
+    total === 0
+      ? "results waiting: none"
+      : `results waiting: failure ${counts.failure}, question ${counts.question}, risky ${counts.risky}, routine ${counts.routine} (pull them with job_result or read_result)`,
+  );
+  return lines.join("\n");
+}
 
 export function createLeadExtension(
   clock: { readonly now: () => number; readonly timeZone: string } = {
@@ -47,15 +184,29 @@ export function createLeadExtension(
   return defineExtension({
     name: "secbot-lead",
     sections: [
+      section("bookmark", async (input, context) =>
+        bookmarkSection((await input.read.snapshot(BookmarkDoc, context))?.bookmark ?? null),
+      ),
       section("time", () => timeSection(clock.now(), clock.timeZone)),
-      section("specialists", async (input, context) => {
-        const roster = await input.read.snapshot(RosterDoc, context);
-        const names = Object.entries(roster?.specialists ?? {});
-        if (names.length === 0) return "You have no specialists yet.";
-        return [
-          "Your specialists (brief one with the handoff tool):",
-          ...names.map(([name, record]) => `- ${name}: ${firstSentence(record.instruction)}`),
-        ].join("\n");
+      section("handoff", async (input, context) =>
+        handoffSection(
+          (await input.read.snapshot(HandoffNoteDoc, context))?.note ?? null,
+          clock.timeZone,
+        ),
+      ),
+      section("jobs", async (input, context) => {
+        const board = (await input.read.snapshot(JobBoardDoc, context)) ?? {
+          nextNumber: 1,
+          jobs: {},
+          byConversation: {},
+          queue: [],
+        };
+        const custom = (await input.read.snapshot(TemplatesDoc, context))?.custom ?? {};
+        return jobsSection(
+          await withLiveCosts(input.read, board, context),
+          templatesOf(custom),
+          await openReceipts(input.read, context),
+        );
       }),
     ],
   });

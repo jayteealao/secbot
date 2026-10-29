@@ -9,8 +9,8 @@
 import type { Context } from "@earendil-works/chord";
 import type { Tx } from "@earendil-works/pi-durable";
 import { type CellParts, logEvent, RefusedChange } from "./cell-parts.ts";
-import { RosterDoc, RulesDoc } from "./docs.ts";
-import { DEFAULT_PERSON_RULES, LEAD_ROLE, RELEASE_OWNER_RULES } from "./release-defaults.ts";
+import { RulesDoc } from "./docs.ts";
+import { DEFAULT_PERSON_RULES, RELEASE_OWNER_RULES } from "./release-defaults.ts";
 import {
   ALL_AGENTS,
   ANY_TOOL,
@@ -31,6 +31,7 @@ import {
   VERDICTS,
   type Verdict,
 } from "./rules.ts";
+import { agentNames } from "./telemetry.ts";
 
 /** The most rules one level may hold. */
 export const RULES_LIMIT = 200;
@@ -107,13 +108,20 @@ const sameMatch = (a: RuleMatch | undefined, b: RuleMatch | undefined) =>
 const sameKey = (rule: RuleKey, key: RuleKey) =>
   rule.agent === key.agent && rule.tool === key.tool && sameMatch(rule.match, key.match);
 
-/** The tool names any role of this cell can call. */
+/**
+ * Tools no role calls any more whose rules still read: a cell's rules on the retired hand-off stay
+ * listed and removable, and a rule on it can still be written (it matches nothing).
+ */
+const RETIRED_TOOLS = ["handoff"];
+
+/** The tool names any role of this cell can call, and the retired ones. */
 function knownTools(parts: CellParts): Set<string> {
-  return new Set(
-    [...parts.extensions.lead, ...parts.extensions.specialist].flatMap((extension) =>
+  return new Set([
+    ...[...parts.extensions.lead, ...parts.extensions.job].flatMap((extension) =>
       (extension.tools ?? []).map((tool) => tool.name),
     ),
-  );
+    ...RETIRED_TOOLS,
+  ]);
 }
 
 /**
@@ -167,8 +175,7 @@ function checkKey(parts: CellParts, input: unknown, agents: ReadonlySet<string>)
 }
 
 async function agentsOf(parts: CellParts, context: Context): Promise<Set<string>> {
-  const roster = await parts.harness.snapshot(RosterDoc, context);
-  return new Set([LEAD_ROLE, ...Object.keys(roster?.specialists ?? {})]);
+  return agentNames(parts.harness, context);
 }
 
 function changed(

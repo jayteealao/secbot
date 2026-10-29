@@ -74,14 +74,14 @@ import {
 } from "./approvals.ts";
 import { errorFields, logEvent } from "./cell-parts.ts";
 import { buildDecisionState, DecisionFailure, type DecisionModels } from "./decision-model.ts";
-import { RosterDoc, RulesDoc } from "./docs.ts";
+import { RulesDoc } from "./docs.ts";
 import { readDecisionAdapter, readGuardMode } from "./guard-settings.ts";
 import { addGuardUsage, costOnlyUsage } from "./month-ledger.ts";
 import { redactText } from "./redact.ts";
-import { HOLD_MS, LEAD_ROLE } from "./release-defaults.ts";
+import { HOLD_MS } from "./release-defaults.ts";
 import { type Reviewer, ReviewerFailure, type ReviewVerdict } from "./reviewer.ts";
 import { decide, ruleText } from "./rules.ts";
-import { roleOf } from "./telemetry.ts";
+import { agentNames, roleOf } from "./telemetry.ts";
 
 /** One tool call as every stage sees it. */
 export interface GuardCall {
@@ -209,6 +209,16 @@ export interface ModelStageOptions {
   readonly onCredit?: (status: string) => void;
   /** The clock for the reviewer's limits; defaults to Date.now. */
   readonly now?: () => number;
+  /**
+   * A call the reviewer must judge whatever the decision model says and whatever the mode, with
+   * the line the reviewer is told; null for any other call. The outside-content review: an outside
+   * action of a job that read outside content.
+   */
+  readonly mustReview?: (
+    call: GuardCall,
+    api: Pick<HookApi, "snapshot">,
+    context: Context,
+  ) => Promise<string | null>;
 }
 
 /**
@@ -286,6 +296,11 @@ export const REVIEWER_UNAVAILABLE = "reviewer unavailable";
  * mark; a mark or a decision-model failure goes to the reviewer. In enforce mode the reviewer's
  * allow runs the call, its block refuses it, and its ask (or its failure) holds it for the person.
  * In shadow mode every outcome runs the call and the record says what would have happened.
+ *
+ * A call `mustReview` names (an outside action of a job that read outside content) always goes to
+ * the reviewer, even when the decision model passes it, and the reviewer's answer is enforced in
+ * every mode: this review is the second layer of the content check, which shadow mode never
+ * covers. Its record's reason starts `outside content: `.
  */
 export function createModelStage(options: ModelStageOptions): GuardStage {
   let person = "";
@@ -293,6 +308,10 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
   return async (call, api, context) => {
     person = call.person;
     const { mode } = await readGuardMode(api, context);
+    const outside = (await options.mustReview?.(call, api, context)) ?? null;
+    // Shadow mode lets the reviewer's answer pass, except on the outside-content review.
+    const shadow = mode === "shadow" && outside === null;
+    const prefix = outside === null ? "" : "outside content: ";
     const adapter = await readDecisionAdapter(api, context);
     const rules = await api.snapshot(RulesDoc, context);
     const decided = decide(rules?.owner ?? [], rules?.person ?? [], call);
@@ -318,7 +337,7 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
       decisionUsage = usageOf(answer.usage, answer.costUsd);
       decision = { outcome: answer.outcome, score: answer.score, model: answer.model };
       const label = `${answer.choice} (score ${answer.score.toFixed(2)})`;
-      if (answer.outcome === "pass") {
+      if (answer.outcome === "pass" && outside === null) {
         return {
           kind: "pass",
           layer: "decision",
@@ -358,10 +377,14 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
       costUsd,
       usage: usage(),
       ...(verdictWord === undefined ? {} : { verdictWord }),
+      ...(outside === null ? {} : { outside: true }),
     });
     let review: ReviewVerdict;
     try {
-      review = await reviewer.review({ state, decision: asked }, context);
+      review = await reviewer.review(
+        { state, decision: asked, ...(outside === null ? {} : { outside }) },
+        context,
+      );
     } catch (error) {
       if (!(error instanceof ReviewerFailure) || context.abortSignal?.aborted === true) throw error;
       costUsd += error.costUsd;
@@ -381,10 +404,10 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
         "warn",
       );
       const failed = {
-        ...fields(mode === "shadow" ? "would ask" : undefined),
+        ...fields(shadow ? "would ask" : undefined),
         reviewerCause: error.cause,
       };
-      if (mode === "shadow") {
+      if (shadow) {
         return {
           kind: "pass",
           layer: "reviewer",
@@ -396,7 +419,7 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
       return {
         kind: "hold",
         layer: "reviewer",
-        reason: REVIEWER_UNAVAILABLE,
+        reason: `${prefix}${REVIEWER_UNAVAILABLE}`,
         reasonSource: "reviewer-unavailable",
         matched,
         model: failed,
@@ -404,7 +427,7 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
     }
     costUsd += review.costUsd;
     reviewerUsage = usageOf(review.usage, review.costUsd);
-    if (mode === "shadow") {
+    if (shadow) {
       const word =
         review.verdict === "block"
           ? "would block"
@@ -419,7 +442,7 @@ export function createModelStage(options: ModelStageOptions): GuardStage {
         model: fields(word),
       };
     }
-    const reason = `reviewer: ${review.reason}`;
+    const reason = `${prefix}reviewer: ${review.reason}`;
     if (review.verdict === "allow") {
       return { kind: "pass", layer: "reviewer", reason, matched, model: fields() };
     }
@@ -519,6 +542,7 @@ export function createGuardExtension(
       cost_usd: model?.costUsd ?? 0,
       rule_ms: fields.ruleMs ?? null,
       duration_ms: Date.now() - started,
+      ...(model?.outside === true ? { outside_content: true } : {}),
     });
     return fields.verdict === "allowed" ? undefined : { block: fields.reason };
   }
@@ -531,8 +555,7 @@ export function createGuardExtension(
     context: Context,
   ): Promise<AlwaysOffer> {
     const rules = await api.snapshot(RulesDoc, context);
-    const roster = await api.snapshot(RosterDoc, context);
-    const agents = new Set([LEAD_ROLE, ...Object.keys(roster?.specialists ?? {})]);
+    const agents = await agentNames(api, context);
     return alwaysOffer(
       { owner: rules?.owner ?? [], person: rules?.person ?? [] },
       call,

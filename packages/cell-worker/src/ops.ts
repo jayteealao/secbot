@@ -22,6 +22,9 @@
  *   GET|PUT /ops/secrets?cell=           a person's secrets (never values); store one (value in body)
  *   PUT|DELETE /ops/secrets/allowlist?cell=  the owner's allowlist; removing an entry revokes its grant
  *   POST /ops/secrets/rotate             the next master key becomes current; records are re-wrapped
+ *   POST /ops/stop                       every cell's jobs and lead turn stop, in every fleet
+ *   GET  /ops/jobs?cell=                 a person's job board, or the household's shared jobs
+ *   PUT  /ops/capacity?cell=             a person cell's measured number ({"measured", "at"})
  *
  * The secrets cell is never snapshotted, wiped, or restored: the default cell set of those routes
  * leaves it out, and naming it is refused.
@@ -50,13 +53,14 @@ import {
   type SecretsClient,
   SecretsRefused,
   SecretsUnavailable,
+  type StopAnswer,
 } from "@secbot/cell-harness";
 import type { CellDump } from "@secbot/cell-storage";
-import { isRefusedHouseholdChange } from "@secbot/household-cell";
+import { HOUSEHOLD_CELL_NAME, isRefusedHouseholdChange } from "@secbot/household-cell";
 import { sameHex, sha256Hex } from "./device-auth.ts";
 import { contractStep } from "./health.ts";
 import { HouseholdCallError } from "./household-client.ts";
-import { OPERATOR_HEADER } from "./internal-rpc.ts";
+import { INTERNAL_ATTEMPTS, OPERATOR_HEADER, postInternal } from "./internal-rpc.ts";
 
 /** What the operator routes need from a cell's stub (celld JS RPC). */
 export interface SnapshotStub {
@@ -104,6 +108,28 @@ export interface GuardStub {
   costOf?(person: string): Promise<Answer<CostView>>;
   setLimitOf?(person: string, usd: unknown): Promise<Answer<unknown>>;
   refreshBudget?(person: string): Promise<void>;
+  /** The job board and the owner's stop; absent on a stub built before them. */
+  jobsOf?(person: string): Promise<Answer<unknown>>;
+  stopOf?(person: string): Promise<Answer<StopAnswer>>;
+  /** The measured number of jobs at once; absent on a stub built before it. */
+  setCapacityOf?(
+    person: string,
+    measured: number | null,
+    at: number | null,
+  ): Promise<Answer<{ person: string; measured: number | null; at: number | null }>>;
+}
+
+/** The household cell's shared-jobs board and stop, when this fleet serves it. */
+export interface HouseholdJobsStub {
+  jobs?(): Promise<unknown>;
+  stopJobs?(): Promise<StopAnswer>;
+}
+
+/** Another fleet's private address and the operator key, for the routes that reach every cell. */
+export interface RemoteFleet {
+  readonly url: string;
+  readonly key: string;
+  readonly fetcher: typeof fetch;
 }
 
 export interface OpsDeps {
@@ -123,6 +149,276 @@ export interface OpsDeps {
   household?(): HouseholdClient | undefined;
   /** The secrets cell's client, or undefined when this fleet reaches none. */
   secrets?(): SecretsClient | undefined;
+  /** The household cell's jobs RPC, when this fleet serves the household cell. */
+  householdJobs?(): HouseholdJobsStub | undefined;
+  /** The cells another fleet serves (the secrets cell aside). */
+  readonly elsewhere?: readonly string[];
+  /** That fleet's address, or undefined when this fleet has none. */
+  remote?(): RemoteFleet | undefined;
+}
+
+/**
+ * One cell's part of the owner's stop: the cell's own stop answer (jobs stopped, whether a lead
+ * turn was, aborted jobs still ending), and whether it is the household's shared jobs.
+ */
+export type CellStop = StopAnswer & {
+  readonly cell: string;
+  readonly shared: boolean;
+};
+
+/** How long the owner's stop waits for another fleet to answer. */
+export const REMOTE_STOP_TIMEOUT_MS = 30_000;
+/** How long one cell of this fleet has to answer the owner's stop; under the remote bound. */
+export const CELL_STOP_TIMEOUT_MS = 20_000;
+/** How long a board read waits for another fleet to answer. */
+export const REMOTE_JOBS_TIMEOUT_MS = 10_000;
+
+/**
+ * Stops the cells this fleet serves, all at once: each person cell's jobs and lead turn (by the
+ * owner), and the household cell's shared jobs. A cell that fails to answer, or does not answer
+ * within CELL_STOP_TIMEOUT_MS, is in `missing`.
+ */
+export async function stopServed(deps: OpsDeps): Promise<{ cells: CellStop[]; missing: string[] }> {
+  const served = deps.cells.filter((cell) => cell !== SECRETS_CELL);
+  // Every cell at once, each bounded: one slow cell never holds back the stop of the others.
+  const answers = await Promise.all(
+    served.map((cell) =>
+      bounded(CELL_STOP_TIMEOUT_MS, stopOne(deps, cell)).catch((error: unknown) => {
+        logEvent("ops.stop_failed", { cell, ...errorFields(error) }, "warn");
+        return null;
+      }),
+    ),
+  );
+  const cells: CellStop[] = [];
+  const missing: string[] = [];
+  served.forEach((cell, index) => {
+    const answer = answers[index];
+    if (answer === null || answer === undefined) missing.push(cell);
+    else cells.push(answer);
+  });
+  return { cells, missing };
+}
+
+/** One served cell's stop, or null when it has no binding or refused. */
+async function stopOne(deps: OpsDeps, cell: string): Promise<CellStop | null> {
+  if (cell === HOUSEHOLD_CELL_NAME) {
+    const household = deps.householdJobs?.();
+    if (household?.stopJobs === undefined) return null;
+    const stopped = await household.stopJobs();
+    return { cell, jobs: stopped.jobs, turn: stopped.turn, shared: true, ...ending(stopped) };
+  }
+  const guard = deps.guardOf?.(cell);
+  if (guard?.stopOf === undefined) return null;
+  const answer = await guard.stopOf(cell);
+  return answer.ok
+    ? {
+        cell,
+        jobs: answer.value.jobs,
+        turn: answer.value.turn,
+        shared: false,
+        ...ending(answer.value),
+      }
+    : null;
+}
+
+/** The `running` count of a cell's stop, kept only when some aborted job had not ended. */
+const ending = (stopped: StopAnswer) =>
+  stopped.running !== undefined && stopped.running > 0 ? { running: stopped.running } : {};
+
+/**
+ * The log fields of the owner's stop for the cells that left aborted jobs still ending, and how
+ * many jobs those are; none when every stopped job ended.
+ */
+export function stillEnding(cells: readonly CellStop[]): Record<string, unknown> {
+  const ending = cells.filter((each) => each.running !== undefined && each.running > 0);
+  if (ending.length === 0) return {};
+  return {
+    still_ending: ending.map((each) => each.cell),
+    still_ending_jobs: ending.reduce((all, each) => all + (each.running ?? 0), 0),
+  };
+}
+
+/** `work`, or a rejection once `ms` have passed. */
+async function bounded<T>(ms: number, work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`the cell did not answer the stop in ${ms} ms`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** A served cell's board, for the owner: a person's view, or the household's shared jobs. */
+export async function jobsServed(deps: OpsDeps, cell: string): Promise<Response> {
+  if (cell === HOUSEHOLD_CELL_NAME) {
+    const household = deps.householdJobs?.();
+    if (household?.jobs === undefined) return json({ error: "no household binding" }, 503);
+    return json({ ...((await household.jobs()) as object), operator: true });
+  }
+  const guard = deps.guardOf?.(cell);
+  if (guard?.jobsOf === undefined) return json({ error: `${cell} has no job board` }, 404);
+  const answer = await guard.jobsOf(cell);
+  return answer.ok ? json(answer.value) : json({ error: answer.error }, answer.status);
+}
+
+/** The cells another fleet serves, stopped through its `/internal/stop`. */
+async function stopElsewhere(deps: OpsDeps): Promise<{ cells: CellStop[]; missing: string[] }> {
+  const elsewhere = (deps.elsewhere ?? []).filter((cell) => cell !== SECRETS_CELL);
+  if (elsewhere.length === 0) return { cells: [], missing: [] };
+  const remote = deps.remote?.();
+  if (remote === undefined) return { cells: [], missing: elsewhere };
+  const outcome = await postInternal<{ cells: CellStop[]; missing: string[] }>({
+    url: remote.url,
+    key: remote.key,
+    path: "/internal/stop",
+    body: {},
+    attempts: INTERNAL_ATTEMPTS,
+    timeoutMs: REMOTE_STOP_TIMEOUT_MS,
+    fetcher: remote.fetcher,
+  });
+  if (outcome.kind === "ok") return outcome.value;
+  logEvent(
+    "ops.stop_unanswered",
+    { status: outcome.status, attempts: outcome.attempts, ...errorFields(outcome.cause) },
+    "warn",
+  );
+  return { cells: [], missing: elsewhere };
+}
+
+/**
+ * The owner's stop across the household: this fleet's cells and, at the same time, the cells
+ * another fleet serves through its `/internal/stop` (a stop is safe to repeat, so the call is
+ * retried). A cell that did not answer, or that no fleet address reaches, is in `missing`.
+ */
+async function stopRoute(deps: OpsDeps): Promise<Response> {
+  // This fleet and the other at the same time.
+  const [here, there] = await Promise.all([stopServed(deps), stopElsewhere(deps)]);
+  const cells = [...here.cells, ...there.cells];
+  const missing = [...here.missing, ...there.missing];
+  logEvent("ops.stop", { cells: cells.map((each) => each.cell), missing, ...stillEnding(cells) });
+  return json({ cells, missing });
+}
+
+/** A person's board, or the household's shared jobs; another fleet's cell through its route. */
+async function jobsRoute(url: URL, deps: OpsDeps): Promise<Response> {
+  const raw = url.searchParams.get("cell");
+  if (raw === null || raw === "") return json({ error: "send ?cell=<person|household>" }, 400);
+  const cell = raw === "person" ? "second" : raw;
+  if (cell === SECRETS_CELL) return json({ error: `${cell} has no job board` }, 404);
+  if (deps.cells.includes(cell)) return jobsServed(deps, cell);
+  if (!(deps.elsewhere ?? []).includes(cell))
+    return json({ error: `${cell} has no job board` }, 404);
+  const remote = deps.remote?.();
+  if (remote === undefined) return json({ error: `cell ${cell} is served by another fleet` }, 404);
+  const outcome = await postInternal<Record<string, unknown>>({
+    url: remote.url,
+    key: remote.key,
+    path: "/internal/jobs",
+    body: { cell },
+    attempts: INTERNAL_ATTEMPTS,
+    timeoutMs: REMOTE_JOBS_TIMEOUT_MS,
+    fetcher: remote.fetcher,
+  });
+  if (outcome.kind === "ok") return json(outcome.value);
+  if (outcome.kind === "refused") {
+    return json({ error: outcome.message ?? "refused" }, outcome.status ?? 400);
+  }
+  return json({ error: `cell ${cell} did not answer` }, 503);
+}
+
+/** The largest measured number the capacity route takes. */
+export const CAPACITY_MAX_JOBS = 1000;
+
+/**
+ * PUT /ops/capacity?cell=<person> with {"measured": <jobs 1-1000>, "at": <epoch ms>}, or both
+ * null to clear it: a person cell's measured number of jobs at once. Passing it only warns the
+ * owner and the board; nothing is held back. The household and secrets cells have no number.
+ */
+async function capacityRoute(request: Request, url: URL, deps: OpsDeps): Promise<Response> {
+  const raw = url.searchParams.get("cell") ?? "";
+  const cell = raw === "person" ? "second" : raw;
+  if (cell === "") return json({ error: "send ?cell=<person>" }, 400);
+  if (cell === SECRETS_CELL || cell === HOUSEHOLD_CELL_NAME) {
+    return json({ error: `${cell} has no capacity setting` }, 404);
+  }
+  if (!deps.cells.includes(cell)) {
+    return json({ error: `cell ${cell} is served by another fleet` }, 404);
+  }
+  const guard = deps.guardOf?.(cell);
+  if (guard?.setCapacityOf === undefined) {
+    return json({ error: `${cell} has no capacity setting` }, 404);
+  }
+  const body = await readBody(request);
+  const measured = body?.measured;
+  const at = body?.at;
+  const cleared = measured === null && at === null;
+  const set =
+    Number.isInteger(measured) &&
+    (measured as number) >= 1 &&
+    (measured as number) <= CAPACITY_MAX_JOBS &&
+    Number.isInteger(at) &&
+    (at as number) >= 0;
+  if (!cleared && !set) {
+    return json(
+      {
+        error: `send {"measured": <jobs 1-${CAPACITY_MAX_JOBS}>, "at": <epoch ms>}, or both null to clear`,
+      },
+      400,
+    );
+  }
+  const answer = await guard.setCapacityOf(
+    cell,
+    cleared ? null : (measured as number),
+    cleared ? null : (at as number),
+  );
+  logEvent("ops.capacity_set", {
+    cell,
+    ok: answer.ok,
+    measured: cleared ? null : measured,
+  });
+  return answer.ok ? json(answer.value) : json({ error: answer.error }, answer.status);
+}
+
+/**
+ * POST /internal/stop and POST /internal/jobs: the owner's stop and board for the cells this
+ * fleet serves, called by the owner's fleet with the operator key. They never reach on to
+ * another fleet.
+ */
+export async function internalJobs(
+  request: Request,
+  env: OpsEnv,
+  deps: OpsDeps,
+): Promise<Response> {
+  const url = new URL(request.url);
+  if (!(await hasOperatorKey(request, env))) return refuse(url.pathname, "operator_key", 401);
+  if (request.method !== "POST") return json({ error: "not found" }, 404);
+  if (url.pathname === "/internal/stop") {
+    const stopped = await stopServed(deps);
+    logEvent("ops.stop", {
+      cells: stopped.cells.map((each) => each.cell),
+      missing: stopped.missing,
+      forwarded: true,
+      ...stillEnding(stopped.cells),
+    });
+    return json(stopped);
+  }
+  if (url.pathname === "/internal/jobs") {
+    const body = await readBody(request);
+    const cell = typeof body?.cell === "string" ? body.cell : "";
+    if (!deps.cells.includes(cell) || cell === SECRETS_CELL) {
+      return json({ error: `cell ${cell} is served by another fleet` }, 404);
+    }
+    return jobsServed(deps, cell);
+  }
+  return json({ error: "not found" }, 404);
 }
 
 /** The secrets cell: never in a snapshot, wipe, digest, or heartbeat set of these routes. */
@@ -457,6 +753,10 @@ export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise
   ) {
     return budgetRoute(request, url, deps);
   }
+
+  if (route === "POST /ops/stop") return stopRoute(deps);
+  if (route === "GET /ops/jobs") return jobsRoute(url, deps);
+  if (route === "PUT /ops/capacity") return capacityRoute(request, url, deps);
 
   if (route === "POST /ops/write") {
     if (deps.write === undefined) return json({ error: "no write probe in this bundle" }, 404);

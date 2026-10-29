@@ -9,8 +9,6 @@
 
 /** A model turn waits this long for its output; a plainer retry gets the same again. */
 export const MODEL_TURN_MS = 120_000;
-/** A specialist's answer arrives as a follow-up after the lead's own turn. */
-export const FOLLOWUP_MS = 240_000;
 /** The run stops itself, with cleanup, when the month's spend rises by more than this. */
 export const DEFAULT_MAX_USD = 5;
 /** How long an activity check waits for a tool call that lands after its chat turn printed. */
@@ -23,16 +21,14 @@ export const DEFAULT_LIMIT_USD = 25;
 /** The contract lines of the command line, as patterns. */
 export const CONTRACT = {
   held: /\[ HELD #(\d+)(?: of \d+)? \]/,
-  heldYourRule: /why held {3}your rule: lead handoff \(any\) -> ask first/,
-  heldOwnerRule: /why held {3}owner rule: all handoff \(specialist = developer\) -> ask first/,
+  heldYourRule: /why held {3}your rule: lead start_job \(any\) -> ask first/,
+  heldOwnerRule: /why held {3}owner rule: all start_job \(template = developer\) -> ask first/,
   alwaysNotOffered: /\(allow always is not offered: an owner rule asks first here\)/,
-  allowedAlways: /\[ allowed always \] #\d+ handoff/,
-  allowedOnce: /\[ allowed once \] #\d+ handoff/,
+  allowedAlways: /\[ allowed always \] #\d+ start_job/,
+  allowedOnce: /\[ allowed once \] #\d+ start_job/,
   usage: /\[ month: \$\d+\.\d\d \/ \$\d+\.\d\d \] \[[#.]{10}\] \d+%/,
   warn: /\[ 80% of limit \]/,
   over: /\[ limit reached \]/,
-  followupResearch: /\[from research\]/,
-  followupHealth: /\[from health\]/,
   heldCalls: /HELD CALLS/,
   granted: /\[ granted \]/,
   stored: /\[ stored \]/,
@@ -54,12 +50,19 @@ export const SECRET_WORD_QUERY = "password reset email";
 /** The reminder text of charter step 7: no card number, so no owner rule holds it. */
 export const BANK_REMINDER = "call the bank about the new account at 09:00";
 
-/** The text the stand-in model gets for a chat line, so the rehearsal makes the same tool call. */
-const handoffScript = (specialist, brief, then) => ({
-  tool: "handoff",
-  args: { specialist, brief },
+/**
+ * The call the stand-in model makes for a chat line, so the rehearsal makes the same tool call: a
+ * job start, and `then` the one call the job makes on its brief.
+ */
+const jobScript = (template, title, brief, then) => ({
+  tool: "start_job",
+  args: { title, brief, template },
   ...(then === undefined ? {} : { then }),
 });
+
+/** The plainer retry of a job start: the tool and its three arguments, spelled out. */
+const jobPlainer = (template, title, brief) =>
+  `Use the start_job tool: template ${template}, title "${title}", brief "${brief}"`;
 
 const RESEARCH_BRIEF =
   "Find the direct trains from London to Leeds on Friday morning and list three departure times.";
@@ -95,7 +98,7 @@ export const STEPS = [
     checks: ["rules-list"],
     evidence: "rules-list-live.txt",
     actions: [
-      { kind: "cmd", argv: ["rules", "list"], expect: [/YOUR RULES/, /all {8}handoff {12}any/] },
+      { kind: "cmd", argv: ["rules", "list"], expect: [/YOUR RULES/, /all {8}start_job {10}any/] },
       {
         kind: "cmd",
         argv: ["rules", "add", "lead", "search_history", "prohibit", "--exact", "query=livecheck"],
@@ -223,10 +226,10 @@ export const STEPS = [
     actions: [
       {
         kind: "cmd",
-        argv: ["rules", "add", "lead", "handoff", "ask-first"],
-        expect: [/^added: lead handoff \(any\) -> ask first$/m],
+        argv: ["rules", "add", "lead", "start_job", "ask-first"],
+        expect: [/^added: lead start_job \(any\) -> ask first$/m],
       },
-      { kind: "cmd", argv: ["rules", "list"], expect: [/lead {7}handoff {12}any {28}ask first/] },
+      { kind: "cmd", argv: ["rules", "list"], expect: [/lead {7}start_job {10}any {28}ask first/] },
     ],
   },
   {
@@ -237,10 +240,10 @@ export const STEPS = [
     actions: [
       {
         kind: "chat",
-        say: `Please hand off to the research specialist with this brief: ${RESEARCH_BRIEF}`,
-        plainer: [`Use the handoff tool: specialist research, brief "${RESEARCH_BRIEF}"`],
+        say: `Please start a research job with this brief: ${RESEARCH_BRIEF}`,
+        plainer: [jobPlainer("research", "trains to Leeds", RESEARCH_BRIEF)],
         expect: [CONTRACT.held, CONTRACT.heldYourRule, /\/always \d+ +allow always/],
-        script: handoffScript("research", RESEARCH_BRIEF),
+        script: jobScript("research", "trains to Leeds", RESEARCH_BRIEF),
       },
     ],
   },
@@ -255,9 +258,9 @@ export const STEPS = [
       {
         kind: "cmd",
         argv: ["rules", "list"],
-        expect: [/lead {7}handoff {12}specialist = research {10}permit/, /added by allow always/],
+        expect: [/lead {7}start_job {10}template = research {12}permit/, /added by allow always/],
       },
-      { kind: "cmd", argv: ["activity"], expect: [/handoff -> research {6}allowed {7}person/] },
+      { kind: "cmd", argv: ["activity"], expect: [/start_job -> research {4}allowed {7}person/] },
     ],
   },
   {
@@ -268,17 +271,17 @@ export const STEPS = [
     actions: [
       {
         kind: "chat",
-        say: `Hand off to the research specialist again with this brief: ${RESEARCH_BRIEF}`,
-        plainer: [`Use the handoff tool: specialist research, brief "${RESEARCH_BRIEF}"`],
+        say: `Start a research job again with this brief: ${RESEARCH_BRIEF}`,
+        plainer: [jobPlainer("research", "trains to Leeds", RESEARCH_BRIEF)],
         expect: [CONTRACT.usage],
         reject: [CONTRACT.held],
-        script: handoffScript("research", RESEARCH_BRIEF),
+        script: jobScript("research", "trains to Leeds", RESEARCH_BRIEF),
       },
       { kind: "pause", ms: 5_000 },
       {
         kind: "cmd",
         argv: ["activity"],
-        expect: [/handoff -> research {6}allowed {7}rule/],
+        expect: [/start_job -> research {4}allowed {7}rule/],
         waitMs: ACTIVITY_WAIT_MS,
       },
     ],
@@ -295,22 +298,22 @@ export const STEPS = [
           "rules",
           "add",
           "all",
-          "handoff",
+          "start_job",
           "ask-first",
           "--exact",
-          "specialist=developer",
+          "template=developer",
           "--owner",
           "--person",
           "{person}",
         ],
-        expect: [/^added: all handoff \(specialist = developer\) -> ask first$/m],
+        expect: [/^added: all start_job \(template = developer\) -> ask first$/m],
       },
       {
         kind: "chat",
-        say: `Please hand off to the developer specialist with this brief: ${DEVELOPER_BRIEF}`,
-        plainer: [`Use the handoff tool: specialist developer, brief "${DEVELOPER_BRIEF}"`],
+        say: `Please start a developer job with this brief: ${DEVELOPER_BRIEF}`,
+        plainer: [jobPlainer("developer", "empty list items", DEVELOPER_BRIEF)],
         expect: [CONTRACT.held, CONTRACT.heldOwnerRule, CONTRACT.alwaysNotOffered],
-        script: handoffScript("developer", DEVELOPER_BRIEF),
+        script: jobScript("developer", "empty list items", DEVELOPER_BRIEF),
       },
       { kind: "answer", choice: "allow", expect: [CONTRACT.allowedOnce] },
     ],
@@ -423,11 +426,10 @@ export const STEPS = [
       },
       {
         kind: "chat",
-        say: `Hand off to the research specialist with this brief: ${SECRET_BRIEF}`,
-        plainer: [`Use the handoff tool: specialist research, brief "${SECRET_BRIEF}"`],
-        expect: [CONTRACT.followupResearch],
-        timeoutMs: FOLLOWUP_MS,
-        script: handoffScript("research", SECRET_BRIEF, {
+        say: `Start a research job with this brief: ${SECRET_BRIEF}`,
+        plainer: [jobPlainer("research", "secret length", SECRET_BRIEF)],
+        expect: [CONTRACT.usage],
+        script: jobScript("research", "secret length", SECRET_BRIEF, {
           tool: "secret_get",
           args: { name: "live-test-secret" },
         }),
@@ -439,14 +441,14 @@ export const STEPS = [
         expect: [CONTRACT.usage],
         script: { tool: "secret_get", args: { name: "live-test-secret" } },
       },
-      // The member's own ask-first rule holds a hand-off to the health specialist (allow always
-      // added a permit for research only): allowed once, then the brokered call runs.
+      // The member's own ask-first rule holds a health job's start (allow always added a permit
+      // for research only): allowed once, then the job's brokered call runs.
       {
         kind: "chat",
-        say: `Hand off to the health specialist with this brief: ${BROKER_BRIEF}`,
-        plainer: [`Use the handoff tool: specialist health, brief "${BROKER_BRIEF}"`],
+        say: `Start a health job with this brief: ${BROKER_BRIEF}`,
+        plainer: [jobPlainer("health", "health ping", BROKER_BRIEF)],
         expect: [CONTRACT.held, CONTRACT.heldYourRule],
-        script: handoffScript("health", BROKER_BRIEF, {
+        script: jobScript("health", "health ping", BROKER_BRIEF, {
           tool: "broker_call",
           args: { secret: "health-test", method: "GET", path: "/v1/ping" },
         }),
@@ -454,8 +456,7 @@ export const STEPS = [
       {
         kind: "answer",
         choice: "allow",
-        expect: [CONTRACT.allowedOnce, CONTRACT.followupHealth],
-        timeoutMs: FOLLOWUP_MS,
+        expect: [CONTRACT.allowedOnce],
       },
       {
         kind: "cmd",
@@ -497,10 +498,10 @@ export const STEPS = [
       },
       {
         kind: "chat",
-        say: `Hand off to the research specialist with this brief: ${RESEARCH_BRIEF}`,
-        plainer: [`Use the handoff tool: specialist research, brief "${RESEARCH_BRIEF}"`],
+        say: `Start a research job with this brief: ${RESEARCH_BRIEF}`,
+        plainer: [jobPlainer("research", "trains to Leeds", RESEARCH_BRIEF)],
         expect: [CONTRACT.usage],
-        script: handoffScript("research", RESEARCH_BRIEF),
+        script: jobScript("research", "trains to Leeds", RESEARCH_BRIEF),
       },
       {
         kind: "cmd",
@@ -530,10 +531,10 @@ export const STEPS = [
     actions: [
       {
         kind: "chat",
-        say: `Please hand off to the developer specialist with this brief: ${DEVELOPER_BRIEF}`,
-        plainer: [`Use the handoff tool: specialist developer, brief "${DEVELOPER_BRIEF}"`],
+        say: `Please start a developer job with this brief: ${DEVELOPER_BRIEF}`,
+        plainer: [jobPlainer("developer", "empty list items", DEVELOPER_BRIEF)],
         expect: [CONTRACT.held, CONTRACT.heldOwnerRule],
-        script: handoffScript("developer", DEVELOPER_BRIEF),
+        script: jobScript("developer", "empty list items", DEVELOPER_BRIEF),
         keep: "pending",
       },
       { kind: "close" },
@@ -549,13 +550,13 @@ export const STEPS = [
       {
         kind: "cmd",
         argv: ["missed"],
-        expect: [CONTRACT.heldCalls, /lead {2}handoff -> developer/],
+        expect: [CONTRACT.heldCalls, /lead {2}start_job -> developer/],
       },
       { kind: "open", expect: [CONTRACT.usage] },
       { kind: "answer", choice: "allow", from: "pending", expect: [CONTRACT.allowedOnce] },
       { kind: "pause", ms: 30_000 },
       { kind: "close", reject: [CONTRACT.held] },
-      { kind: "cmd", argv: ["missed"], reject: [/handoff -> developer/] },
+      { kind: "cmd", argv: ["missed"], reject: [/start_job -> developer/] },
     ],
   },
   {
@@ -566,10 +567,10 @@ export const STEPS = [
     cleanup: true,
     actions: [
       { kind: "limit", to: "restore", expect: [/monthly limit is now \$\d+\.\d\d/] },
-      { kind: "cmd", argv: ["rules", "remove", "lead", "handoff"], optional: true },
+      { kind: "cmd", argv: ["rules", "remove", "lead", "start_job"], optional: true },
       {
         kind: "cmd",
-        argv: ["rules", "remove", "lead", "handoff", "--exact", "specialist=research"],
+        argv: ["rules", "remove", "lead", "start_job", "--exact", "template=research"],
         optional: true,
       },
       {
@@ -583,9 +584,9 @@ export const STEPS = [
           "rules",
           "remove",
           "all",
-          "handoff",
+          "start_job",
           "--exact",
-          "specialist=developer",
+          "template=developer",
           "--owner",
           "--person",
           "{person}",
@@ -664,6 +665,13 @@ export function check(text, { expect = [], reject = [] } = {}) {
     missing: expect.filter((pattern) => !pattern.test(text)),
     present: reject.filter((pattern) => pattern.test(text)),
   };
+}
+
+/** The job number `pattern` names in `text` (its first group, newest match), or undefined. Pure. */
+export function keptNumber(text, pattern) {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  const last = [...String(text).matchAll(new RegExp(pattern.source, flags))].at(-1);
+  return last?.[1] === undefined ? undefined : Number(last[1]);
 }
 
 /** The newest held call number in `text`, or undefined. Pure. */

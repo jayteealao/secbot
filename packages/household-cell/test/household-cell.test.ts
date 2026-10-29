@@ -11,6 +11,12 @@ import {
   onLogEvent,
 } from "@secbot/cell-harness";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  createFauxGateway,
+  fauxAssistantMessage,
+  fauxText,
+  until,
+} from "../../cell-harness/test/fixtures.ts";
 import { FakeCelldStorage } from "../../cell-storage/test/fake-celld-storage.ts";
 import { HouseholdCell } from "../src/household-cell.ts";
 
@@ -125,6 +131,138 @@ describe("HouseholdCell", () => {
     expect(await household.alarmReport()).toMatchObject({ ok: false, problem: "alarm mismatch" });
     expect((await household.fetch(new Request("http://cell/status"))).status).toBe(200);
     expect((await household.fetch(new Request("http://cell/other"))).status).toBe(404);
+  });
+
+  it("answers an empty shared-jobs board and a stop with nothing to stop", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const { household } = setup();
+    expect(await household.jobs()).toEqual({
+      person: "household",
+      mode: "shadow",
+      live: 0,
+      waiting: 0,
+      rows: [],
+      finished: [],
+      shown: 0,
+      capacity: null,
+      templates: [],
+    });
+    expect(await household.stopJobs()).toEqual({ jobs: 0, turn: false });
+  });
+
+  describe("with shared jobs", () => {
+    const propose = (opId: string, person: string, other: string, title: string) => ({
+      kind: "propose",
+      opId,
+      person,
+      other,
+      local: 2,
+      title,
+      brief: `Plan ${title}.`,
+      priority: "routine",
+      deadline: null,
+      tier: "cheap",
+      effort: "medium",
+      estimateUsd: 0.25,
+    });
+    const join = (opId: string, person: string, household: number) => ({
+      kind: "answer",
+      opId,
+      person,
+      household,
+      local: 5,
+      join: true,
+    });
+
+    function sharedSetup() {
+      vi.spyOn(console, "log").mockImplementation(() => {});
+      // Each job's model call waits until its title is released.
+      const gates = new Map<string, { promise: Promise<void>; open: () => void }>();
+      const gateOf = (title: string) => {
+        let entry = gates.get(title);
+        if (entry === undefined) {
+          let open = () => {};
+          const promise = new Promise<void>((resolve) => {
+            open = resolve;
+          });
+          entry = { promise, open };
+          gates.set(title, entry);
+        }
+        return entry;
+      };
+      const hold = {
+        count: 0,
+        waiting: (_role: string) => hold.count,
+        release: (title: string) => gateOf(title).open(),
+      };
+      const gateway = createFauxGateway(async (request) => {
+        const title = /Plan (.+)\./.exec(request.lastText)?.[1] ?? "";
+        hold.count += 1;
+        await gateOf(title).promise;
+        hold.count -= 1;
+        return fauxAssistantMessage([fauxText("Plan for both.")]);
+      });
+      const household = new HouseholdCell(
+        { storage: new FakeCelldStorage() },
+        {},
+        {
+          version: "v0.0.0-test",
+          pollMs: 5,
+          persons: ["owner", "second", "third"],
+          models: gateway.models,
+        },
+      );
+      cells.push(household);
+      return { household, hold };
+    }
+
+    it("shows a running shared job, and the owner's stop counts it and keeps its brief", async () => {
+      const { household, hold } = sharedSetup();
+      await household.sharedSync({
+        person: "owner",
+        ops: [propose("o1", "owner", "second", "the May trip")],
+      });
+      await household.sharedSync({ person: "second", ops: [join("s1", "second", 1)] });
+      await until(() => hold.waiting("unknown") === 1);
+      const view = await household.jobs();
+      expect(view.person).toBe("household");
+      expect(view.rows).toEqual([
+        expect.objectContaining({ number: 1, title: "the May trip", status: "running" }),
+      ]);
+      expect(view.rows[0]?.shared).toBeUndefined();
+      // The faux model answers only once released: the stop's abort is asked first.
+      const stopping = household.stopJobs();
+      setTimeout(() => hold.release("the May trip"), 50);
+      expect(await stopping).toEqual({ jobs: 1, turn: false });
+      const after = await household.sharedSync({ person: "owner", ops: [] });
+      expect(after.rows[0]).toMatchObject({ status: "stopped", title: "the May trip" });
+    });
+
+    it("stops only the shared jobs of the person who stops", async () => {
+      const { household, hold } = sharedSetup();
+      await household.sharedSync({
+        person: "owner",
+        ops: [propose("o1", "owner", "second", "the May trip")],
+      });
+      await household.sharedSync({
+        person: "third",
+        ops: [propose("t1", "third", "owner", "the garden")],
+      });
+      await household.sharedSync({ person: "second", ops: [join("s1", "second", 1)] });
+      await household.sharedSync({ person: "owner", ops: [join("o2", "owner", 2)] });
+      await until(() => hold.waiting("unknown") === 2);
+      const stopping = household.sharedSync({
+        person: "second",
+        ops: [{ kind: "stop", opId: "s2", person: "second" }],
+      });
+      setTimeout(() => hold.release("the May trip"), 50);
+      const stopped = await stopping;
+      expect(stopped.rows).toEqual([expect.objectContaining({ household: 1, status: "stopped" })]);
+      const view = await household.jobs();
+      expect(view.rows.map((row) => [row.number, row.status])).toEqual([[2, "running"]]);
+      expect(view.finished.map((row) => [row.number, row.status])).toEqual([[1, "stopped"]]);
+      hold.release("the garden");
+    });
   });
 
   it("pings its heartbeat when its alarm fires late, and re-arms to the next wake", async () => {

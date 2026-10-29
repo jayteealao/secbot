@@ -1,12 +1,14 @@
 // The CLI against an in-process fake cell: chat streams and shows a follow-up that arrives while
 // the session is open, a dropped connection resends unacknowledged lines under the
 // same request id, missed lists in order, model set refuses an unknown id with exit 1,
-// specialist add, device new prints only the hash line, and a refused key fails.
+// model cap changes a tier's per-job cap, specialist add adds a job template and the cell's
+// refusal of a model reaches stderr, device new prints only the hash line, and a refused key fails.
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { answeredLine, answerJobOf } from "../src/commands/job-answer.ts";
 import type { Io } from "../src/io.ts";
 import { run } from "../src/main.ts";
 import { type FakeCell, startFakeCell } from "./fake-cell.ts";
@@ -142,6 +144,68 @@ describe("secbot chat", () => {
     expect(fake.inputs).toHaveLength(1);
   });
 
+  it("prints a job's question line once and answers it only with an exact /answer", async () => {
+    const { environment } = await setup();
+    if (cell === undefined) throw new Error("no cell");
+    const fake = cell;
+    fake.jobAnswers[11] = [200, { job: 11, title: "renew passport form" }];
+    fake.jobAnswers[12] = [409, { error: "job 12 has no question waiting" }];
+    fake.onInput = (_input, socket) => {
+      socket.send({ type: "delta", text: "Which address, home or the office?" });
+      socket.send({ type: "answer", entryId: 2, text: "Which address, home or the office?" });
+      socket.send({ type: "question", job: 11, title: "renew passport form" });
+      // A reconnect or a second notice of the same question prints nothing new.
+      socket.send({ type: "question", job: 11, title: "renew passport form" });
+    };
+    const { io, out, err } = testIo(async function* (output) {
+      yield "the passport form";
+      await waitFor(() => output().includes("[ job 11 asks ]"));
+      yield "/answer eleven home";
+      yield "/answer 12 home";
+      yield "/answer 11 home address";
+      await waitFor(() => output().includes("[ answered ]"));
+    });
+    expect(await run(["chat"], { environment, io })).toBe(0);
+    expect(out()).toBe(
+      [
+        "connected to owner lead",
+        "Which address, home or the office?",
+        "",
+        "[ job 11 asks ] answer with /answer 11 <text>",
+        "[ answered ] #11 renew passport form continues",
+        "",
+      ].join("\n"),
+    );
+    expect(err()).toBe(
+      [
+        "not sent: answer with /answer <#> <text>",
+        "secbot: job 12 has no question waiting",
+        "",
+      ].join("\n"),
+    );
+    // Only the plain line reached the lead; the answers went to the answer route.
+    expect(fake.inputs.map((input) => input.text)).toEqual(["the passport form"]);
+    expect(
+      fake.calls.filter((each) => each.path.endsWith("/answer")).map((each) => each.body),
+    ).toEqual([{ text: "home" }, { text: "home address" }]);
+    for (const line of out().split("\n")) {
+      expect(line.length).toBeLessThan(80);
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: the check is for control codes.
+      expect(line).not.toMatch(/[\u0000-\u001f\u007f]/);
+    }
+  });
+
+  it("keeps an answered line within 78 columns for a long title", () => {
+    const line = answeredLine(3, "x".repeat(120));
+    expect(line.length).toBe(78);
+    expect(line.endsWith("… continues")).toBe(true);
+    expect(answeredLine(4, "two\nlines")).toBe("[ answered ] #4 two lines continues");
+    expect(answerJobOf("/answer 4 home")).toEqual({ kind: "answer", job: 4, text: "home" });
+    expect(answerJobOf("/answer 4")).toEqual({ kind: "malformed" });
+    expect(answerJobOf("/Answer 4 home")).toEqual({ kind: "malformed" });
+    expect(answerJobOf("answer 4 home")).toEqual({ kind: "other" });
+  });
+
   it("fails with the cell's reason when the device is refused", async () => {
     const { environment } = await setup();
     await writeFileKey(dir, "not-the-registered-key");
@@ -198,25 +262,55 @@ describe("secbot commands", () => {
     expect(await run(["model", "set", "lead"], { environment, io: usage.io })).toBe(2);
   });
 
-  it("adds a specialist with an instruction and a model", async () => {
+  it("shows tier caps and changes one, refusing an unknown tier with exit 1", async () => {
+    const { environment } = await setup();
+    const listed = testIo();
+    expect(await run(["model", "list"], { environment, io: listed.io })).toBe(0);
+    expect(listed.out()).toContain(
+      "cheap     anthropic/claude-haiku-4.5  (release default)  cap $0.25 per job",
+    );
+    const changed = testIo();
+    expect(await run(["model", "cap", "mid", "2.5"], { environment, io: changed.io })).toBe(0);
+    expect(changed.out()).toBe("mid jobs now cap at $2.5\n");
+    expect(cell?.calls.at(-1)).toMatchObject({
+      method: "PUT",
+      path: "/v1/cells/owner/tiers/mid/cap",
+      body: { usd: "2.5" },
+    });
+    const refused = testIo();
+    expect(await run(["model", "cap", "huge", "1"], { environment, io: refused.io })).toBe(1);
+    expect(refused.err()).toContain('unknown tier "huge"');
+    const usage = testIo();
+    expect(await run(["model", "cap", "mid"], { environment, io: usage.io })).toBe(2);
+  });
+
+  it("adds a job template, and the cell's refusal of a model reaches stderr", async () => {
     const { environment } = await setup();
     const { io, out } = testIo();
-    const argv = [
-      "specialist",
-      "add",
-      "tax",
-      "--instruction",
-      "Track forms.",
-      "--model",
-      "anthropic/claude-haiku-4.5",
-    ];
-    expect(await run(argv, { environment, io })).toBe(0);
-    expect(out()).toContain("added tax");
+    expect(
+      await run(["specialist", "add", "tax", "--instruction", "Track forms."], { environment, io }),
+    ).toBe(0);
+    expect(out()).toBe(
+      "added tax as a job template; the lead can start jobs from it from its next turn\n",
+    );
     expect(cell?.calls.at(-1)).toMatchObject({
       method: "POST",
       path: "/v1/cells/owner/specialists",
-      body: { name: "tax", instruction: "Track forms.", model: "anthropic/claude-haiku-4.5" },
+      body: { name: "tax", instruction: "Track forms." },
     });
+    const refused = testIo();
+    const argv = [
+      "specialist",
+      "add",
+      "garden",
+      "--instruction",
+      "Plants.",
+      "--model",
+      "anthropic/claude-haiku-4.5",
+    ];
+    expect(await run(argv, { environment, io: refused.io })).toBe(1);
+    expect(refused.err()).toContain("a template starts on a tier");
+    expect(refused.out()).toBe("");
   });
 
   it("explains a missing cell address and shows usage for an unknown command", async () => {
@@ -229,5 +323,84 @@ describe("secbot commands", () => {
     expect(unknown.err()).toContain("usage:");
     const flag = testIo();
     expect(await run(["chat", "--to", "research"], { environment, io: flag.io })).toBe(2);
+  });
+});
+
+describe("secbot jobs and secbot stop", () => {
+  it("lists the four job and stop help lines exactly", async () => {
+    const environment = { env: { SECBOT_CONFIG_DIR: dir }, home: dir };
+    const help = testIo();
+    expect(await run(["--help"], { environment, io: help.io })).toBe(0);
+    const lines = help.out().split("\n");
+    const at = lines.indexOf(
+      "  secbot jobs                         list live jobs and jobs from the last 24 h",
+    );
+    expect(at).toBeGreaterThan(0);
+    expect(lines.slice(at, at + 4)).toEqual([
+      "  secbot jobs                         list live jobs and jobs from the last 24 h",
+      "  secbot jobs urgent|deadline|move    change a job's place in the queue",
+      "  secbot jobs restart <#>             restart a stopped job",
+      "  secbot stop [--all]                 stop every running job now (--all: owner)",
+    ]);
+    for (const line of lines.slice(at, at + 4)) expect(line.length).toBeLessThanOrEqual(80);
+  });
+
+  it("refuses secbot stop --all and secbot jobs --person without an operator key", async () => {
+    const { environment } = await setup();
+    for (const argv of [
+      ["stop", "--all"],
+      ["jobs", "--person", "sam"],
+      ["jobs", "--household"],
+    ]) {
+      const refused = testIo();
+      expect(await run(argv, { environment, io: refused.io })).toBe(1);
+      expect(refused.err()).toContain("secbot: no operator key: set SECBOT_OPERATOR_KEY");
+      expect(refused.out()).toBe("");
+    }
+    expect(cell?.calls).toEqual([]);
+  });
+
+  it("runs the board, a reorder, a restart, and the stop through the command line", async () => {
+    const { environment } = await setup();
+    const fake = cell;
+    if (fake === undefined) throw new Error("no cell");
+    const board = testIo();
+    expect(await run(["jobs"], { environment, io: board.io })).toBe(0);
+    expect(board.out()).toContain("JOBS  owner  [ live: 0 ] [ waiting results: 0 ]  [ shadow ]");
+    fake.priorityAnswers[4] = [
+      200,
+      {
+        job: 4,
+        title: "train times",
+        priority: "routine",
+        deadline: null,
+        place: 1,
+        of: 2,
+        before: 1,
+      },
+    ];
+    const moved = testIo();
+    expect(await run(["jobs", "move", "4", "--before", "1"], { environment, io: moved.io })).toBe(
+      0,
+    );
+    expect(moved.out()).toBe("[ moved ] #4 train times -> now before #1, 1st of 2 live jobs\n");
+    const restart = testIo();
+    expect(await run(["jobs", "restart", "22"], { environment, io: restart.io })).toBe(1);
+    expect(restart.err()).toBe("no stopped job #22\n");
+    const stopped = testIo();
+    expect(await run(["stop"], { environment, io: stopped.io })).toBe(0);
+    expect(stopped.out()).toBe(
+      "[ stopped ] nothing was running. Routines and reminders keep their schedule.\n",
+    );
+    const owner = testIo();
+    environment.env.SECBOT_OPERATOR_KEY = fake.operatorKey;
+    expect(await run(["jobs", "--person", "sam"], { environment, io: owner.io })).toBe(0);
+    expect(owner.out().split("\n")[0]).toBe(
+      "JOBS  sam (operator key)  [ live: 0 ] [ waiting results: 0 ]  [ shadow ]",
+    );
+    const both = testIo();
+    expect(
+      await run(["jobs", "--person", "sam", "--household"], { environment, io: both.io }),
+    ).toBe(2);
   });
 });

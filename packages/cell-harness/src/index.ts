@@ -43,12 +43,29 @@ export {
   USED_TEXT,
 } from "./approvals.ts";
 export {
+  type BoardReason,
+  type BoardRow,
+  type BoardView,
+  type BoardViewInput,
+  boardView,
+  budgetJobs,
+  FINISHED_WINDOW_MS,
+  reasonOf,
+} from "./board-view.ts";
+export { bookmarkText, recordInterruption } from "./bookmark.ts";
+export {
   BudgetGate,
   type BudgetWaiter,
   createBudgetExtension,
   shortText,
   type WaitRequest,
 } from "./budget-gate.ts";
+export {
+  type CapacityWatchParts,
+  type EffectiveCapacity,
+  effectiveCapacity,
+  watchCapacity,
+} from "./capacity-watch.ts";
 export {
   type CellParts,
   errorFields,
@@ -60,6 +77,14 @@ export {
   RefusedChange,
   safeErrorText,
 } from "./cell-parts.ts";
+export {
+  type ContentCheckDeps,
+  type ContentRead,
+  type ContentVerdict,
+  checkContent,
+  chunkContent,
+  createContentCheckExtension,
+} from "./content-check.ts";
 export { CREDIT_MARKER, isCreditError, withCreditPause } from "./credit-pause.ts";
 export {
   DECISION_EXAMPLES,
@@ -71,6 +96,8 @@ export {
 } from "./decision-examples.ts";
 export {
   buildDecisionState,
+  type ContentAnswer,
+  type ContentChoice,
   createDecisionModel,
   createDecisionModels,
   type DecisionAnswer,
@@ -80,6 +107,7 @@ export {
   type DecisionModel,
   type DecisionModels,
   type DecisionsClientOptions,
+  INJECTION_QUESTION,
   markScore,
   parseThresholdCaps,
   RISK_QUESTION,
@@ -88,7 +116,27 @@ export {
   UNTRUSTED_NOTE,
 } from "./decision-model.ts";
 export type { LeadMessage, MissedPage } from "./delivery.ts";
-export type { BudgetName, GuardMode, LimitNotice } from "./docs.ts";
+export type {
+  Bookmark,
+  BudgetName,
+  GuardMode,
+  JobResult,
+  JobRow,
+  JobStatus,
+  LimitNotice,
+  Receipt,
+  ResultKind,
+} from "./docs.ts";
+export {
+  BookmarkDoc,
+  CapacityDoc,
+  HandoffNoteDoc,
+  JobBoardDoc,
+  type JobStop,
+  priorityKey,
+  StopDoc,
+} from "./docs.ts";
+export { LIVE_FIXTURE_ORDER, LIVE_FIXTURE_PAGES } from "./fixture-pages.ts";
 export { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 export {
   createGuardExtension,
@@ -110,6 +158,7 @@ export {
   isDecisionAdapter,
   isGuardMode,
 } from "./guard-settings.ts";
+export { createHandoffNoteExtension, type HandoffNoteDeps } from "./handoff-note.ts";
 export { HarnessSlot, type OpenHarness, SLOT_CLOSE_WAIT_MS } from "./harness-slot.ts";
 export {
   createHeartbeatRoutine,
@@ -123,6 +172,13 @@ export {
   pingRoutineHeartbeat,
 } from "./heartbeat.ts";
 export {
+  HOUSEHOLD_JOB_TOOLS,
+  HOUSEHOLD_TOOL_REFUSAL,
+  type HouseholdAgent,
+  type HouseholdAgentOptions,
+  openHouseholdAgent,
+} from "./household-agent.ts";
+export {
   type BudgetAlertSent,
   type BudgetAlertStatus,
   type BudgetBoard,
@@ -135,8 +191,18 @@ export {
   type HouseholdClient,
   type HouseholdDocument,
   type HouseholdItem,
+  isSharedTitle,
+  JOB_EFFORTS,
+  JOB_PRIORITIES,
   type ReportSpendResult,
+  SHARED_OPS_MAX,
+  type SharedCharge,
+  type SharedOp,
+  type SharedSyncAnswer,
+  type SharedSyncRequest,
+  type SharedSyncRow,
   type SpendReport,
+  TIERS,
 } from "./household-contract.ts";
 export {
   costFromReport,
@@ -145,7 +211,39 @@ export {
   householdCostView,
   rowOf,
 } from "./household-cost.ts";
-export { doneRecord, jobLabel, liveJobs } from "./jobs.ts";
+export {
+  type CorpusCase,
+  type CorpusGroup,
+  type CorpusResult,
+  falsePositiveRate,
+  INJECTION_CORPUS,
+  missRate,
+} from "./injection-corpus.ts";
+export {
+  type BoardState,
+  blockReason,
+  createSharedRow,
+  ENDED,
+  liveRows,
+  markUrgent,
+  moveBefore,
+  placeOf,
+  queueOf,
+  type ReorderAnswer,
+  type ResumeRefusal,
+  restCount,
+  resumeStoppedRow,
+  setDeadline,
+  type WaitingCounts,
+  waitingCounts,
+} from "./job-board.ts";
+export { createJobGate, type JobGateDeps } from "./job-gate.ts";
+export { JobHolds } from "./job-holds.ts";
+export { JOB_KIND } from "./job-task.ts";
+export { createJobToolsExtension, type JobToolsDeps } from "./job-tools.ts";
+export { doneRecord, jobLabel, jobRowLabel, liveJobs } from "./jobs.ts";
+export { ANSWER_MAX_CHARS as JOB_ANSWER_MAX_CHARS } from "./lead-texts.ts";
+export { createJobsExtension, jobSummary } from "./lead-tools.ts";
 export {
   type BudgetLine,
   type BudgetState,
@@ -159,6 +257,7 @@ export {
   type UsageLine,
   type WaitingItem,
 } from "./limits.ts";
+export { failingStreak, nearSame } from "./loop-guard.ts";
 export type { RoleModel } from "./model-map.ts";
 export {
   addGuardUsage,
@@ -184,6 +283,14 @@ export {
   reportFields,
 } from "./open-harness.ts";
 export {
+  createFixtureReaderExtension,
+  createFixtureToolsExtension,
+  FIXTURE_LOOKUP_ERROR,
+  isOutsideAction,
+  readingKindOf,
+} from "./outside-tools.ts";
+export { RECEIPT_KIND, REMOTE_TOOLS } from "./receipts.ts";
+export {
   ARGUMENTS_LIMIT,
   addKnownSecretValues,
   clearKnownSecretValues,
@@ -196,6 +303,7 @@ export {
   setKnownSecretValues,
 } from "./redact.ts";
 export {
+  CAPACITY_REARM_MS,
   CARD_NUMBER_PATTERN,
   DECISION_MODELS,
   DECISION_STATE_LIMIT,
@@ -207,18 +315,23 @@ export {
   DEFAULT_SPECIALIST_MODEL,
   DEVELOPER_ROLE,
   type DecisionAdapter,
+  FIXTURE_SLOW_MS,
   GUARD_USAGE_KEYS,
   HOLD_MS,
+  JOB_TEMPLATES,
   LEAD_ROLE,
   LIMIT_LINES,
   LIMIT_MAX_USD,
   MARK_THRESHOLDS,
+  MEASURED_CAPACITY,
   RELEASE_OWNER_RULES,
   REVIEWER_ROLE,
   SECRET_WORD_PATTERN,
   STARTER_SPECIALISTS,
+  TIER_MODELS,
 } from "./release-defaults.ts";
 export { REMINDER_PREFIX, type ReminderPayload, scheduleReminder } from "./reminder.ts";
+export { createReviewTask, type ReviewTask, reviewModelFor } from "./result-review.ts";
 export {
   createReviewer,
   parseVerdict,
@@ -278,6 +391,16 @@ export {
   secretsReason,
 } from "./secret-tools.ts";
 export { FRAME_TYPES, type Frame, type SessionStream } from "./session-stream.ts";
+export {
+  kickShared,
+  type SharedParts,
+  type SyncOutcome,
+  sharedOpId,
+  syncShared,
+} from "./shared-relay.ts";
+export { payerOf, payerText, type Split, splitCharge } from "./shared-split.ts";
+export { STOP_RUNNING, type StopAnswer, stopJobs } from "./stop.ts";
+export { capOf, isEffort, isTier, templatesOf, tierModelOf } from "./templates.ts";
 export {
   earliestTimer,
   LIVENESS_WAKE_MS,

@@ -1,14 +1,19 @@
 #!/usr/bin/env node
 /**
  * secbot: the owner's command-line client. It talks to the owner's own cell only (the
- * person in the device file). It has no option that chooses a specialist: every chat line goes to
- * the lead, and the lead decides on a hand-off.
+ * person in the device file). It has no option that chooses a job template: every chat line goes
+ * to the lead, and the lead decides which jobs to start.
  *
  *   secbot chat                             (answer a held call: /allow N, /always N, /deny N)
  *   secbot missed
+ *   secbot jobs [--person <name> | --household]   (another person or shared jobs: operator key)
+ *   secbot jobs urgent <#> | deadline <#> YYYY-MM-DD|clear | move <#> --before <#>
+ *   secbot jobs restart <#>
+ *   secbot stop [--all]                     (every cell of the household: operator key)
  *   secbot model list
  *   secbot model set <role> <model-id>
- *   secbot specialist add <name> --instruction "<text>" [--model <model-id>]
+ *   secbot model cap <tier> <usd>
+ *   secbot specialist add <name> --instruction "<text>"   (a job template, on the cheap tier)
  *   secbot device new <name>
  *   secbot rules list | add | remove        (owner rules: --owner --person <name>)
  *   secbot activity [--month YYYY-MM] [--page N]   (another person: --person <name>)
@@ -25,15 +30,17 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { HOUSEHOLD_CELL } from "./cell-names.ts";
 import { CellClient, OperatorClient } from "./client.ts";
 import { activity } from "./commands/activity.ts";
 import { chat } from "./commands/chat.ts";
 import { costHousehold, costOf, costOwn } from "./commands/cost.ts";
 import { deviceNew } from "./commands/device.ts";
+import { jobsBoard, jobsBoardOf, jobsReorder, jobsRestart } from "./commands/jobs.ts";
 import { limits } from "./commands/limits.ts";
 import { missed } from "./commands/missed.ts";
 import { mode } from "./commands/mode.ts";
-import { modelList, modelSet } from "./commands/model.ts";
+import { modelCap, modelList, modelSet } from "./commands/model.ts";
 import {
   deviceTarget,
   type GuardTarget,
@@ -44,6 +51,7 @@ import {
 } from "./commands/rules.ts";
 import { secrets } from "./commands/secrets.ts";
 import { specialistAdd } from "./commands/specialist.ts";
+import { stopAll, stopOwn } from "./commands/stop.ts";
 import { CliError, type Environment } from "./config.ts";
 import { type Io, processIo } from "./io.ts";
 import { WIDTH, wrap } from "./text.ts";
@@ -52,9 +60,16 @@ const USAGE = `usage:
   secbot chat
       in chat, answer a held call: /allow N, /always N, or /deny N
   secbot missed
+  secbot jobs                         list live jobs and jobs from the last 24 h
+  secbot jobs urgent|deadline|move    change a job's place in the queue
+  secbot jobs restart <#>             restart a stopped job
+  secbot stop [--all]                 stop every running job now (--all: owner)
   secbot model list
   secbot model set <role> <model-id>
-  secbot specialist add <name> --instruction "<text>" [--model <model-id>]
+      a role is the lead, a job tier (cheap, mid, frontier), or the reviewer
+  secbot model cap <tier> <usd>
+  secbot specialist add <name> --instruction "<text>"
+      adds a job template; its jobs start on the cheap tier
   secbot device new <name>
   secbot rules list
   secbot rules add <agent> <tool> <permit|ask-first|prohibit> [match]
@@ -73,7 +88,7 @@ const USAGE = `usage:
   secbot limits set <person> <usd>                  (operator key)
   secbot limits developer <usd>                     (operator key)
   secbot limits zone <IANA time zone>               (operator key)
-      above a limit, hand-offs, routines, and reminders wait; chat with the
+      above a limit, jobs, routines, and reminders wait; chat with the
       lead continues; nothing is dropped
   secbot secrets list [--person <name> (operator key)]
   secbot secrets grant <secret> <agent>
@@ -128,6 +143,9 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
         broker: { type: "string" },
         url: { type: "string" },
         header: { type: "string" },
+        all: { type: "boolean" },
+        household: { type: "boolean" },
+        before: { type: "string" },
       },
     });
     const [command, sub, ...rest] = positionals;
@@ -148,6 +166,8 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
     if (command === "model" && sub === "list") return await modelList(await client(), io);
     if (command === "model" && sub === "set")
       return await modelSet(await client(), io, rest[0], rest[1]);
+    if (command === "model" && sub === "cap")
+      return await modelCap(await client(), io, rest[0], rest[1]);
     if (command === "specialist" && sub === "add") {
       return await specialistAdd(await client(), io, rest[0], values.instruction, values.model);
     }
@@ -201,6 +221,31 @@ export async function run(argv: readonly string[], options: RunOptions): Promise
         rest,
         { person: values.person, broker: values.broker, url: values.url, header: values.header },
       );
+    }
+    if (command === "jobs") {
+      if (sub === undefined) {
+        if (values.person !== undefined && values.household === true) {
+          throw new CliError("secbot jobs takes --person <name> or --household, not both", 2);
+        }
+        if (values.person !== undefined || values.household === true) {
+          return await jobsBoardOf(
+            await OperatorClient.from(environment, options.fetch),
+            io,
+            values.person ?? HOUSEHOLD_CELL,
+          );
+        }
+        return await jobsBoard(await client(), io);
+      }
+      if (sub === "urgent" || sub === "deadline" || sub === "move") {
+        return await jobsReorder(await client(), io, sub, rest, values.before);
+      }
+      if (sub === "restart") return await jobsRestart(await client(), io, rest);
+    }
+    if (command === "stop" && sub === undefined) {
+      if (values.all === true) {
+        return await stopAll(await OperatorClient.from(environment, options.fetch), io);
+      }
+      return await stopOwn(await client(), io);
     }
     if (command === "activity" && sub === undefined) {
       const target =

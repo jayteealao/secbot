@@ -1,20 +1,17 @@
 /**
- * Hand-off: the only way a message reaches a specialist. The lead model calls the `handoff` tool
- * with a brief it wrote; nothing in the worker or the CLI routes a message.
+ * The retired hand-off. The lead starts jobs now (lead-tools.ts, job-task.ts); what stays here is
+ * what a cell upgraded with a hand-off in flight needs to finish it once: the specialists' anchor
+ * task and the reporter that delivers a brief and posts the `[handoff <name> answered]` follow-up.
  *
  * Adapted from pi-durable v1.0.3 test/examples/23-subagent-background.ts (MIT, Earendil Works):
- * the `Anchor` and `Reporter` background tasks. Changes: one tool with only a specialist and a
- * brief (no spawn, stop, or status actions), specialists created by the roster, and the reported
- * answers recorded in the cell's `secbot.specialists` session document.
+ * the `Anchor` and `Reporter` background tasks.
  */
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { Type } from "@earendil-works/pi-ai";
 import {
   AssistantEntry,
   type ConversationId,
   defineExtension,
   defineTask,
-  defineTool,
   type Extension,
 } from "@earendil-works/pi-durable";
 import { appendRecord } from "./activity.ts";
@@ -229,76 +226,17 @@ function outcomeText(outcome: string, report: string | undefined): string {
   return "no answer";
 }
 
-/** The lead's note when the brief waits above a limit. */
-export const WAITS_NOTE =
-  "; the person is over their monthly limit, so the brief waits until the limit rises or the month resets";
-
 /**
- * The lead's `handoff` tool and the tasks behind it. Selected by the lead only. The tool returns
- * at once in every case, so chat with the lead never waits on a limit; only the reporter waits.
+ * The retired hand-off's tasks with no tool: registered so a reporter started before an upgrade
+ * still delivers and reports once, and the specialists' anchor tasks still resolve.
  */
-export function createHandoffExtension(
+export function createLegacyHandoffExtension(
   person: string,
   gate: () => BudgetWaiter | undefined = () => undefined,
   timeZone = "UTC",
 ): Extension {
-  const Reporter = createReporter(person, gate, timeZone);
-  const handoff = defineTool({
-    name: "handoff",
-    description:
-      "Brief one of your specialists to work on something in the background. Write a self-contained brief in your own words: what to find out or do, and what the person needs. The tool returns at once; the specialist's answer arrives later as a message that starts with [handoff <name> answered].",
-    parameters: Type.Object({
-      specialist: Type.String({
-        description: "The specialist's name, from the list of specialists.",
-      }),
-      brief: Type.String({ minLength: 1, description: "The brief, written by you." }),
-    }),
-    // A crash mid-call gives the model an interrupted result instead of sending a second brief.
-    replay: "unsafe",
-    execute: async (args, api, context) => {
-      const result = await api.commit(async (tx) => {
-        const roster = await tx.doc(RosterDoc);
-        const record = Object.hasOwn(roster.specialists, args.specialist)
-          ? roster.specialists[args.specialist]
-          : undefined;
-        if (record === undefined) {
-          return {
-            error: `No specialist named ${args.specialist}. Specialists: ${Object.keys(roster.specialists).join(", ")}.`,
-          };
-        }
-        const input = {
-          name: args.specialist,
-          conversationId: record.conversationId,
-          brief: args.brief,
-          startedAt: Date.now(),
-        };
-        const reporter = await tx.createTask(Reporter, input, {
-          ownership: { kind: "conversation" },
-          background: true,
-        });
-        roster.reporters[String(api.taskId)] = reporter;
-        return { reporter };
-      }, context);
-      if ("error" in result) {
-        return { content: [{ type: "text", text: result.error }], isError: true };
-      }
-      logEvent("handoff.started", {
-        cell: person,
-        specialist: args.specialist,
-        reporter_task_id: result.reporter,
-        brief_chars: args.brief.length,
-      });
-      const waits = (await gate()?.isOver(budgetOf(args.specialist), context)) === true;
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Briefed ${args.specialist}; the answer will follow as a message${waits ? WAITS_NOTE : ""}.`,
-          },
-        ],
-        details: { specialist: args.specialist, reporterTaskId: result.reporter },
-      };
-    },
+  return defineExtension({
+    name: "secbot-handoff",
+    tasks: [Anchor, createReporter(person, gate, timeZone)],
   });
-  return defineExtension({ name: "secbot-handoff", tools: [handoff], tasks: [Anchor, Reporter] });
 }

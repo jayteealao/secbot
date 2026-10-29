@@ -15,9 +15,12 @@
  *   POST /lab/guard-bench?examples=1&repeat=R
  *                                           score each tuning example R times (1-3, default 2)
  *                                           and each held-out call once, in order
+ *   POST /lab/guard-bench?corpus=1          check each held-out injection corpus case with the
+ *                                           content check (chunking, the content question, the
+ *                                           threshold), in order
  *   GET  /lab/guard-bench-state             { done, kind, measured, results? }
  *
- * Both runs take `adapter` (clef, clef-flash, or jev). The bench never reads a threshold cap, so it
+ * Every run takes `adapter` (clef, clef-flash, or jev). The bench never reads a threshold cap, so it
  * judges every call on the release thresholds.
  */
 
@@ -36,6 +39,9 @@ import {
   buildDecisionState,
   CARD_NUMBER_PATTERN,
   type CellHarness,
+  type CorpusCase,
+  type CorpusGroup,
+  checkContent,
   createDecisionModel,
   DEFAULT_LEAD_MODEL,
   DEFAULT_SPECIALIST_MODEL,
@@ -47,6 +53,7 @@ import {
   HarnessSlot,
   type HeldOutExample,
   heldOutExamples,
+  INJECTION_CORPUS,
   isDecisionAdapter,
   LEAD_ROLE,
   liveExamples,
@@ -57,6 +64,7 @@ import {
   type Reviewer,
   type Rule,
   SECRET_WORD_PATTERN,
+  TIER_MODELS,
   thresholdFor,
 } from "@secbot/cell-harness";
 import type { CelldCellStorage } from "@secbot/cell-storage";
@@ -434,9 +442,37 @@ const benchReviewer: Reviewer = {
   review: async () => ({ verdict: "allow", reason: "bench", model: "bench/scripted", costUsd: 0 }),
 };
 
+/** One corpus case's check: the outcome (a timeout or an error kept as its own), chunks, cause. */
+export interface CorpusCaseResult {
+  readonly name: string;
+  readonly group: CorpusGroup;
+  readonly label: "injection" | "clean";
+  readonly outcome: "clean" | "hit" | "timeout" | "error";
+  readonly chunks: number;
+  /** The hit's choice or the failure's cause; null for a clean case. */
+  readonly cause: string | null;
+}
+
+/** One corpus case through the content check with `model`; never throws. */
+export async function checkCorpusCase(
+  model: DecisionModel,
+  each: CorpusCase,
+): Promise<CorpusCaseResult> {
+  const base = { name: each.name, group: each.group, label: each.label };
+  try {
+    const verdict = await checkContent(model, { kind: each.kind, tool: "corpus", text: each.text });
+    return verdict.outcome === "clean"
+      ? { ...base, outcome: "clean", chunks: verdict.chunks, cause: null }
+      : { ...base, outcome: verdict.outcome, chunks: verdict.chunks, cause: verdict.cause };
+  } catch {
+    return { ...base, outcome: "error", chunks: 0, cause: "thrown" };
+  }
+}
+
 type RunSpec =
   | { readonly kind: "latency"; readonly calls: number }
-  | { readonly kind: "examples"; readonly repeat: number };
+  | { readonly kind: "examples"; readonly repeat: number }
+  | { readonly kind: "corpus" };
 
 interface LatencyRun {
   readonly kind: "latency";
@@ -459,7 +495,16 @@ interface ExamplesRun {
   timedOut: boolean;
 }
 
-type Run = LatencyRun | ExamplesRun;
+interface CorpusRun {
+  readonly kind: "corpus";
+  readonly results: CorpusCaseResult[];
+  /** The model ids the service returned. */
+  readonly models: Set<string>;
+  done: boolean;
+  timedOut: boolean;
+}
+
+type Run = LatencyRun | ExamplesRun | CorpusRun;
 
 export class GuardBenchCell {
   private readonly slot: HarnessSlot<CellHarness>;
@@ -481,7 +526,9 @@ export class GuardBenchCell {
   private models() {
     const faux = fauxProvider({
       provider: "openrouter",
-      models: [DEFAULT_LEAD_MODEL, DEFAULT_SPECIALIST_MODEL].map((id) => ({ id })),
+      models: [
+        ...new Set([DEFAULT_LEAD_MODEL, DEFAULT_SPECIALIST_MODEL, ...Object.values(TIER_MODELS)]),
+      ].map((id) => ({ id })),
     });
     faux.setResponses(
       Array.from(
@@ -541,6 +588,7 @@ export class GuardBenchCell {
     if (adapter !== undefined) await cell.setDecisionAdapter(adapter);
     const measuring = (await cell.guardMode()).decisionModel;
     if (spec.kind === "examples") return this.startExamples(spec.repeat, measuring);
+    if (spec.kind === "corpus") return this.startCorpus(measuring);
     const run: LatencyRun = {
       kind: "latency",
       target: spec.calls + WARMUP_CALLS,
@@ -633,10 +681,72 @@ export class GuardBenchCell {
     });
   }
 
+  /**
+   * The corpus run: each held-out injection corpus case through the content check with the cell's
+   * key and origin, in order, recording the service's model id; no guard or reviewer takes part.
+   */
+  private startCorpus(adapter: DecisionAdapter): Response {
+    const run: CorpusRun = {
+      kind: "corpus",
+      results: [],
+      models: new Set(),
+      done: false,
+      timedOut: false,
+    };
+    this.run = run;
+    const inner = createDecisionModel(adapter, {
+      apiKey: this.env.OPENROUTER_API_KEY,
+      baseUrl: this.env.OPENROUTER_BASE_URL,
+    });
+    // The same model, recording the dated model id each answer names.
+    const model: DecisionModel = Object.assign(Object.create(inner) as DecisionModel, {
+      checkContent: async (...args: Parameters<DecisionModel["checkContent"]>) => {
+        const answer = await inner.checkContent(...args);
+        run.models.add(answer.model);
+        return answer;
+      },
+    });
+    const deadline = Date.now() + (this.options.deadlineMs ?? RUN_DEADLINE_MS);
+    const work = (async () => {
+      try {
+        for (const each of INJECTION_CORPUS) {
+          if (Date.now() >= deadline) break;
+          run.results.push(await checkCorpusCase(model, each));
+        }
+      } finally {
+        run.timedOut = run.results.length < INJECTION_CORPUS.length;
+        run.done = true;
+      }
+    })();
+    this.state.waitUntil?.(work);
+    return Response.json({
+      started: true,
+      kind: "corpus",
+      cases: INJECTION_CORPUS.length,
+      adapter,
+    });
+  }
+
   /** GET /lab/guard-bench-state. */
   status(): Record<string, unknown> {
     const run = this.run;
     if (run === undefined) return { done: false, measured: 0, started: false };
+    if (run.kind === "corpus") {
+      return {
+        done: run.done,
+        kind: run.kind,
+        measured: run.results.length,
+        ...(run.done
+          ? {
+              results: {
+                cases: run.results,
+                models: [...run.models],
+                timedOut: run.timedOut,
+              },
+            }
+          : {}),
+      };
+    }
     if (run.kind === "examples") {
       return {
         done: run.done,
@@ -682,6 +792,16 @@ export class GuardBenchCell {
       const adapter = url.searchParams.get("adapter") ?? undefined;
       if (adapter !== undefined && !isDecisionAdapter(adapter)) {
         return Response.json({ error: "adapter is clef, clef-flash, or jev" }, { status: 400 });
+      }
+      const corpus = url.searchParams.get("corpus");
+      if (corpus !== null) {
+        if (corpus !== "1" || url.searchParams.has("calls") || url.searchParams.has("examples")) {
+          return Response.json(
+            { error: "send corpus=1 alone, not with calls or examples" },
+            { status: 400 },
+          );
+        }
+        return this.start({ kind: "corpus" }, adapter);
       }
       const examples = url.searchParams.get("examples");
       if (examples !== null) {

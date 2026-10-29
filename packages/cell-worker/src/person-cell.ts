@@ -20,12 +20,14 @@ import { BACKGROUND_CONTEXT as cellContext } from "@earendil-works/chord/context
 import {
   AlwaysNotOffered,
   alarmVerdict,
+  type BoardView,
   CELL_NAME,
   CellAlarm,
   type CellEnv,
   type CellHarness,
   type CostView,
   errorFields,
+  FIXTURE_SLOW_MS,
   type Frame,
   type HeartbeatState,
   HeldCallAnswered,
@@ -37,6 +39,9 @@ import {
   heartbeatState,
   isDecisionAdapter,
   isGuardMode,
+  JOB_ANSWER_MAX_CHARS,
+  JOB_KIND,
+  LIVE_FIXTURE_PAGES,
   logEvent,
   logName,
   MONTH,
@@ -51,6 +56,7 @@ import {
   SecretsRefused,
   SecretsUnavailable,
   type SessionStream,
+  type StopAnswer,
 } from "@secbot/cell-harness";
 import {
   type CellDump,
@@ -82,6 +88,10 @@ export interface HouseholdStubLike extends HouseholdClient {
   history?(document: string, itemId?: string): Promise<unknown>;
   status?(): Promise<{ status: "up"; version: string; roles: string[] }>;
   alarmReport?(): Promise<unknown>;
+  /** The household's shared jobs, as a board view (absent on stubs built before the board). */
+  jobs?(): Promise<BoardView>;
+  /** The owner's stop of the household's shared jobs. */
+  stopJobs?(): Promise<StopAnswer>;
 }
 
 export interface HouseholdNamespaceLike {
@@ -91,6 +101,21 @@ export interface HouseholdNamespaceLike {
 
 export interface PersonCellEnv extends CellEnv, HouseholdClientEnv, SecretsClientEnv {
   readonly HOUSEHOLD_CELL?: HouseholdNamespaceLike;
+  /**
+   * The test cell only: "1" gives every job the fixture page reader and the fixture lookup tools
+   * (one that always fails, one that answers slowly), so a live run can make a job fail, read an
+   * injected page, or stay running. The production config never sets it.
+   */
+  readonly SECBOT_TEST_FIXTURES?: string;
+}
+
+/** The fixture options a test cell opens its harness with; none without the switch. */
+export function testFixturesOf(
+  env: Pick<PersonCellEnv, "SECBOT_TEST_FIXTURES">,
+): Pick<OpenExtras, "fixturePages" | "fixtureTools"> {
+  return env.SECBOT_TEST_FIXTURES === "1"
+    ? { fixturePages: LIVE_FIXTURE_PAGES, fixtureTools: { slowMs: FIXTURE_SLOW_MS } }
+    : {};
 }
 
 /** What the cell gives the harness it opens. */
@@ -100,6 +125,10 @@ export interface OpenExtras {
   readonly onWakeChange: () => void;
   /** Background work of the harness failed; the cell reopens a harness whose session broke. */
   readonly onReport?: (error: unknown) => void;
+  /** The test cell only (SECBOT_TEST_FIXTURES): the fixture pages a job can read. */
+  readonly fixturePages?: Readonly<Record<string, string>>;
+  /** The test cell only (SECBOT_TEST_FIXTURES): the fixture lookup tools' slow wait. */
+  readonly fixtureTools?: { readonly slowMs: number };
 }
 
 /** How long a reopen waits for the broken harness to close before it opens the new one. */
@@ -241,6 +270,38 @@ const answerJson = <T>(
   wrap: (value: T) => unknown = (v) => v,
 ) => (answer.ok ? json(wrap(answer.value), status) : json({ error: answer.error }, answer.status));
 
+const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** A real calendar day written YYYY-MM-DD. */
+export function isDay(value: string): boolean {
+  const parts = DAY.exec(value);
+  if (parts === null) return false;
+  const date = new Date(Date.UTC(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3])));
+  return date.toISOString().slice(0, 10) === value;
+}
+
+/** The reorder a priority body asks for; undefined when it asks for none or for two. */
+export function priorityChange(
+  body: Record<string, unknown>,
+):
+  | { readonly urgent: true }
+  | { readonly deadline: string | null }
+  | { readonly before: number }
+  | undefined {
+  const keys = Object.keys(body);
+  if (keys.length !== 1) return undefined;
+  if (body.urgent === true) return { urgent: true };
+  if ("deadline" in body) {
+    const { deadline } = body;
+    if (deadline === null) return { deadline: null };
+    return typeof deadline === "string" && isDay(deadline) ? { deadline } : undefined;
+  }
+  const { before } = body;
+  return typeof before === "number" && Number.isSafeInteger(before) && before > 0
+    ? { before }
+    : undefined;
+}
+
 /** Reads a JSON body of at most BODY_LIMIT characters; undefined when it is larger or not JSON. */
 async function readJson(request: Request): Promise<Record<string, unknown> | undefined> {
   const declared = Number(request.headers.get("content-length") ?? "0");
@@ -357,6 +418,7 @@ export class PersonCell {
             ...(secrets === undefined ? {} : { secrets }),
             onWakeChange: () => this.rearmSoon(person),
             onReport: (error) => this.reopenAfter(error, person, generation),
+            ...testFixturesOf(this.env),
           }),
         )
         .then(async (cell) => {
@@ -508,6 +570,12 @@ export class PersonCell {
     this.state.waitUntil(work);
   }
 
+  /** Keeps the cell up while work just started runs, and re-arms its alarm for what comes next. */
+  private runBusy(cell: CellHarness): void {
+    this.keepBusy(cell);
+    this.rearmSoon(cell.person);
+  }
+
   /** celld calls this when the alarm is due, also on an idle or evicted cell. */
   async alarm(info?: CelldAlarmInfo): Promise<void> {
     const person = this.storedName();
@@ -554,7 +622,9 @@ export class PersonCell {
           conversationId: record.conversationId,
           background: record.background ?? false,
           state: state.kind,
-          ...(record.kind === "secbot.handoff-reporter" ? { input: record.input } : {}),
+          ...(record.kind === "secbot.handoff-reporter" || record.kind === JOB_KIND
+            ? { input: record.input }
+            : {}),
           ...(record.kind.startsWith("secbot.routine:") &&
           record.state.status !== "terminal" &&
           record.state.status !== "completing"
@@ -581,6 +651,15 @@ export class PersonCell {
         if (typeof body.model !== "string") return json({ error: 'send {"model": "<id>"}' }, 400);
         return json(await cell.setRoleModel(modelRoute[1] ?? "", body.model));
       }
+      const capRoute = /^\/tiers\/([a-z][a-z0-9-]{0,31})\/cap$/.exec(route);
+      if (request.method === "PUT" && capRoute !== null) {
+        const body = await readJson(request);
+        if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+        if (typeof body.usd !== "number" && typeof body.usd !== "string") {
+          return json({ error: 'send {"usd": <amount>}' }, 400);
+        }
+        return json(await cell.setTierCap(capRoute[1] ?? "", body.usd));
+      }
       if (request.method === "POST" && route === "/specialists") {
         const body = await readJson(request);
         if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
@@ -590,7 +669,8 @@ export class PersonCell {
         await cell.addSpecialist({
           name: body.name,
           instruction: body.instruction,
-          ...(typeof body.model === "string" ? { model: body.model } : {}),
+          // Any model the body names is refused, whatever its type: a template starts on a tier.
+          ...(Object.hasOwn(body, "model") ? { model: String(body.model) } : {}),
         });
         this.rearmSoon(person);
         return json({ name: body.name, status: "added" }, 201);
@@ -602,6 +682,29 @@ export class PersonCell {
       const approvalRoute = /^\/approvals\/([1-9][0-9]{0,8})$/.exec(route);
       if (request.method === "POST" && approvalRoute !== null) {
         return this.answerRoute(request, cell, Number(approvalRoute[1]), device);
+      }
+      if (request.method === "GET" && route === "/jobs") return json(await cell.jobsView());
+      if (request.method === "POST" && route === "/stop") {
+        const stopped = await cell.stop("person");
+        // Aborted work settles in the background; keep the cell up until it has.
+        this.runBusy(cell);
+        return json(stopped);
+      }
+      const jobRestartRoute = /^\/jobs\/([1-9][0-9]{0,8})\/restart$/.exec(route);
+      if (request.method === "POST" && jobRestartRoute !== null) {
+        return this.jobRestartRoute(cell, Number(jobRestartRoute[1]));
+      }
+      const jobPriorityRoute = /^\/jobs\/([1-9][0-9]{0,8})\/priority$/.exec(route);
+      if (request.method === "POST" && jobPriorityRoute !== null) {
+        return this.jobPriorityRoute(request, cell, Number(jobPriorityRoute[1]));
+      }
+      const sharedRoute = /^\/jobs\/([1-9][0-9]{0,8})\/(join|decline)$/.exec(route);
+      if (request.method === "POST" && sharedRoute !== null) {
+        return this.sharedAnswerRoute(cell, Number(sharedRoute[1]), sharedRoute[2] === "join");
+      }
+      const jobAnswerRoute = /^\/jobs\/([1-9][0-9]{0,8})\/answer$/.exec(route);
+      if (request.method === "POST" && jobAnswerRoute !== null) {
+        return this.jobAnswerRoute(request, cell, Number(jobAnswerRoute[1]));
       }
       if (route === "/secrets" || route === "/secrets/grants") {
         return this.secretsRoute(request, cell, person, route);
@@ -716,8 +819,7 @@ export class PersonCell {
     try {
       const answered = await cell.answer(number, choice, { device });
       // The waiting call continues in this activation; keep the cell up while it runs.
-      this.keepBusy(cell);
-      this.rearmSoon(cell.person);
+      this.runBusy(cell);
       return json({
         number,
         status: answered.call.status,
@@ -738,6 +840,123 @@ export class PersonCell {
       if (error instanceof RefusedChange) return json({ error: `refused: ${error.message}` }, 400);
       throw error;
     }
+  }
+
+  /**
+   * The person's answer to a job's question that the lead put to them: `{"text": "<1 to 2,000
+   * characters>"}`. A job waiting on it goes on in this activation.
+   */
+  private async jobAnswerRoute(request: Request, cell: CellHarness, n: number): Promise<Response> {
+    const body = await readJson(request);
+    if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+    const text = typeof body.text === "string" ? body.text.trim() : "";
+    if (text.length === 0 || text.length > JOB_ANSWER_MAX_CHARS) {
+      return json({ error: `send {"text": "<1 to ${JOB_ANSWER_MAX_CHARS} characters>"}` }, 400);
+    }
+    const answered = await cell.answerJob(n, text);
+    if (!answered.ok) {
+      return json({ error: answered.message }, answered.reason === "no-job" ? 404 : 409);
+    }
+    // The job continues in this activation; keep the cell up while it runs.
+    this.runBusy(cell);
+    return json({ job: answered.job, title: answered.title });
+  }
+
+  /**
+   * The person joins or declines a shared job the other person proposed. The answer goes to the
+   * household, never to the lead; only a join starts the job there.
+   */
+  private async sharedAnswerRoute(cell: CellHarness, n: number, join: boolean): Promise<Response> {
+    const answered = await cell.answerShared(n, join);
+    if (!answered.ok) return json({ error: answered.message }, 404);
+    this.rearmSoon(cell.person);
+    return json({
+      job: answered.job,
+      title: answered.title,
+      from: answered.from,
+      payer: answered.payer,
+    });
+  }
+
+  /**
+   * The person restarts a stopped or blocked job from its kept brief and transcript. It does not
+   * use the job's own restart.
+   */
+  private async jobRestartRoute(cell: CellHarness, n: number): Promise<Response> {
+    const resumed = await cell.resumeJob(n, "person");
+    if (!resumed.ok) {
+      const { reason } = resumed;
+      if (reason === "no-job") return json({ error: `no stopped job #${n}`, reason }, 404);
+      const error =
+        reason === "locked"
+          ? "a stop is running; try again"
+          : reason === "paused"
+            ? `job ${n} is paused, not stopped`
+            : `no stopped job #${n}`;
+      if (reason !== "paused") return json({ error, reason }, 409);
+      // A paused job is the lead's to go on with; the answer names it for the person.
+      const title = (await cell.board()).jobs[String(n)]?.title ?? "";
+      return json({ error, reason, job: n, title }, 409);
+    }
+    // The resumed job runs in this activation; keep the cell up while it does.
+    this.runBusy(cell);
+    return json({ job: resumed.job, title: resumed.title });
+  }
+
+  /**
+   * The person changes a live job's place in the queue: `{"urgent": true}`, `{"deadline":
+   * "YYYY-MM-DD" | null}`, or `{"before": <job>}`.
+   */
+  private async jobPriorityRoute(request: Request, cell: CellHarness, n: number) {
+    const body = await readJson(request);
+    if (body === undefined) return json({ error: `the body is over ${BODY_LIMIT} bytes` }, 413);
+    const change = priorityChange(body);
+    if (change === undefined) {
+      return json(
+        { error: 'send {"urgent": true}, {"deadline": "YYYY-MM-DD" | null}, or {"before": <job>}' },
+        400,
+      );
+    }
+    const answer = await cell.reorderJob(n, change);
+    if (!answer.ok) {
+      return answer.reason === "no-job"
+        ? json({ error: `no job #${answer.job}`, reason: answer.reason, job: answer.job }, 404)
+        : json(
+            { error: `job ${answer.job} has ended`, reason: answer.reason, job: answer.job },
+            409,
+          );
+    }
+    const { ok: _ok, ...placed } = answer;
+    return json(placed);
+  }
+
+  /** RPC (operator routes): a person's job board, for the owner. */
+  async jobsOf(person: string): Promise<GuardAnswer<BoardView & { operator: true }>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => ({ ...(await cell.jobsView()), operator: true as const }));
+  }
+
+  /**
+   * RPC (operator routes): the owner sets or clears this person cell's measured number (jobs at
+   * once) and its date; the operator route has checked both.
+   */
+  async setCapacityOf(
+    person: string,
+    measured: number | null,
+    at: number | null,
+  ): Promise<GuardAnswer<{ person: string; measured: number | null; at: number | null }>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => ({ person, ...(await cell.setCapacity(measured, at)) }));
+  }
+
+  /** RPC (operator routes): the owner's stop of this person's jobs and the lead's turn. */
+  async stopOf(person: string): Promise<GuardAnswer<StopAnswer>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => {
+      const stopped = await cell.stop("owner");
+      this.runBusy(cell);
+      return stopped;
+    });
   }
 
   /** RPC (operator routes): both levels of a person's rules. */
@@ -804,8 +1023,7 @@ export class PersonCell {
     return guardAnswer(async () => {
       const result = await cell.setLimit(usd, "owner");
       // Work waiting above the old limit may run now; keep the cell up while it does.
-      this.keepBusy(cell);
-      this.rearmSoon(person);
+      this.runBusy(cell);
       return { person, ...result };
     });
   }
@@ -814,8 +1032,7 @@ export class PersonCell {
   async refreshBudget(person: string): Promise<void> {
     const cell = await this.cell(person);
     await cell.refreshHouseholdBudget(householdClientOf(this.env));
-    this.keepBusy(cell);
-    this.rearmSoon(person);
+    this.runBusy(cell);
   }
 
   /** RPC (operator routes): the owner switches the decision model; the next call uses it. */
@@ -867,6 +1084,9 @@ export class PersonCell {
         messages,
         remaining,
       } = await cell.missed(device);
+      // Job questions put to the person, read before the missed page goes out.
+      const questions = await cell.openQuestions();
+      const offers = await cell.openOffers();
       const shown = new Set(waiting.map((call) => call.number));
       for (const call of waiting) deliver({ type: "held", call, count: waiting.length });
       const noticed = new Set(notices.map((notice) => notice.seq));
@@ -881,6 +1101,16 @@ export class PersonCell {
         });
       }
       delivered = messages.length;
+      // After the missed messages (the lead's words that ask come first), each open question.
+      const asked = new Set(questions.map((question) => question.job));
+      for (const question of questions) {
+        deliver({ type: "question", job: question.job, title: question.title });
+      }
+      // Then each shared-job offer the lead gave the person and they have not answered.
+      const offered = new Set(offers.map((offer) => offer.job));
+      for (const { job, title, from, payer } of offers) {
+        deliver({ type: "shared", job, title, from, payer });
+      }
       // Held frames follow, minus what the missed page carried. While older messages are still left
       // for `missed`, a held answer stays there too: sending it would move the cursor past them.
       // This runs without an await, so nothing is added to `held` meanwhile.
@@ -901,6 +1131,10 @@ export class PersonCell {
           // Already sent above with the waiting calls.
         } else if (frame.type === "notice" && noticed.has(frame.notice.seq)) {
           // Already sent above with the unseen notices.
+        } else if (frame.type === "question" && asked.has(frame.job)) {
+          // Already sent above with the open questions.
+        } else if (frame.type === "shared" && offered.has(frame.job)) {
+          // Already sent above with the open offers.
         } else {
           deliver(frame);
         }
@@ -952,7 +1186,8 @@ export class PersonCell {
     try {
       const cell = await this.cell(person);
       await this.ensureStream(cell);
-      const { submissionId } = await this.submitInput(person, input.text, input.requestId);
+      // The person's line steers a busy lead: it is answered first, and the turn is bookmarked.
+      const { submissionId } = await this.submitInput(person, input.text, input.requestId, "steer");
       logEvent("input.submitted", {
         cell: person,
         device,
@@ -996,14 +1231,18 @@ export class PersonCell {
     }
   }
 
-  /** RPC for other cells and later inputs (such as mail): submit into the lead, unchanged. */
+  /**
+   * RPC for other cells and later inputs (such as mail): submit into the lead, unchanged. Such an
+   * input waits for a busy lead's turn to end unless the caller asks it to steer.
+   */
   async submitInput(
     person: string,
     text: string,
     requestId: string,
+    whenBusy: "steer" | "followUp" = "followUp",
   ): Promise<{ submissionId: number }> {
     const cell = await this.cell(person);
-    const submission = await cell.submit(text, requestId);
+    const submission = await cell.submit(text, requestId, { whenBusy });
     this.keepBusy(cell);
     return { submissionId: Number(submission.id) };
   }

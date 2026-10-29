@@ -18,9 +18,10 @@ import {
   LAPSED_TEXT,
   NOT_OFFERED_OWNER,
   type SetTimer,
+  summaryOf,
   USED_TEXT,
 } from "../src/approvals.ts";
-import { ApprovalDoc, ApprovalsDoc, RosterDoc } from "../src/docs.ts";
+import { ApprovalDoc, ApprovalsDoc } from "../src/docs.ts";
 import { HOLD_MS } from "../src/release-defaults.ts";
 import {
   createFauxGateway,
@@ -34,6 +35,7 @@ import {
   type TestCell,
   until,
 } from "./fixtures.ts";
+import { toolResultsOf } from "./job-helpers.ts";
 
 /**
  * A message whose text starts with `CALL` lists tool calls, one per line: `CALL <tool> <json>`. The
@@ -106,26 +108,30 @@ const toolResults = (t: TestCell) =>
     .filter((r) => r.role === "lead" && r.last?.role === "toolResult")
     .map((r) => r.lastText);
 
-// The guard's records: finished hand-off jobs also write a record (kind job), not counted here.
+// The guard's records: finished jobs also write a record (kind job), not counted here.
 const records = async (t: TestCell): Promise<ActivityRecord[]> =>
   (await t.cell.activity({ limit: 200 })).records.filter((record) => record.kind !== "job");
 
 const events = (spy: { mock: { calls: unknown[][] } }, name: string) =>
   loggedEvents(spy.mock.calls).filter((event) => event.event === name);
 
-const reporters = async (t: TestCell) =>
-  Object.keys((await t.cell.harness.snapshot(RosterDoc, BACKGROUND_CONTEXT))?.reporters ?? {})
-    .length;
+/** How many jobs the lead started. */
+const reporters = async (t: TestCell) => Object.keys((await t.cell.board()).jobs).length;
 
-const LEAD_ASKS_HANDOFF = { agent: "lead", tool: "handoff", verdict: "ask-first" } as const;
+const LEAD_ASKS_JOB = { agent: "lead", tool: "start_job", verdict: "ask-first" } as const;
 
 describe("a held call", () => {
   it("waits for the person: a chat line is queued, allow once runs it once, deny refuses with the person's name", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const t = await open();
-    await t.cell.addRule("person", LEAD_ASKS_HANDOFF);
+    await t.cell.addRule("person", LEAD_ASKS_JOB);
     await t.cell.submit(
-      CALL("handoff", { specialist: "research", brief: "Find trains.", api_key: SECRET }),
+      CALL("start_job", {
+        template: "research",
+        title: "job",
+        brief: "Find trains.",
+        api_key: SECRET,
+      }),
       "c-1",
     );
     await until(async () => (await t.cell.heldCalls()).length === 1);
@@ -133,26 +139,31 @@ describe("a held call", () => {
     expect(held).toMatchObject({
       number: 1,
       agent: "lead",
-      tool: "handoff",
-      summary: "handoff -> research",
-      arguments: { specialist: "research", brief: "Find trains.", api_key: "[redacted]" },
-      reason: "your rule: lead handoff (any) -> ask first",
+      tool: "start_job",
+      summary: "start_job -> research",
+      arguments: {
+        template: "research",
+        title: "job",
+        brief: "Find trains.",
+        api_key: "[redacted]",
+      },
+      reason: "your rule: lead start_job (any) -> ask first",
       reasonSource: "your-rule",
       status: "pending",
       always: {
         offered: true,
         rule: {
           agent: "lead",
-          tool: "handoff",
+          tool: "start_job",
           verdict: "permit",
-          match: { kind: "exact", field: "specialist", value: "research" },
+          match: { kind: "exact", field: "template", value: "research" },
         },
         note: null,
       },
     });
     expect(held?.expiresAt).toBe((held?.heldAt ?? 0) + HOLD_MS);
     expect(events(log, "approval.held")).toEqual([
-      expect.objectContaining({ cell: "owner", role: "lead", tool: "handoff", call_no: 1 }),
+      expect.objectContaining({ cell: "owner", role: "lead", tool: "start_job", call_no: 1 }),
     ]);
 
     // A plain chat line while the call is held goes to the lead (queued), and is not an answer.
@@ -167,14 +178,19 @@ describe("a held call", () => {
     await t.cell.answer(1, "allow", { device: "laptop" });
     await until(async () => (await reporters(t)) === 1);
     await until(() => t.gateway.requests.some((r) => r.lastText.includes("are you still there?")));
-    expect(toolResults(t)[0]).not.toContain("blocked");
+    // The chat line steered the lead's turn, so read the allowed call's result from its transcript.
+    await until(async () => (await toolResultsOf(t.cell.root)).length === 1);
+    expect((await toolResultsOf(t.cell.root))[0]).toContain("job 1 started");
     expect(await reporters(t)).toBe(1);
     expect(events(log, "approval.answered")).toEqual([
       expect.objectContaining({ answer: "allow", late: false, device: "laptop", call_no: 1 }),
     ]);
 
     // A second held call, denied.
-    await t.cell.submit(CALL("handoff", { specialist: "health", brief: "Sleep tips." }), "c-3");
+    await t.cell.submit(
+      CALL("start_job", { template: "health", title: "job", brief: "Sleep tips." }),
+      "c-3",
+    );
     await until(async () => (await t.cell.heldCalls()).length === 1);
     await t.cell.answer(2, "deny", { device: "laptop" });
     await until(() => toolResults(t).some((text) => text.includes("denied by owner")));
@@ -199,16 +215,19 @@ describe("a held call", () => {
   it("allow always runs the call, adds the person rule, and the next match is not held; under an owner ask-first rule it is not offered", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const t = await open();
-    await t.cell.addRule("person", LEAD_ASKS_HANDOFF);
-    await t.cell.submit(CALL("handoff", { specialist: "research", brief: "One." }), "a-1");
+    await t.cell.addRule("person", LEAD_ASKS_JOB);
+    await t.cell.submit(
+      CALL("start_job", { template: "research", title: "job", brief: "One." }),
+      "a-1",
+    );
     await until(async () => (await t.cell.heldCalls()).length === 1);
     const answered = await t.cell.answer(1, "always", { device: "laptop" });
     expect(answered.rule).toMatchObject({
       agent: "lead",
-      tool: "handoff",
+      tool: "start_job",
       verdict: "permit",
       source: "allow-always",
-      match: { kind: "exact", field: "specialist", value: "research" },
+      match: { kind: "exact", field: "template", value: "research" },
     });
     await until(async () => (await reporters(t)) === 1);
     expect((await t.cell.rules()).person.filter((r) => r.source === "allow-always")).toHaveLength(
@@ -219,31 +238,37 @@ describe("a held call", () => {
     );
 
     // The next matching call is decided by the added rule: no hold, a verdict on layer rule.
-    await t.cell.submit(CALL("handoff", { specialist: "research", brief: "Two." }), "a-2");
+    await t.cell.submit(
+      CALL("start_job", { template: "research", title: "job", brief: "Two." }),
+      "a-2",
+    );
     await until(async () => (await reporters(t)) === 2);
     const [newest] = await records(t);
     expect(newest).toMatchObject({
       kind: "verdict",
       verdict: "allowed",
       layer: "rule",
-      reason: "your rule: lead handoff (specialist = research) -> permit",
+      reason: "your rule: lead start_job (template = research) -> permit",
     });
     expect((await t.cell.harness.snapshot(ApprovalsDoc, BACKGROUND_CONTEXT))?.nextNumber).toBe(2);
 
     // An owner ask-first rule: allow always is not offered, and refused when asked for.
     await t.cell.addRule("owner", {
       agent: "all",
-      tool: "handoff",
+      tool: "start_job",
       verdict: "ask-first",
-      match: { kind: "exact", field: "specialist", value: "developer" },
+      match: { kind: "exact", field: "template", value: "developer" },
     });
-    await t.cell.submit(CALL("handoff", { specialist: "developer", brief: "Three." }), "a-3");
+    await t.cell.submit(
+      CALL("start_job", { template: "developer", title: "job", brief: "Three." }),
+      "a-3",
+    );
     await until(async () => (await t.cell.heldCalls()).length === 1);
     const [owner] = await t.cell.heldCalls();
     expect(owner).toMatchObject({
       number: 2,
       reasonSource: "owner-rule",
-      reason: "owner rule: all handoff (specialist = developer) -> ask first",
+      reason: "owner rule: all start_job (template = developer) -> ask first",
       always: { offered: false, rule: null, note: NOT_OFFERED_OWNER },
     });
     await expect(t.cell.answer(2, "always", { device: "laptop" })).rejects.toBeInstanceOf(
@@ -328,8 +353,13 @@ describe("binding an answer to its request", () => {
     const t = await open({
       guard: { requestIdOf: (call, api) => String(call.arguments.rid ?? api.conversationId) },
     });
-    await t.cell.addRule("person", LEAD_ASKS_HANDOFF);
-    const call = CALL("handoff", { specialist: "research", brief: "Trains.", rid: "R-1" });
+    await t.cell.addRule("person", LEAD_ASKS_JOB);
+    const call = CALL("start_job", {
+      template: "research",
+      title: "job",
+      brief: "Trains.",
+      rid: "R-1",
+    });
     await t.cell.submit(call, "b-1");
     await until(async () => (await t.cell.heldCalls()).length === 1);
     await t.cell.answer(1, "allow", { device: "laptop" });
@@ -344,7 +374,12 @@ describe("binding an answer to its request", () => {
     expect(await reporters(t)).toBe(1);
 
     // Denied under R-2, then retried: refused with the denial, no prompt.
-    const denied = CALL("handoff", { specialist: "health", brief: "Sleep.", rid: "R-2" });
+    const denied = CALL("start_job", {
+      template: "health",
+      title: "job",
+      brief: "Sleep.",
+      rid: "R-2",
+    });
     await t.cell.submit(denied, "b-3");
     await until(async () => (await t.cell.heldCalls()).length === 1);
     await t.cell.answer(2, "deny", { device: "laptop" });
@@ -399,8 +434,11 @@ describe("lapse after 24 hours", () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const clock = controlledClock();
     const t = await open({ now: clock.now, guard: { setTimer: clock.setTimer } });
-    await t.cell.addRule("person", LEAD_ASKS_HANDOFF);
-    await t.cell.submit(CALL("handoff", { specialist: "research", brief: "Late." }), "l-1");
+    await t.cell.addRule("person", LEAD_ASKS_JOB);
+    await t.cell.submit(
+      CALL("start_job", { template: "research", title: "job", brief: "Late." }),
+      "l-1",
+    );
     await until(async () => (await t.cell.heldCalls()).length === 1);
     clock.advance(HOLD_MS);
     await until(() => toolResults(t).length === 1);
@@ -425,7 +463,10 @@ describe("lapse after 24 hours", () => {
     ]);
 
     // Answered at 23 h 59 m: it runs.
-    await t.cell.submit(CALL("handoff", { specialist: "research", brief: "Early." }), "l-2");
+    await t.cell.submit(
+      CALL("start_job", { template: "research", title: "job", brief: "Early." }),
+      "l-2",
+    );
     await until(async () => (await t.cell.heldCalls()).length === 1);
     clock.advance(HOLD_MS - 60_000);
     await t.cell.answer(2, "allow", { device: "laptop" });
@@ -437,8 +478,11 @@ describe("lapse after 24 hours", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
     const clock = controlledClock();
     const t = await open({ now: clock.now, guard: { setTimer: clock.setTimer } });
-    await t.cell.addRule("person", LEAD_ASKS_HANDOFF);
-    await t.cell.submit(CALL("handoff", { specialist: "research", brief: "Closed." }), "z-1");
+    await t.cell.addRule("person", LEAD_ASKS_JOB);
+    await t.cell.submit(
+      CALL("start_job", { template: "research", title: "job", brief: "Closed." }),
+      "z-1",
+    );
     await until(async () => (await t.cell.heldCalls()).length === 1);
     // Closing aborts the waiting hook, but that is not an aborted job: the call stays pending.
     await t.cell.close();
@@ -463,19 +507,22 @@ describe("precedence and aborts", () => {
   it("refuses an allowed call that an owner prohibit added during the wait matches", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const t = await open();
-    await t.cell.addRule("person", LEAD_ASKS_HANDOFF);
-    await t.cell.submit(CALL("handoff", { specialist: "research", brief: "X." }), "p-1");
+    await t.cell.addRule("person", LEAD_ASKS_JOB);
+    await t.cell.submit(
+      CALL("start_job", { template: "research", title: "job", brief: "X." }),
+      "p-1",
+    );
     await until(async () => (await t.cell.heldCalls()).length === 1);
     await t.cell.addRule("owner", {
       agent: "all",
-      tool: "handoff",
+      tool: "start_job",
       verdict: "prohibit",
-      match: { kind: "exact", field: "specialist", value: "research" },
+      match: { kind: "exact", field: "template", value: "research" },
     });
     await t.cell.answer(1, "allow", { device: "laptop" });
     await until(() => toolResults(t).length === 1);
     expect(toolResults(t)[0]).toContain(
-      "Tool call blocked: owner rule: all handoff (specialist = research) -> prohibit",
+      "Tool call blocked: owner rule: all start_job (template = research) -> prohibit",
     );
     expect(await reporters(t)).toBe(0);
     const [refused] = await records(t);
@@ -485,8 +532,11 @@ describe("precedence and aborts", () => {
   it("lapses the held call at once when the agent's job is aborted", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const t = await open();
-    await t.cell.addRule("person", LEAD_ASKS_HANDOFF);
-    await t.cell.submit(CALL("handoff", { specialist: "research", brief: "Stop." }), "x-1");
+    await t.cell.addRule("person", LEAD_ASKS_JOB);
+    await t.cell.submit(
+      CALL("start_job", { template: "research", title: "job", brief: "Stop." }),
+      "x-1",
+    );
     await until(async () => (await t.cell.heldCalls()).length === 1);
     await t.cell.root.abort(BACKGROUND_CONTEXT);
     await until(async () => {
@@ -507,7 +557,7 @@ describe("precedence and aborts", () => {
 });
 
 describe("other work while a call is held (the cell's half)", () => {
-  it("keeps the lead, another specialist, and a reminder working while a specialist's call waits", async () => {
+  it("keeps the lead, another job, and a reminder working while a job's call waits", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
     const t = await open();
     await t.cell.addRule("person", {
@@ -516,18 +566,26 @@ describe("other work while a call is held (the cell's half)", () => {
       verdict: "ask-first",
     });
     await t.cell.submit(
-      CALL("handoff", { specialist: "research", brief: CALL("search_history", { query: "x" }) }),
+      CALL("start_job", {
+        template: "research",
+        title: "job",
+        brief: CALL("search_history", { query: "x" }),
+      }),
       "o-1",
     );
     await until(async () => (await t.cell.heldCalls()).length === 1);
     const [held] = await t.cell.heldCalls();
     expect(held).toMatchObject({ agent: "research", tool: "search_history" });
 
-    // The lead answers a chat line; another specialist's job finishes; a reminder fires.
+    // The lead answers a chat line; another job finishes; a reminder fires.
     const at = new Date(Date.now() + 700).toISOString();
     await t.cell.submit(
       [
-        CALL("handoff", { specialist: "household", brief: CALL("household_read", {}) }),
+        CALL("start_job", {
+          template: "household",
+          title: "job",
+          brief: CALL("household_read", {}),
+        }),
         CALL("set_reminder", { at, text: "bins out" }),
       ].join("\n"),
       "o-2",
@@ -554,9 +612,9 @@ describe("redaction", () => {
   it("keeps a secret argument out of the record, the activity, and every event; the binding is a digest", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const t = await open();
-    await t.cell.addRule("person", LEAD_ASKS_HANDOFF);
+    await t.cell.addRule("person", LEAD_ASKS_JOB);
     await t.cell.submit(
-      CALL("handoff", { specialist: "research", brief: "Go.", api_key: SECRET }),
+      CALL("start_job", { template: "research", title: "job", brief: "Go.", api_key: SECRET }),
       "s-1",
     );
     await until(async () => (await t.cell.heldCalls()).length === 1);
@@ -593,3 +651,14 @@ function hookApi(t: TestCell, taskId: string): HookApi {
     memo: (() => Promise.resolve(undefined)) as HookApi["memo"],
   } as HookApi;
 }
+
+describe("held-call labels", () => {
+  it("names a job start by its template, and an old hand-off by its specialist", () => {
+    expect(summaryOf("start_job", { template: "research", title: "trains" })).toBe(
+      "start_job -> research",
+    );
+    expect(summaryOf("handoff", { specialist: "research" })).toBe("handoff -> research");
+    expect(summaryOf("start_job", {})).toBe("start_job");
+    expect(summaryOf("set_reminder", { template: "x" })).toBe("set_reminder");
+  });
+});

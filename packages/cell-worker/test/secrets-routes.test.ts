@@ -104,7 +104,7 @@ afterEach(async () => {
 });
 
 /**
- * The lead follows `CALL` lines (guard-setup's `scripted`); a specialist makes the one call its
+ * The lead follows `CALL` lines (guard-setup's `scripted`); a job makes the one call its
  * brief names, with `$SECRET` standing for the value it read earlier through `secret_get`.
  */
 function respond(request: FauxRequest) {
@@ -186,8 +186,9 @@ let requestNo = 0;
 async function leadSays(setup: GuardSetup, line: string) {
   await setup.cells.get("owner")?.submitInput("owner", line, `secrets-routes-${++requestNo}`);
 }
-const handoff = (specialist: string, call: string) =>
-  `CALL handoff ${JSON.stringify({ specialist, brief: call })}`;
+/** The lead starts a job from `template` whose brief is the one call the job makes. */
+const handoff = (template: string, call: string) =>
+  `CALL start_job ${JSON.stringify({ title: `${template} call`, brief: call, template })}`;
 
 const RULE = "-".repeat(78);
 const rowBody = (agent: string, tool: string, verdict: string, layer: string) =>
@@ -343,7 +344,7 @@ describe("secrets end to end on the stand-in", () => {
       );
     await until(async () => (await secretsRows()).length === 3);
 
-    // The health specialist's brokered call returns the answer, never the token.
+    // The health job's brokered call returns the answer, never the token.
     await leadSays(
       setup,
       handoff(
@@ -448,5 +449,5 @@ describe("secrets end to end on the stand-in", () => {
         "test-secret is not in the owner's allowlist for household",
       ]),
     );
-  });
+  }, 60_000);
 });

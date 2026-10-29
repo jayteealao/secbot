@@ -9,6 +9,7 @@ import {
   type CellHarness,
   type OpenCellOptions,
   openCellHarness,
+  type SetTimer,
 } from "@secbot/cell-harness";
 import {
   createFauxGateway,
@@ -66,8 +67,21 @@ export async function guardSetup(
   options: {
     readonly guard?: OpenCellOptions["guard"];
     readonly respond?: Responder;
+    /** The cost of one answered model step, in USD, by model id (default 0, as the faux model). */
+    readonly stepCostUsd?: (modelId: string) => number;
     /** A household cell (with its budget board) behind the person cells' binding. */
     readonly household?: boolean;
+    /**
+     * The household's people: the household cell runs their shared jobs on the faux gateway, and
+     * each person cell knows the other person to share with.
+     */
+    readonly persons?: readonly string[];
+    /** The fetch the household cell uses for its outbound calls (heartbeat pings). */
+    readonly householdFetch?: typeof fetch;
+    /** The timer the household's shared jobs check both people's limits again with. */
+    readonly householdSetTimer?: SetTimer;
+    /** Extra worker settings per person cell (for example a household reached over HTTP). */
+    readonly personEnv?: (person: string) => Record<string, string>;
     /** The person cells' environment (for example the alert stand-in's settings). */
     readonly cellEnv?: CellEnv;
     /** The fetch the person cells use for alerts. */
@@ -84,11 +98,38 @@ export async function guardSetup(
      * the global WebSocketPair and reads the frames from its server socket.
      */
     readonly sockets?: boolean;
+    /** Fixed web pages a job can read with `read_fixture_page`. */
+    readonly fixturePages?: OpenCellOptions["fixturePages"];
+    /** The test cell's lookup tools in the person cells, with this wait (read at each call). */
+    readonly fixtureTools?: OpenCellOptions["fixtureTools"];
+    /** The test-cell switch in the household cell, with this slow lookup wait. */
+    readonly householdFixtures?: { readonly slowMs: number };
   } = {},
 ): Promise<GuardSetup> {
+  const gateway = createFauxGateway(
+    options.respond ?? scripted,
+    options.stepCostUsd === undefined ? {} : { stepCostUsd: options.stepCostUsd },
+  );
   const household =
     options.household === true
-      ? new HouseholdCell({ storage: new FakeCelldStorage() }, {})
+      ? new HouseholdCell(
+          { storage: new FakeCelldStorage() },
+          options.householdFixtures === undefined ? {} : { SECBOT_TEST_FIXTURES: "1" },
+          options.persons === undefined
+            ? {}
+            : {
+                persons: options.persons,
+                ...(options.householdFixtures === undefined
+                  ? {}
+                  : { fixtureTools: options.householdFixtures }),
+                models: gateway.models,
+                ...(options.now === undefined ? {} : { now: options.now }),
+                ...(options.householdFetch === undefined ? {} : { fetch: options.householdFetch }),
+                ...(options.householdSetTimer === undefined
+                  ? {}
+                  : { setTimer: options.householdSetTimer }),
+              },
+        )
       : undefined;
   const householdBinding =
     household === undefined
@@ -122,7 +163,6 @@ export async function guardSetup(
             get: () => secrets as unknown as SecretsStubLike,
           },
         };
-  const gateway = createFauxGateway(options.respond ?? scripted);
   const opened: CellHarness[] = [];
   const cells = new Map<string, PersonCell>();
   const byPerson = new Map<string, CellHarness>();
@@ -147,7 +187,7 @@ export async function guardSetup(
           : {};
       cell = new PersonCell(
         { storage, ...socketState },
-        { ...householdBinding, ...secretsBinding },
+        { ...householdBinding, ...secretsBinding, ...options.personEnv?.(person) },
         async (storage, name, extras) => {
           const harness = await openCellHarness(storage, {
             person: name,
@@ -158,6 +198,13 @@ export async function guardSetup(
             ...(extras.secrets === undefined ? {} : { secrets: extras.secrets }),
             ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
             ...(options.now === undefined ? {} : { now: options.now }),
+            // The test-cell switch (SECBOT_TEST_FIXTURES in personEnv) gives the fixture pages and
+            // lookup tools; a test's own pages win.
+            ...(extras.fixturePages === undefined ? {} : { fixturePages: extras.fixturePages }),
+            ...(extras.fixtureTools === undefined ? {} : { fixtureTools: extras.fixtureTools }),
+            ...(options.fixturePages === undefined ? {} : { fixturePages: options.fixturePages }),
+            ...(options.fixtureTools === undefined ? {} : { fixtureTools: options.fixtureTools }),
+            ...(options.persons === undefined ? {} : { persons: options.persons }),
             // A passing decision model unless a test gives its own: the suites that are not about
             // the model layers keep their request counts.
             guard: { decision: passingDecision, ...options.guard },

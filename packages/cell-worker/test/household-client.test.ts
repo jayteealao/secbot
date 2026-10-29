@@ -19,7 +19,11 @@ afterEach(async () => {
 });
 
 function householdFleet() {
-  const household = new HouseholdCell({ storage: new FakeCelldStorage() }, {}, { pollMs: 5 });
+  const household = new HouseholdCell(
+    { storage: new FakeCelldStorage() },
+    {},
+    { pollMs: 5, persons: ["owner", "second"] },
+  );
   households.push(household);
   const env = {
     SECBOT_OPERATOR_KEY: KEY,
@@ -32,9 +36,14 @@ function householdFleet() {
   } as WorkerEnv;
   const keys: string[] = [];
   let dropNextAnswer = false;
+  let busyNext = false;
   const fetcher: typeof fetch = async (input, init) => {
     const request = new Request(input, init);
     keys.push(request.headers.get(OPERATOR_HEADER) ?? "");
+    if (busyNext) {
+      busyNext = false;
+      return new Response("busy", { status: 503 });
+    }
     const response = await route(request, env);
     if (dropNextAnswer) {
       dropNextAnswer = false;
@@ -49,8 +58,26 @@ function householdFleet() {
     dropNext: () => {
       dropNextAnswer = true;
     },
+    busyNext: () => {
+      busyNext = true;
+    },
   };
 }
+
+const proposal = {
+  kind: "propose" as const,
+  opId: "owner:shared:1",
+  person: "owner",
+  other: "second",
+  local: 3,
+  title: "plan the May trip",
+  brief: "Plan the May trip for both of us.",
+  priority: "routine" as const,
+  deadline: null,
+  tier: "cheap" as const,
+  effort: "medium" as const,
+  estimateUsd: 0.25,
+};
 
 describe("household client over HTTP", () => {
   it("lets the second cell read the owner cell's item, and applies a retried change once", async () => {
@@ -155,5 +182,37 @@ describe("household client over HTTP", () => {
     });
     expect((await viaBinding?.read("list"))?.items).toEqual([]);
     expect(householdClientOf({})).toBeUndefined();
+  });
+
+  it("carries a shared-job exchange across fleets, retried once after a 503 and applied once", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const fleet = householdFleet();
+    const owner = householdClientOf(
+      { SECBOT_HOUSEHOLD_URL: URL_BASE, SECBOT_OPERATOR_KEY: KEY },
+      fleet.fetcher,
+    );
+    fleet.busyNext();
+    const first = await owner?.sharedSync?.({ person: "owner", ops: [proposal] });
+    expect(first?.acks).toEqual([{ opId: "owner:shared:1", household: 1 }]);
+    fleet.dropNext();
+    const again = await owner?.sharedSync?.({ person: "owner", ops: [proposal] });
+    expect(again?.acks).toEqual([{ opId: "owner:shared:1", household: 1 }]);
+    expect(again?.rows.map((row) => row.household)).toEqual([1]);
+  });
+
+  it("carries a shared-job exchange over the binding, and refuses one without the operator key", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fleet = householdFleet();
+    const viaBinding = householdClientOf({
+      HOUSEHOLD_CELL: { idFromName: (name) => name, get: () => fleet.household },
+    });
+    const answer = await viaBinding?.sharedSync?.({ person: "second", ops: [] });
+    expect(answer).toEqual({ acks: [], rows: [] });
+    const refused = await fleet.fetcher(`${URL_BASE}/internal/household/shared-sync`, {
+      method: "POST",
+      body: JSON.stringify({ person: "owner", ops: [] }),
+    });
+    expect(refused.status).toBe(401);
   });
 });

@@ -322,10 +322,11 @@ const row = (
 ) => ({ at: time, agent, tool, verdict, layer, reason, arguments: {}, cost: 0, ...extra });
 
 // The designed `secbot activity` rows: answers, holds, shadow, rule refusals, lapses, the secrets
-// cell, and a running job (live, listed at its start time).
+// cell, and a running job (live, listed at its start time). A job start reads
+// `start_job -> <template>`; a hand-off held before jobs keeps `handoff -> <specialist>`.
 const STORED = [
-  row(at(14, 2), "lead", "handoff", "allowed", "person", "allowed once by sam", {
-    arguments: { specialist: "research" },
+  row(at(14, 2), "lead", "start_job", "allowed", "person", "allowed once by sam", {
+    arguments: { template: "research", title: "train times" },
   }),
   row(at(13, 58), "lead", "handoff", "held", "rule", "your rule: lead handoff (any) -> ask first", {
     arguments: { specialist: "research" },
@@ -378,7 +379,7 @@ describe("secbot activity", () => {
         `${"ACTIVITY  sam  October 2026".padEnd(61)}[ total: $11.52 ]`,
         "------------------------------------------------------------------------------",
         "TIME   AGENT      TOOL OR JOB              VERDICT       LAYER          COST",
-        "14:02  lead       handoff -> research      allowed       person    $0.0000",
+        "14:02  lead       start_job -> research    allowed       person    $0.0000",
         "         allowed once by sam",
         "13:58  lead       handoff -> research      held          rule      $0.0000",
         "         your rule: lead handoff (any) -> ask first",

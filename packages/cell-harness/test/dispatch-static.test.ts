@@ -1,46 +1,60 @@
 // In the dispatch code (the CLI and the cell worker), no flag, keyword, pattern, or
-// specialist name routes a message; routing exists only as the lead's handoff tool. The scan reads
+// template name routes a message; routing exists only as the lead's start_job tool. The scan reads
 // every source file of both packages; planted samples prove each rule can fail.
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { STARTER_SPECIALISTS } from "../src/release-defaults.ts";
+import { JOB_TEMPLATES } from "../src/release-defaults.ts";
 
 const packages = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const DISPATCH_DIRS = [join(packages, "cli", "src"), join(packages, "cell-worker", "src")];
 /**
  * Not dispatch code: the storage conformance run on the test cell compares assertion errors and
  * carries no messages; the test cell's durability lab holds a scripted model that stands in for
- * the lead's decision, like the tests' responders, and is never deployed to a person cell. The
+ * the lead's decision, like the tests' responders, and is never deployed to a person cell; the test
+ * cell's capacity bench is the same (its scripted lead starts research jobs to measure memory and
+ * latency, and it runs only in the test-cell bundle). The
  * held-call answer parser (the CLI's `held.ts`) sends an exact `/allow N`, `/always N`, or
  * `/deny N` line to the cell's approval route, never to any agent, and leaves every other line to
- * go to the lead unchanged; `held-chat.test.ts` proves both halves. The CLI's `budget-names.ts`
+ * go to the lead unchanged; `held-chat.test.ts` proves both halves. The job-answer parser (the
+ * CLI's `job-answer.ts`) does the same for an exact `/answer <#> <text>`: it goes to the cell's
+ * job answer route, never to any agent, and every other line goes to the lead unchanged;
+ * `cli.test.ts` and `job-question-chat.test.ts` prove both halves. The shared-job answer parser
+ * (the CLI's `shared-confirm.ts`) does the same for an exact `/join <#>` or `/decline <#>`: it goes
+ * to the cell's join or decline route, never to any agent; a look-alike is not sent, and every other
+ * line goes to the lead unchanged; `shared-confirm-chat.test.ts` proves both halves. The CLI's `budget-names.ts`
  * holds only the developer budget's name, which the cost and limits commands print and type; it
  * names a budget and routes nothing. The CLI's `secret-kinds.ts` holds only the broker kinds
  * (`health`, `production`) that `secbot secrets add --broker` types; a kind names the service the
- * secrets cell calls, and routes nothing.
+ * secrets cell calls, and routes nothing. The CLI's `cell-names.ts` holds only the household cell's name,
+ * which `secbot jobs --household` reads a board of; the name is also a template name, but it names a
+ * cell to read and routes nothing.
  */
 const NOT_DISPATCH = new Set([
   "budget-names.ts",
+  "capacity-bench.ts",
   "cell-assertions.ts",
+  "cell-names.ts",
   "conformance-cell.ts",
   "durability-lab.ts",
   "held.ts",
+  "job-answer.ts",
   "secret-kinds.ts",
+  "shared-confirm.ts",
 ]);
 
-const names = STARTER_SPECIALISTS.map((specialist) => specialist.name).join("|");
+const names = JOB_TEMPLATES.map((template) => template.name).join("|");
 const MESSAGE = "text|message|content|line|input|prompt|brief";
 
 export const RULES: readonly { readonly name: string; readonly pattern: RegExp }[] = [
   {
-    name: "a specialist name in dispatch code",
+    name: "a template name in dispatch code",
     pattern: new RegExp(`["'\`](${names})["'\`]`),
   },
   {
     name: "a CLI option that chooses a target",
-    pattern: /\b(to|specialist|route|agent|target|via|handoff)\s*:\s*\{\s*type\s*:/,
+    pattern: /\b(to|specialist|template|job|route|agent|target|via|handoff)\s*:\s*\{\s*type\s*:/,
   },
   {
     name: "a keyword or pattern test on message text",
@@ -72,7 +86,7 @@ async function sourceFiles(directory: string): Promise<string[]> {
     .map((entry) => join(entry.parentPath, entry.name));
 }
 
-describe("routing is only the lead's handoff tool", () => {
+describe("routing is only the lead's start_job tool", () => {
   it("finds no routing in the CLI or the cell worker", async () => {
     const files = (await Promise.all(DISPATCH_DIRS.map(sourceFiles))).flat();
     expect(files.length).toBeGreaterThan(8);
@@ -88,6 +102,7 @@ describe("routing is only the lead's handoff tool", () => {
     ['if (text.includes("recipe")) target = "household";', "keyword"],
     ["const ROUTE = /tax|invoice/; if (ROUTE.test(message)) send(1);", "pattern"],
     ['options: { to: { type: "string" } }', "flag"],
+    ['options: { template: { type: "string" } }', "template flag"],
     ['await cell.submitTo("research", line);', "name"],
     ["await harness.conversation(roster.specialists[name].conversationId).submit(x);", "direct"],
     ["if (input.startsWith('/research')) forward();", "slash command"],

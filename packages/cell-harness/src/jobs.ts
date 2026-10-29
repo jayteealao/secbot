@@ -1,5 +1,6 @@
 /**
- * Jobs in the activity view: hand-offs (the reporter task, handoff.ts) and routine runs (each
+ * Jobs in the activity view: board jobs (job-task.ts), hand-offs still draining after an upgrade
+ * (the reporter task, handoff.ts), and routine runs (each
  * reminder included, routines.ts). A job that ends writes one stored activity record of kind `job`
  * in the commit that ends it, so it is kept with no pruning like every other record. A job that is
  * running or waiting is read live from the harness's task list at request time: pi-durable lists
@@ -21,7 +22,8 @@ import {
 } from "@earendil-works/pi-durable";
 import type { ActivityRecord } from "./activity.ts";
 import { shortText } from "./budget-gate.ts";
-import { type BudgetName, BudgetWaitsDoc, JobsDoc } from "./docs.ts";
+import { type BudgetName, BudgetWaitsDoc, JobBoardDoc, JobsDoc } from "./docs.ts";
+import { ENDED } from "./job-board.ts";
 import { conversationTotal } from "./month-ledger.ts";
 import { redactText } from "./redact.ts";
 import { ROUTINE_KIND_PREFIX } from "./wake-times.ts";
@@ -44,6 +46,16 @@ export function jobLabel(what: string): string {
   const label = words.length === 0 ? head : `${head}: ${words.join(" ")}`;
   if (label.length <= LABEL_WIDTH) return label;
   // Cut at the last whole word that fits; a single long word is cut at the width.
+  const cut = label.slice(0, LABEL_WIDTH + 1);
+  const space = cut.lastIndexOf(" ");
+  return (space > head.length + 1 ? cut.slice(0, space) : cut.slice(0, LABEL_WIDTH)).trimEnd();
+}
+
+/** A board job's label: `job <n>: <title>`, cut to LABEL_WIDTH at a whole word. */
+export function jobRowLabel(n: number, title: string): string {
+  const head = `job ${n}`;
+  const label = `${head}: ${title.trim().split(/\s+/).join(" ")}`.trimEnd();
+  if (label.length <= LABEL_WIDTH) return label;
   const cut = label.slice(0, LABEL_WIDTH + 1);
   const space = cut.lastIndexOf(" ");
   return (space > head.length + 1 ? cut.slice(0, space) : cut.slice(0, LABEL_WIDTH)).trimEnd();
@@ -269,6 +281,32 @@ export async function liveJobs(
         }),
       );
     }
+  }
+  // Board jobs: a live row is running, or waiting when its job task waits above a limit.
+  const board = await harness.snapshot(JobBoardDoc, context);
+  for (const row of Object.values(board?.jobs ?? {})) {
+    if (ENDED.has(row.status)) continue;
+    const taskId = row.taskId === null ? undefined : String(row.taskId);
+    const wait = taskId !== undefined && Object.hasOwn(waits, taskId) ? waits[taskId] : undefined;
+    const total =
+      row.conversationId === null
+        ? 0
+        : conversationTotal(await harness.snapshot(UsageDoc, row.conversationId, context));
+    rows.push(
+      liveRecord(taskId ?? `job-${row.number}`, {
+        at: row.createdAt,
+        agent: row.template,
+        tool: jobRowLabel(row.number, row.title),
+        state: wait === undefined ? "running" : "waiting",
+        reason:
+          wait !== undefined
+            ? waitText(wait, timeZone)
+            : row.status === "queued"
+              ? "queued"
+              : `working on ${row.tier}`,
+        cost: Math.max(row.cost, total),
+      }),
+    );
   }
   return rows.sort((a, b) => b.at - a.at);
 }

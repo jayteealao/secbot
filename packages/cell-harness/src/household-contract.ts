@@ -5,6 +5,25 @@
  * use one definition.
  */
 
+/** The job tiers, cheapest first; the household checks a shared job's tier against these. */
+export const TIERS = ["cheap", "mid", "frontier"] as const;
+/** The efforts the lead can ask for. */
+export const JOB_EFFORTS = ["low", "medium", "high"] as const;
+/** A job's priorities, as the board orders them. */
+export const JOB_PRIORITIES = ["urgent", "deadline", "routine", "research"] as const;
+/** The most operations one shared-job exchange carries; a person cell sends no more at once. */
+export const SHARED_OPS_MAX = 50;
+
+/**
+ * Whether a shared job's title is one line with no brackets or control characters. The other
+ * person's lead reads it inside a bracketed notice, so a title cannot close that notice and add an
+ * order of its own; the lead's tool and the household both refuse any other title.
+ */
+export function isSharedTitle(title: string): boolean {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+  return !/[[\]\u0000-\u001f\u007f]/.test(title);
+}
+
 /** A cell name: owner, second, household, and later cells. */
 export const CELL_NAME = /^[a-z][a-z0-9-]{0,31}$/;
 
@@ -125,4 +144,103 @@ export interface HouseholdClient {
   /** The owner changes a household setting; the answer is the new settings. */
   setBudget?(change: Partial<BudgetSettings>): Promise<BudgetSettings>;
   alertSent?(outcome: BudgetAlertSent): Promise<void>;
+  /** One shared-job exchange: this person's operations in, this person's shared jobs out. */
+  sharedSync?(request: SharedSyncRequest): Promise<SharedSyncAnswer>;
+}
+
+/**
+ * One operation a person cell sends the household about a shared job. Each carries an operation id,
+ * so an exchange sent again after a crash or a lost answer applies it once.
+ */
+export type SharedOp =
+  | {
+      readonly kind: "propose";
+      readonly opId: string;
+      readonly person: string;
+      /** The other person, whose yes the job needs. */
+      readonly other: string;
+      /** The job's number on the requesting person's board. */
+      readonly local: number;
+      readonly title: string;
+      readonly brief: string;
+      readonly priority: (typeof JOB_PRIORITIES)[number];
+      readonly deadline: string | null;
+      readonly tier: (typeof TIERS)[number];
+      readonly effort: (typeof JOB_EFFORTS)[number];
+      readonly estimateUsd: number;
+    }
+  | {
+      readonly kind: "answer";
+      readonly opId: string;
+      readonly person: string;
+      readonly household: number;
+      /** The job's number on the answering person's board. */
+      readonly local: number;
+      readonly join: boolean;
+    }
+  | {
+      readonly kind: "restart";
+      readonly opId: string;
+      readonly person: string;
+      readonly household: number;
+      readonly note: string;
+    }
+  | {
+      readonly kind: "resume";
+      readonly opId: string;
+      readonly person: string;
+      readonly household: number;
+    }
+  | { readonly kind: "stop"; readonly opId: string; readonly person: string };
+
+/** One exchange of a person cell with the household about its shared jobs. */
+export interface SharedSyncRequest {
+  readonly person: string;
+  readonly ops: readonly SharedOp[];
+}
+
+/** One charge of a shared job's cost to one person. */
+export type SharedCharge = {
+  /** Unique per job, settlement, and person: a person books each id once. */
+  readonly id: string;
+  readonly person: string;
+  readonly usd: number;
+  readonly at: number;
+  readonly split: "half" | "all";
+};
+
+/** A shared job as one person sees it, from the household's board. */
+export interface SharedSyncRow {
+  readonly household: number;
+  readonly requester: string;
+  readonly other: string;
+  readonly title: string;
+  readonly consent: "asked" | "joined" | "declined";
+  readonly status: string;
+  readonly pause: { readonly reason: string; readonly at: number; readonly detail: string } | null;
+  readonly block: { readonly cause: string; readonly at: number } | null;
+  readonly waitingBudget: boolean;
+  readonly tier: (typeof TIERS)[number];
+  readonly effort: { readonly requested: (typeof JOB_EFFORTS)[number]; readonly applied: string };
+  readonly attempts: { readonly raises: number; readonly restarts: number };
+  readonly cost: number;
+  readonly cap: number;
+  readonly estimateUsd: number;
+  /** Who pays from this person's side now. */
+  readonly payer: "half" | "you" | "them";
+  /** This person's number for the job, or null when they have not answered an offer yet. */
+  readonly local: number | null;
+  readonly result: { readonly kind: string; readonly text: string; readonly at: number } | null;
+  /** This person's charges for the job, oldest first. */
+  readonly charges: readonly SharedCharge[];
+}
+
+/** The household's answer: one ack per operation, and every shared job of the person. */
+export interface SharedSyncAnswer {
+  readonly acks: readonly {
+    readonly opId: string;
+    readonly household?: number;
+    readonly error?: string;
+  }[];
+  readonly rows: readonly SharedSyncRow[];
 }

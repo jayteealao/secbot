@@ -1,19 +1,17 @@
-// The activity view's jobs, month total, and retention on the stand-in: a hand-off job shows
-// running with its cost so far and is stored once as done with the specialist's spend for it; a
-// job above the limit shows waiting; two overlapping hand-offs to one specialist add up to its
-// spend; a reminder shows waiting until its time and is stored as done; a routine that spends
-// nothing (the heartbeat) is never listed; a restart stores no second done record; records older
-// than 90 days are still listed; and the page total is the month ledger's spend.
+// The activity view's jobs, month total, and retention on the stand-in: a board job shows
+// running with its cost so far and is stored once as done with its conversation's spend; a job
+// above the limit shows waiting; a reminder shows waiting until its time and is stored as done; a
+// routine that spends nothing (the heartbeat) is never listed; a restart stores no second done
+// record; records older than 90 days are still listed; and the page total is the month ledger's.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { EntryRecord } from "@earendil-works/pi-durable";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ActivityRecord } from "../src/activity.ts";
 import { leadMessageOf } from "../src/delivery.ts";
-import { BudgetWaitsDoc, RosterDoc } from "../src/docs.ts";
-import { handoffWhat, jobLabel, REPORTER_KIND } from "../src/jobs.ts";
-import { readMonth } from "../src/month-ledger.ts";
+import { jobRowLabel } from "../src/jobs.ts";
 import { defineRoutine } from "../src/routines.ts";
 import {
+  addJobSpend,
   addSpend,
   createFauxGateway,
   type FauxRequest,
@@ -24,7 +22,7 @@ import {
   type TestCell,
   until,
 } from "./fixtures.ts";
-import { BRIEF, handoffResponder } from "./responders.ts";
+import { createHold, jobResponder, RESEARCH_JOB } from "./responders.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -33,7 +31,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function leadTexts(t: TestCell): Promise<string[]> {
+async function _leadTexts(t: TestCell): Promise<string[]> {
   const page = await t.cell.root.entries({}, 500, undefined, BACKGROUND_CONTEXT);
   return [...page.items]
     .reverse()
@@ -44,30 +42,18 @@ async function leadTexts(t: TestCell): Promise<string[]> {
 const jobs = async (t: TestCell): Promise<ActivityRecord[]> =>
   (await t.cell.activity({ limit: 200 })).records.filter((record) => record.kind === "job");
 
-const LABEL = jobLabel(handoffWhat("research", BRIEF));
+const LABEL = jobRowLabel(1, "comparing direct flights to Lisbon in May");
 
-/** A research specialist that answers only once `release()` is called. */
-function heldResearch() {
-  let release: () => void = () => {};
-  const released = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const responder = async (request: FauxRequest) => {
-    if (request.role === "research") await released;
-    return handoffResponder(request);
-  };
-  return { responder, release: () => release() };
-}
-
-describe("hand-off jobs in activity", () => {
+describe("board jobs in activity", () => {
   it("shows a running job with its cost so far, then stores it once as done with its cost", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    const research = heldResearch();
-    test = await openTestCell({ gateway: createFauxGateway(research.responder) });
+    const hold = createHold();
+    hold.hold("research");
+    test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
     const t = test;
-    await (await t.cell.submit("Find out about fasting for me", "job-1")).wait(BACKGROUND_CONTEXT);
-    await until(() => t.gateway.requests.some((request) => request.role === "research"));
-    await addSpend(t.cell, 0.131, { role: "research" });
+    await (await t.cell.submit(RESEARCH_JOB, "job-1")).wait(BACKGROUND_CONTEXT);
+    await until(() => hold.waiting("research") === 1);
+    await addJobSpend(t.cell, 1, 0.131);
 
     const running = await t.cell.activity();
     expect(running.live).toHaveLength(1);
@@ -77,16 +63,14 @@ describe("hand-off jobs in activity", () => {
       tool: LABEL,
       verdict: "running",
       layer: "job",
-      reason: "step 1 of 2: research is working",
+      reason: "working on mid",
     });
-    expect(running.live[0]?.cost).toBeCloseTo(0.131, 10);
-    expect(LABEL).toBe("job: Summarize what is");
+    expect(running.live[0]?.cost).toBeGreaterThanOrEqual(0.131);
+    expect(LABEL).toBe("job 1: comparing direct");
 
-    research.release();
-    await until(async () => (await leadTexts(t)).some((text) => text.startsWith("Research says")));
-    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
-    const done = await t.cell.activity();
-    expect(done.live).toEqual([]);
+    hold.release("research");
+    await until(async () => (await t.cell.board()).jobs["1"]?.result != null);
+    expect((await t.cell.activity()).live).toEqual([]);
     const stored = await jobs(t);
     expect(stored).toHaveLength(1);
     expect(stored[0]).toMatchObject({
@@ -95,19 +79,21 @@ describe("hand-off jobs in activity", () => {
       tool: LABEL,
       verdict: "done",
       layer: "job",
-      reason: "answered the lead",
+      reason: "answered; waits for the lead",
     });
     expect(stored[0]?.key).toMatch(/^job:\d+$/);
-    expect(stored[0]?.cost).toBeCloseTo(0.131, 10);
+    expect(stored[0]?.cost).toBeGreaterThanOrEqual(0.131);
+    expect(stored[0]?.cost).toBeLessThan(0.14);
+    expect(stored[0]?.cost).toBe((await t.cell.board()).jobs["1"]?.cost);
   }, 30_000);
 
   it("shows a job above the limit as waiting, and stores it as done after a raise", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    test = await openTestCell({ gateway: createFauxGateway(handoffResponder) });
+    test = await openTestCell({ gateway: createFauxGateway(jobResponder) });
     const t = test;
     await t.cell.setLimit(1, "owner");
     await addSpend(t.cell, 1.2);
-    await (await t.cell.submit("Find out about fasting for me", "wait-1")).wait(BACKGROUND_CONTEXT);
+    await (await t.cell.submit(RESEARCH_JOB, "wait-1")).wait(BACKGROUND_CONTEXT);
     await until(async () => (await t.cell.waiting()).length === 1);
     const { live } = await t.cell.activity();
     expect(live).toHaveLength(1);
@@ -115,109 +101,28 @@ describe("hand-off jobs in activity", () => {
     expect(live[0]?.reason).toMatch(/^waits above your limit since \d\d:\d\d$/);
 
     await t.cell.setLimit(5, "owner");
-    await until(async () => (await leadTexts(t)).some((text) => text.startsWith("Research says")));
-    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    await until(async () => (await t.cell.board()).jobs["1"]?.result != null);
     expect((await t.cell.activity()).live).toEqual([]);
     expect((await jobs(t)).map((record) => record.verdict)).toEqual(["done"]);
   }, 30_000);
 
-  it("adds up two overlapping hand-offs to one specialist to that specialist's spend", async () => {
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    let release: () => void = () => {};
-    const released = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const responder = async (request: FauxRequest) => {
-      if (request.role === "research") {
-        await released;
-        return fauxAssistantMessage([fauxText("research finding: evidence is mixed.")]);
-      }
-      if (request.last?.role === "toolResult") return fauxAssistantMessage([fauxText("Asked.")]);
-      if (request.lastText === "two") {
-        return fauxAssistantMessage(
-          [
-            fauxToolCall("handoff", { specialist: "research", brief: "trains to Leeds" }),
-            fauxToolCall("handoff", { specialist: "research", brief: "buses to Leeds" }),
-          ],
-          { stopReason: "toolUse" },
-        );
-      }
-      return fauxAssistantMessage([fauxText("Noted.")]);
-    };
-    test = await openTestCell({ gateway: createFauxGateway(responder) });
-    const t = test;
-    await (await t.cell.submit("two", "two-1")).wait(BACKGROUND_CONTEXT);
-    await until(async () => (await t.cell.activity()).live.length === 2);
-    await until(() => t.gateway.requests.some((request) => request.role === "research"));
-    await addSpend(t.cell, 0.3, { role: "research" });
-    release();
-    await until(async () => (await jobs(t)).length === 2);
-    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
-    const spend = await readMonth(t.cell.harness, Date.now(), "UTC", BACKGROUND_CONTEXT);
-    const sum = (await jobs(t)).reduce((all, record) => all + record.cost, 0);
-    expect(spend.person.byRole.research).toBeCloseTo(0.3, 10);
-    expect(sum).toBeCloseTo(0.3, 10);
-  }, 30_000);
-
-  it("keeps a running job's cost when a waiting job to the same specialist is stopped", async () => {
-    vi.spyOn(console, "log").mockImplementation(() => {});
-    const research = heldResearch();
-    test = await openTestCell({ gateway: createFauxGateway(research.responder) });
-    const t = test;
-    await (await t.cell.submit("Find out about fasting for me", "run-1")).wait(BACKGROUND_CONTEXT);
-    await until(() => t.gateway.requests.some((request) => request.role === "research"));
-    // Above the limit, a second hand-off to research waits before it starts.
-    await t.cell.setLimit(1, "owner");
-    await addSpend(t.cell, 1.2);
-    await (await t.cell.submit("More on fasting, please", "run-2")).wait(BACKGROUND_CONTEXT);
-    await until(async () => (await t.cell.waiting()).length === 1);
-    // The running job's work so far, then the waiting job is stopped.
-    await addSpend(t.cell, 0.3, { role: "research" });
-    const waits = (await t.cell.harness.snapshot(BudgetWaitsDoc, BACKGROUND_CONTEXT))?.tasks ?? {};
-    const waiting = (await t.cell.harness.inspect(BACKGROUND_CONTEXT)).tasks.find(
-      ({ record }) => record.kind === REPORTER_KIND && Object.hasOwn(waits, String(record.id)),
-    );
-    if (waiting === undefined) throw new Error("no waiting hand-off");
-    await t.cell.harness.abortTask(waiting.record.id, BACKGROUND_CONTEXT);
-    await until(async () => (await jobs(t)).some((record) => record.reason === "stopped"));
-
-    await t.cell.setLimit(5, "owner");
-    research.release();
-    await until(async () => (await jobs(t)).length === 2);
-    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
-    const stored = await jobs(t);
-    const stopped = stored.find((record) => record.reason === "stopped");
-    const answered = stored.find((record) => record.reason === "answered the lead");
-    expect(stopped?.cost).toBe(0);
-    expect(answered?.cost).toBeCloseTo(0.3, 10);
-    const spend = await readMonth(t.cell.harness, Date.now(), "UTC", BACKGROUND_CONTEXT);
-    expect(stored.reduce((all, record) => all + record.cost, 0)).toBeCloseTo(
-      spend.person.byRole.research ?? 0,
-      10,
-    );
-  }, 30_000);
-
   it("stores one done record when the cell restarts as the job ends", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
-    test = await openTestCell({ gateway: createFauxGateway(handoffResponder) });
+    test = await openTestCell({ gateway: createFauxGateway(jobResponder) });
     const t = test;
-    await (await t.cell.submit("Find out about fasting for me", "rerun-1")).wait(
-      BACKGROUND_CONTEXT,
-    );
-    const roster = await t.cell.harness.snapshot(RosterDoc, BACKGROUND_CONTEXT);
-    const researchId = roster?.specialists.research?.conversationId;
-    if (researchId === undefined) throw new Error("no research specialist");
-    // Close as soon as the specialist's answer is committed, before or after the job's last commit.
+    await (await t.cell.submit(RESEARCH_JOB, "rerun-1")).wait(BACKGROUND_CONTEXT);
+    // Close as soon as the job's answer is committed, before or after the job's result commit.
     await until(async () => {
-      const conversation = await t.cell.harness.conversation(researchId, BACKGROUND_CONTEXT);
+      const id = (await t.cell.board()).jobs["1"]?.conversationId;
+      if (id === null || id === undefined) return false;
+      const conversation = await t.cell.harness.conversation(id, BACKGROUND_CONTEXT);
       const page = await conversation?.entries({}, 10, undefined, BACKGROUND_CONTEXT);
       return (page?.items ?? []).some((entry) => entry.kind === "pi.assistant");
     });
     await t.reopen();
     await until(async () => (await jobs(t)).length > 0);
-    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
     await t.reopen();
-    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    await until(async () => (await t.cell.board()).jobs["1"]?.result != null);
     expect(await jobs(t)).toHaveLength(1);
     expect((await t.cell.activity()).live).toEqual([]);
   }, 30_000);

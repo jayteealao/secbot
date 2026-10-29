@@ -1,7 +1,8 @@
 // The test-cell worker: the person-cell routes, the household and secrets cells, the in-cell storage
-// conformance run, the durability lab, the guard bench, and the fake health target for the
-// secrets cell's broker.
+// conformance run, the durability lab, the guard bench, the capacity bench, and the fake health
+// target for the secrets cell's broker.
 import { logEvent } from "@secbot/cell-harness";
+import { CapacityBenchCell } from "./capacity-bench.ts";
 import { ConformanceCell } from "./conformance-cell.ts";
 import { DurabilityLabCell } from "./durability-lab.ts";
 import { GuardBenchCell } from "./guard-bench.ts";
@@ -16,6 +17,7 @@ import {
 
 export type { DurableObjectNamespaceLike, DurableObjectStubLike } from "./routes.ts";
 export {
+  CapacityBenchCell,
   ConformanceCell,
   DurabilityLabCell,
   GuardBenchCell,
@@ -28,6 +30,7 @@ export interface ConformanceEnv extends Partial<WorkerEnv> {
   readonly CONFORMANCE: DurableObjectNamespaceLike;
   readonly LAB?: LabNamespaceLike;
   readonly GUARD_BENCH?: LabNamespaceLike;
+  readonly CAPACITY_BENCH?: LabNamespaceLike;
 }
 
 const NO_PERSON_CELL: DurableObjectNamespaceLike = {
@@ -78,6 +81,17 @@ export default {
         return Response.json({ error: "no GUARD_BENCH binding" }, { status: 503 });
       }
       return env.GUARD_BENCH.get(env.GUARD_BENCH.idFromName("bench")).fetch(request);
+    }
+    if (url.pathname.startsWith("/lab/capacity")) {
+      // The capacity bench starts live jobs (paid model calls): only the operator key reaches it.
+      if (!(await hasOperatorKey(request, env))) {
+        logEvent("ops.refused", { route: url.pathname, reason: "operator_key" }, "warn");
+        return Response.json({ error: "refused: operator_key" }, { status: 401 });
+      }
+      if (env.CAPACITY_BENCH === undefined) {
+        return Response.json({ error: "no CAPACITY_BENCH binding" }, { status: 503 });
+      }
+      return env.CAPACITY_BENCH.get(env.CAPACITY_BENCH.idFromName("capacity")).fetch(request);
     }
     if (url.pathname.startsWith("/lab/")) {
       if (env.LAB === undefined) return Response.json({ error: "no LAB binding" }, { status: 503 });

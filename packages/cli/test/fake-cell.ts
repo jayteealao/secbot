@@ -79,6 +79,10 @@ export interface FakeCell {
   held: unknown[];
   /** The answer route: number -> [status, body]; an unknown number answers 404. */
   answers: Record<number, [number, unknown]>;
+  /** The job answer route: job -> [status, body]; an unknown job answers 404. */
+  jobAnswers: Record<number, [number, unknown]>;
+  /** The shared-job join and decline routes: `<join|decline>:<job>` -> [status, body]; else 404. */
+  sharedAnswers: Record<string, [number, unknown]>;
   /** The guard routes: both rule levels, the activity answer, and a refusal for the next add. */
   rules: { owner: Record<string, unknown>[]; person: Record<string, unknown>[]; timeZone: string };
   activity: Record<string, unknown>;
@@ -109,8 +113,36 @@ export interface FakeCell {
   secrets: { name: string; kind: string; grants: string[] }[];
   /** When set, the next secrets route answers [status, error] (a refusal, or 503 unavailable). */
   secretsFailure: [number, string] | undefined;
+  /** `GET /jobs`, and `GET /ops/jobs?cell=<c>` (with that person and `operator: true`). */
+  jobsView: Record<string, unknown>;
+  /** The priority route: job -> [status, body]; an unknown job answers 404 `no job #<n>`. */
+  priorityAnswers: Record<number, [number, unknown]>;
+  /** The restart route: job -> [status, body]; an unknown job answers 404. */
+  restartAnswers: Record<number, [number, unknown]>;
+  /** `POST /stop`. */
+  stopAnswer: { jobs: number; turn: boolean; running?: number };
+  /** `POST /ops/stop`: the answer, or a refusal status. */
+  opsStop: Record<string, unknown> | number;
   close(): Promise<void>;
 }
+
+/** The board view of a person with no jobs. */
+export const emptyView = (person: string): Record<string, unknown> => ({
+  person,
+  mode: "shadow",
+  live: 0,
+  waiting: 0,
+  rows: [],
+  finished: [],
+  shown: 0,
+  capacity: null,
+  templates: [
+    { name: "household", tier: "cheap" },
+    { name: "research", tier: "mid" },
+    { name: "health", tier: "mid" },
+    { name: "developer", tier: "frontier" },
+  ],
+});
 
 export async function startFakeCell(key: string, person = "owner"): Promise<FakeCell> {
   const cell: FakeCell = {
@@ -122,6 +154,8 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     missed: [],
     held: [],
     answers: {},
+    jobAnswers: {},
+    sharedAnswers: {},
     rules: { owner: [], person: [], timeZone: "UTC" },
     activity: { person, month: "2026-10", timeZone: "UTC", total: 0, records: [], next: null },
     activityOf: undefined,
@@ -141,6 +175,11 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
     limitChanges: [],
     secrets: [],
     secretsFailure: undefined,
+    jobsView: emptyView(person),
+    priorityAnswers: {},
+    restartAnswers: {},
+    stopAnswer: { jobs: 0, turn: false },
+    opsStop: { cells: [], missing: [] },
     close: async () => {},
   };
   const seen = new Set<string>();
@@ -213,6 +252,15 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
         const given = (body ?? {}) as Record<string, unknown>;
         if (url.pathname === "/ops/secrets/rotate" && request.method === "POST") {
           return secretsReply(() => ({ from: "k1", keyId: "k2", rewrapped: 3, remaining: 0 }));
+        }
+        if (url.pathname === "/ops/stop" && request.method === "POST") {
+          return typeof cell.opsStop === "number"
+            ? reply(cell.opsStop, { error: "refused" })
+            : reply(200, cell.opsStop);
+        }
+        if (url.pathname === "/ops/jobs" && request.method === "GET") {
+          const named = url.searchParams.get("cell") ?? "";
+          return reply(200, { ...cell.jobsView, person: named, operator: true });
         }
         if (url.pathname === "/ops/cost" && url.searchParams.get("cell") === null) {
           return reply(200, cell.household);
@@ -309,6 +357,37 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       }
       if (route === "/approvals" && request.method === "GET")
         return reply(200, { held: cell.held });
+      if (route === "/jobs" && request.method === "GET") return reply(200, cell.jobsView);
+      if (route === "/stop" && request.method === "POST") return reply(200, cell.stopAnswer);
+      const jobPriority = /^[/]jobs[/](\d+)[/]priority$/.exec(route);
+      if (jobPriority !== null && request.method === "POST") {
+        const job = Number(jobPriority[1]);
+        const [status, value] = cell.priorityAnswers[job] ?? [404, { error: `no job #${job}` }];
+        return reply(status, value);
+      }
+      const jobRestart = /^[/]jobs[/](\d+)[/]restart$/.exec(route);
+      if (jobRestart !== null && request.method === "POST") {
+        const job = Number(jobRestart[1]);
+        const [status, value] = cell.restartAnswers[job] ?? [
+          404,
+          { error: `no stopped job #${job}`, reason: "no-job" },
+        ];
+        return reply(status, value);
+      }
+      const shared = /^\/jobs\/(\d+)\/(join|decline)$/.exec(route);
+      if (shared !== null && request.method === "POST") {
+        const [status, value] = cell.sharedAnswers[`${shared[2]}:${shared[1]}`] ?? [
+          404,
+          { error: `no shared job #${shared[1]} waits for you` },
+        ];
+        return reply(status, value);
+      }
+      const jobAnswer = /^\/jobs\/(\d+)\/answer$/.exec(route);
+      if (jobAnswer !== null && request.method === "POST") {
+        const job = Number(jobAnswer[1]);
+        const [status, value] = cell.jobAnswers[job] ?? [404, { error: `no job #${job}` }];
+        return reply(status, value);
+      }
       const answer = /^\/approvals\/(\d+)$/.exec(route);
       if (answer !== null && request.method === "POST") {
         const number = Number(answer[1]);
@@ -319,7 +398,12 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
         return reply(200, {
           roles: [
             { role: "lead", model: "anthropic/claude-opus-5.5", source: "release default" },
-            { role: "research", model: "anthropic/claude-haiku-4.5", source: "release default" },
+            {
+              role: "cheap",
+              model: "anthropic/claude-haiku-4.5",
+              source: "release default",
+              capUsd: 0.25,
+            },
             { role: "reviewer", model: "anthropic/claude-sonnet-5.5", source: "release default" },
           ],
         });
@@ -332,8 +416,21 @@ export async function startFakeCell(key: string, person = "owner"): Promise<Fake
       }
       const guardRoute = /^\/(rules|activity)(\?.*)?$/.exec(route);
       if (guardRoute !== null) return guard("person", guardRoute[1] ?? "");
-      if (route === "/specialists" && request.method === "POST")
+      const cap = /^\/tiers\/([a-z]+)\/cap$/.exec(route);
+      if (cap !== null && request.method === "PUT") {
+        if (cap[1] !== "cheap" && cap[1] !== "mid" && cap[1] !== "frontier")
+          return reply(400, { error: `unknown tier "${cap[1]}": use cheap, mid, frontier` });
+        return reply(200, { tier: cap[1], capUsd: Number(body?.usd) });
+      }
+      if (route === "/specialists" && request.method === "POST") {
+        if (body?.model !== undefined) {
+          return reply(400, {
+            error:
+              "a template starts on a tier; the lead picks the tier per job and the owner maps tiers to models",
+          });
+        }
         return reply(201, { name: body?.name, status: "added" });
+      }
       return reply(404, { error: "not found" });
     });
   });

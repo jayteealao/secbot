@@ -6,18 +6,21 @@ the maintainer. For the tasks, see [How to operate the cells](../how-to/operate-
 ## One harness per person
 
 Each person has one cell: a celld Durable Object that runs one pi-durable harness. The harness
-holds the person's lead, one endless root conversation, and four specialists (household,
-developer, research, health) as subagent conversations in the same harness. A specialist that
-every person has is the same code installed in every person's harness.
+holds the person's lead, one endless root conversation, and a fresh subagent conversation for
+each job the lead starts, in the same harness. A job template that every person has (household,
+developer, research, health) is the same code installed in every person's harness.
 
 One harness per person keeps a person's conversations, timers, and history in one database, so a
 restart or a crash resumes everything together. It also keeps privacy simple: no surface reads
 another person's cell.
 
-The lead decides when to hand work to a specialist. It calls one hand-off tool and writes the
-brief itself; no keyword, flag, or code rule routes a message. The specialist runs in the
-background with its own model and instructions, can search the lead's history, and returns its
-answer to the lead as a follow-up with a stable request id, so a restart never delivers it twice.
+The lead decides when work becomes a job. It calls `start_job` and writes the brief itself; no
+keyword, flag, or code rule routes a message. Each job runs in the background in a fresh
+conversation owned by its own task, from a template on a tier, and its result waits on the job
+board until the lead pulls it. See [How the lead runs jobs](orchestration.md).
+
+The four specialist conversations of earlier releases are kept frozen: no tool reaches them, and
+history search still finds their past answers.
 
 ## The household cell
 
@@ -99,7 +102,8 @@ crashed run's lease frees itself.
 ## Measurements
 
 - **Heap.** celld gives each cell isolate a V8 heap limit (128 MiB by default). `measure:heap`
-  runs a lead and four specialists at once plus a long job and reads celld's own memory report.
+  runs a lead and its jobs at once plus a long job and reads celld's own memory report; with
+  `--parallel-jobs` it measures memory per job at 1, 4, 8, and 16 parallel jobs.
   If the peak goes over the limit, the limit is raised for every fleet and developer work moves
   into its own cell.
 - **Write delay.** On one node, every committed write waits for the bucket round trip.

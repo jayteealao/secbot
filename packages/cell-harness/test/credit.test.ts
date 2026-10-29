@@ -4,7 +4,13 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { CREDIT_PAUSE_TEXT, isCreditError, rewriteCreditError } from "../src/credit-pause.ts";
+import {
+  CREDIT_PAUSE_TEXT,
+  INFLIGHT_WAIT_TEXT,
+  isCreditError,
+  isInflightError,
+  rewriteCreditError,
+} from "../src/credit-pause.ts";
 import { ModelHealthDoc } from "../src/docs.ts";
 import {
   createFauxGateway,
@@ -14,6 +20,7 @@ import {
   type TestCell,
 } from "./fixtures.ts";
 import { ALERT_ENV, incidentStub } from "./outage-fixtures.ts";
+import { INFLIGHT_402 } from "./stub-openrouter.ts";
 
 const MINUTE = 60_000;
 const CREDIT_402 =
@@ -47,6 +54,19 @@ describe("credit limit", () => {
     expect(rewriteCreditError(throttled)).toBe(throttled);
     const answer = fauxAssistantMessage([fauxText("402 is a number")]);
     expect(rewriteCreditError(answer)).toBe(answer);
+  });
+
+  it("makes an in-flight 402 a retryable wait that is not a credit error, and a plain 402 still one", () => {
+    const inflight = fauxAssistantMessage([], { stopReason: "error", errorMessage: INFLIGHT_402 });
+    expect(isCreditError(inflight)).toBe(false);
+    expect(isInflightError(inflight)).toBe(true);
+    const waiting = rewriteCreditError(inflight);
+    expect(waiting.errorMessage).toBe(INFLIGHT_WAIT_TEXT);
+    expect(isRetryableAssistantError(waiting)).toBe(true);
+    expect(isCreditError(waiting)).toBe(false);
+    const credit = fauxAssistantMessage([], { stopReason: "error", errorMessage: CREDIT_402 });
+    expect(isCreditError(credit)).toBe(true);
+    expect(isInflightError(credit)).toBe(false);
   });
 
   it("treats a 403 like a 402: a credit pause, not a failure", () => {
