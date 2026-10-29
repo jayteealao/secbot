@@ -166,3 +166,37 @@ describe("who pays for a shared job, end to end (AC-34)", () => {
     expect(await householdSpend(setup, "second")).toBe(0);
   });
 });
+
+describe("a shared offer nobody answers (edge case)", () => {
+  it("waits on both boards for 48 hours with no spend and no household work", {
+    timeout: 60_000,
+  }, async () => {
+    let now = Date.now();
+    const { setup, owner, second } = await opened({ clock: () => now });
+    await proposeShared(setup, owner, second, "plan the May trip", 1);
+    // The routine's work, every 2 hours for 48 hours: each person's exchange and alarm.
+    for (let step = 0; step < 24; step++) {
+      now += 2 * 60 * 60 * 1000;
+      for (const person of ["owner", "second"]) {
+        await setup.harness(person).syncShared();
+        await setup.cells.get(person)?.alarm();
+      }
+    }
+    const boards = {
+      owner: await setup.secbotAs("owner", ["jobs"]),
+      second: await setup.secbotAs("second", ["jobs"]),
+    };
+    await evidence("edge-unanswered-owner", boards.owner);
+    await evidence("edge-unanswered-second", boards.second);
+    expect(boards.owner.out).toMatch(/^1 {3}plan the May trip .*waiting$/m);
+    expect(boards.owner.out).toContain("\n      waiting for second to agree to share the cost\n");
+    expect(boards.second.out).toMatch(/^1 {3}plan the May trip .*waiting$/m);
+    expect(boards.second.out).toContain("\n      waiting for you to agree to share the cost\n");
+    expect(await householdSpend(setup, "owner")).toBe(0);
+    expect(await householdSpend(setup, "second")).toBe(0);
+    const row = await householdRow(setup, 1);
+    expect(row?.taskId ?? null).toBeNull();
+    expect(row?.conversationId ?? null).toBeNull();
+    expect(setup.gateway.requests.filter((request) => request.role === "household")).toEqual([]);
+  });
+});
