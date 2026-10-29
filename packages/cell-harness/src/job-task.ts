@@ -11,6 +11,7 @@
  */
 
 import type { Context } from "@earendil-works/chord";
+import { withoutAbortSignal } from "@earendil-works/chord/context";
 import type { AssistantMessage, ModelThinkingLevel } from "@earendil-works/pi-ai";
 import {
   AssistantEntry,
@@ -99,6 +100,11 @@ export interface JobTaskDeps {
   readonly relay?: boolean;
   /** The instructions every job of this task gets in place of its template's (the household agent). */
   readonly instruction?: string;
+  /**
+   * Called after the commit that starts a job and after each commit that ends one (the capacity
+   * watch). It must not throw; nothing the job does waits on what it sends.
+   */
+  readonly onJobsChanged?: (context: Context) => Promise<void>;
 }
 
 const textOf = (message: AssistantMessage | undefined): string =>
@@ -298,6 +304,7 @@ export function createJobTask(deps: JobTaskDeps) {
             conversation_id: String(started.conversationId),
             brief_chars: started.brief.length,
           });
+          await deps.onJobsChanged?.(context);
         }
       },
       run: async (job, runtime, context) => {
@@ -462,6 +469,7 @@ export function createJobTask(deps: JobTaskDeps) {
             kind: ended.kind,
             result_chars: ended.chars,
           });
+          await deps.onJobsChanged?.(context);
         }
       },
       notify: async (job, runtime, context) => {
@@ -508,6 +516,7 @@ export function createJobTask(deps: JobTaskDeps) {
           cost_usd: row.cost,
           duration_ms: Math.max(0, runtime.now() - row.createdAt),
         });
+        await deps.onJobsChanged?.(withoutAbortSignal(context));
       }
     },
   });

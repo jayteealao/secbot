@@ -47,7 +47,13 @@ import {
   setTierEffort,
 } from "./job-board.ts";
 import type { JobHolds } from "./job-holds.ts";
-import { configureJob, createJobTask, type JobTask, resumeJobTask } from "./job-task.ts";
+import {
+  configureJob,
+  createJobTask,
+  type JobTask,
+  type JobTaskDeps,
+  resumeJobTask,
+} from "./job-task.ts";
 import { budgetOf } from "./month-ledger.ts";
 import {
   createReadResultTool,
@@ -64,6 +70,8 @@ import { STOP_RUNNING } from "./stop.ts";
 import { appliedEffort, capOf, templateNamed, templatesOf, tierModelOf } from "./templates.ts";
 
 export interface JobsExtensionDeps {
+  /** After a job starts or ends (the capacity watch); see JobTaskDeps.onJobsChanged. */
+  readonly onJobsChanged?: JobTaskDeps["onJobsChanged"];
   readonly person: string;
   readonly gate: () => BudgetWaiter | undefined;
   readonly timeZone: string;
@@ -282,6 +290,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     gate: deps.gate,
     timeZone: deps.timeZone,
     extensions: deps.jobExtensions,
+    ...(deps.onJobsChanged === undefined ? {} : { onJobsChanged: deps.onJobsChanged }),
   });
   const jobParameter = Type.Integer({ minimum: 1, description: "The job's number." });
 

@@ -46,6 +46,7 @@ import {
 import { type BoardView, boardView, budgetJobs } from "./board-view.ts";
 import { createBookmarkExtension, recordInterruption } from "./bookmark.ts";
 import { BudgetGate, createBudgetExtension } from "./budget-gate.ts";
+import { effectiveCapacity, watchCapacity } from "./capacity-watch.ts";
 import { type CellParts, errorFields, logEvent } from "./cell-parts.ts";
 import { createContentCheckExtension } from "./content-check.ts";
 import { createDecisionModels, type DecisionModels, parseThresholdCaps } from "./decision-model.ts";
@@ -434,10 +435,9 @@ export class CellHarness implements CellParts {
     const board = await this.board(context);
     const waits = (await this.harness.snapshot(BudgetWaitsDoc, context))?.tasks ?? {};
     const { mode } = await readGuardMode(this.harness, context);
-    const capacity = (await this.harness.snapshot(CapacityDoc, context)) ?? {
-      measured: null,
-      at: null,
-    };
+    const capacity = effectiveCapacity(
+      (await this.harness.snapshot(CapacityDoc, context)) ?? undefined,
+    ) ?? { measured: null, at: null };
     const custom = (await this.harness.snapshot(TemplatesDoc, context))?.custom ?? {};
     const counts = waitingCounts(board, await openReceipts(this.harness, context));
     const { spend } = await this.budgetState(context);
@@ -1140,6 +1140,9 @@ export async function openCellHarness(
     timeZone,
     models: () => models,
     jobExtensions: () => jobList,
+    // After a job starts or ends: warn the owner once when more jobs run than the cell was
+    // measured to run at once; nothing is held back.
+    onJobsChanged: (context) => watchCapacity({ harness: current, person, alerts, now }, context),
     now,
     holds,
     harness: current,
