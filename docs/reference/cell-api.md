@@ -351,7 +351,7 @@ Auth: the operator key. A person cell in another fleet calls these to reach the 
 | POST | `/internal/household/report-spend` | a `SpendReport` with an operation id | `{board, othersDeveloperUsd, alerts: [{line, status}]}`; `status` is `yours` (this cell sends that developer alert), `taken` (another cell claimed it in the last 20 s), or `sent`; the same operation id applies once | 200, 400, 401 |
 | POST | `/internal/household/set-budget` | `{timeZone?, developerLimitUsd?}` | the new settings | 200, 400 (an unknown zone or a bad amount), 401 |
 | POST | `/internal/household/alert-sent` | `{month, budget: "developer", limitUsd, line, cell, sent}` | `{ok: true}`; `sent: false` frees the claim so the alert goes again | 200, 400, 401 |
-| POST | `/internal/household/shared-sync` | `{person, ops}`: the person's operations on shared jobs (`propose`, `answer`, `restart`, `resume`, `stop`), each with an operation id | `{acks, rows}`: one ack per operation (a household number for a proposal, or an `error`), and every shared job the person is part of, with its status, cost, cap, consent, who pays, result, and the person's charges; the same operation id applies once | 200, 400 (a refused request), 401 (without the operator key), 500 |
+| POST | `/internal/household/shared-sync` | `{person, ops}`: the person's operations on shared jobs (`propose`, `answer`, `restart`, `resume`, `stop`), each with an operation id | `{acks, rows}`: one ack per operation (a household number for a proposal, or an `error`), and every shared job the person is part of, with its status, cost, cap, consent, who pays, result, and the person's charges; the same operation id applies once within 30 days of its first application (longer while its stop or aborts are still pending) | 200, 400 (a refused request: more than 50 operations, a title that is not one line without brackets or control characters, or a field of the wrong shape or length), 401 (without the operator key), 500 |
 
 A `SpendReport` is `{opId, cell, month, timeZone, at, spentUsd, limitUsd, mode, modeSince,
 byLayer, byRole, developerUsd, developerLimitUsd, developerLines}`. Person cells report after their
@@ -362,7 +362,11 @@ each cell's own ledger: a person's limit is decided in that person's cell only.
 shared action (a proposal, an answer, a restart, a stop), and in the background on a board read,
 which answers with the last mirrored state without waiting for it; the household never calls a
 person cell. A person cell in the household's fleet calls the household
-cell's binding with the same request; one in another fleet calls this route.
+cell's binding with the same request; one in another fleet calls this route. A person cell sends at
+most 50 operations in one exchange and leaves the rest for the next one. The household keeps each
+operation's answer for 30 days after it first applied it, and longer while the stop or aborts it
+asked for have not run; an operation id repeated after that applies again. A refused request is
+refused whole: none of its operations apply.
 
 ## Job routes across fleets: `/internal/stop`, `/internal/jobs`
 
