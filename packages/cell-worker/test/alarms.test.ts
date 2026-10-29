@@ -153,9 +153,10 @@ describe("person cell alarm", () => {
     await until(
       async () => (await storage.getAlarm()) === (await harness.wakes()).summary.wakes[0]?.at,
     );
-    expect((await harness.wakes()).summary.wakes[0]?.source).toBe("heartbeat");
+    // The shared-job sync (every 2 minutes) runs sooner than the heartbeat (every 4).
+    expect((await harness.wakes()).summary.wakes[0]?.source).toBe("shared-sync");
 
-    const soon = Date.now() + 120_000;
+    const soon = Date.now() + 60_000;
     await scheduleReminder(
       harness.harness,
       harness.reminders,

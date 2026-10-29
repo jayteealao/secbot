@@ -18,7 +18,10 @@ const DISPATCH_DIRS = [join(packages, "cli", "src"), join(packages, "cell-worker
  * go to the lead unchanged; `held-chat.test.ts` proves both halves. The job-answer parser (the
  * CLI's `job-answer.ts`) does the same for an exact `/answer <#> <text>`: it goes to the cell's
  * job answer route, never to any agent, and every other line goes to the lead unchanged;
- * `cli.test.ts` and `job-question-chat.test.ts` prove both halves. The CLI's `budget-names.ts`
+ * `cli.test.ts` and `job-question-chat.test.ts` prove both halves. The shared-job answer parser
+ * (the CLI's `shared-confirm.ts`) does the same for an exact `/join <#>` or `/decline <#>`: it goes
+ * to the cell's join or decline route, never to any agent; a look-alike is not sent, and every other
+ * line goes to the lead unchanged; `shared-confirm-chat.test.ts` proves both halves. The CLI's `budget-names.ts`
  * holds only the developer budget's name, which the cost and limits commands print and type; it
  * names a budget and routes nothing. The CLI's `secret-kinds.ts` holds only the broker kinds
  * (`health`, `production`) that `secbot secrets add --broker` types; a kind names the service the
@@ -35,6 +38,7 @@ const NOT_DISPATCH = new Set([
   "held.ts",
   "job-answer.ts",
   "secret-kinds.ts",
+  "shared-confirm.ts",
 ]);
 
 const names = JOB_TEMPLATES.map((template) => template.name).join("|");
