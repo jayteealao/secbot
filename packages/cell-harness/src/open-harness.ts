@@ -121,7 +121,11 @@ import {
 import { ModelHealthMonitor } from "./model-health.ts";
 import { listRoleModels, type RoleModel, setRoleModel, setTierCap } from "./model-map.ts";
 import { ledgerConversations } from "./month-ledger.ts";
-import { createFixtureReaderExtension, outsideReviewOf } from "./outside-tools.ts";
+import {
+  createFixtureReaderExtension,
+  createFixtureToolsExtension,
+  outsideReviewOf,
+} from "./outside-tools.ts";
 import { openReceipts, type ReceiptTask } from "./receipts.ts";
 import {
   type DecisionAdapter,
@@ -222,6 +226,12 @@ export interface OpenCellOptions {
    * tool whose content is checked like any other. A cell without them has no fixture tool.
    */
   readonly fixturePages?: Readonly<Record<string, string>>;
+  /**
+   * Tests and the test cell: the fixture lookup tools on every job's list, `fixture_lookup` (always
+   * the same error) and `fixture_slow_lookup` (answers after `slowMs`). A cell without the option
+   * has neither tool.
+   */
+  readonly fixtureTools?: { readonly slowMs: number };
   /**
    * Reading tools that later units add with `extensions`, beside the release table: their results
    * are checked before a job keeps them.
@@ -1091,8 +1101,14 @@ export async function openCellHarness(
     });
   const readers = options.readers ?? {};
   // The fixture reading tool exists only where fixture pages are given (tests, the test cell).
-  const fixtureReader =
-    options.fixturePages === undefined ? [] : [createFixtureReaderExtension(options.fixturePages)];
+  const fixtureReader = [
+    ...(options.fixturePages === undefined
+      ? []
+      : [createFixtureReaderExtension(options.fixturePages)]),
+    ...(options.fixtureTools === undefined
+      ? []
+      : [createFixtureToolsExtension(options.fixtureTools)]),
+  ];
   // Every web page, mail, or file a job reads is checked before the job keeps it, in every mode.
   const contentCheck = createContentCheckExtension({
     person,

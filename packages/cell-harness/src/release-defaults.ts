@@ -414,6 +414,12 @@ export const INJECTION_MARK_THRESHOLD = 0.5;
 /** The most injected texts of the held-out corpus the check may pass as clean: 10 %. */
 export const INJECTION_MAX_MISS_RATE = 0.1;
 
+/**
+ * How long the test cell's `fixture_slow_lookup` waits before it answers: long enough that a stop
+ * or a capacity level arrives while the job is still running (tests pass their own).
+ */
+export const FIXTURE_SLOW_MS = 90_000;
+
 /** What kind of outside content a reading tool returns. */
 export type OutsideKind = "page" | "mail" | "file";
 

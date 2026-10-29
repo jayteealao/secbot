@@ -70,6 +70,8 @@ export interface FauxRequest {
   readonly modelId: string;
   /** "lead", "household", or the specialist named in the system prompt, or "unknown". */
   readonly role: string;
+  /** The names of the tools the request offers (the replayed system messages' tool set). */
+  readonly tools?: readonly string[];
 }
 
 export function describeRequest(context: TranscriptContext, modelId: string): FauxRequest {
@@ -93,7 +95,26 @@ export function describeRequest(context: TranscriptContext, modelId: string): Fa
     : system.includes("You are the household agent")
       ? "household"
       : (specialist ?? custom ?? "unknown");
-  return { system, last, lastText: last === undefined ? "" : text(last.content), modelId, role };
+  const tools = new Set(
+    ((context as { tools?: readonly { name: string }[] }).tools ?? []).map((tool) => tool.name),
+  );
+  for (const m of messages) {
+    if ((m.role as string) !== "system") continue;
+    const change = m as {
+      toolsAdded?: readonly { name: string }[];
+      toolsRemoved?: readonly { name: string }[];
+    };
+    for (const tool of change.toolsAdded ?? []) tools.add(tool.name);
+    for (const tool of change.toolsRemoved ?? []) tools.delete(tool.name);
+  }
+  return {
+    system,
+    last,
+    lastText: last === undefined ? "" : text(last.content),
+    modelId,
+    role,
+    tools: [...tools],
+  };
 }
 
 export type Responder = (request: FauxRequest) => AssistantMessage | Promise<AssistantMessage>;
@@ -290,6 +311,7 @@ export async function openTestCell(
     readonly storage?: FakeCelldStorage;
     readonly extensions?: OpenCellOptions["extensions"];
     readonly fixturePages?: OpenCellOptions["fixturePages"];
+    readonly fixtureTools?: OpenCellOptions["fixtureTools"];
     readonly readers?: OpenCellOptions["readers"];
     readonly guard?: OpenCellOptions["guard"];
     readonly persons?: OpenCellOptions["persons"];
@@ -311,6 +333,7 @@ export async function openTestCell(
       ...(options.routines === undefined ? {} : { routines: options.routines }),
       ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
       ...(options.fixturePages === undefined ? {} : { fixturePages: options.fixturePages }),
+      ...(options.fixtureTools === undefined ? {} : { fixtureTools: options.fixtureTools }),
       ...(options.readers === undefined ? {} : { readers: options.readers }),
       ...(options.persons === undefined ? {} : { persons: options.persons }),
       guard: { decision: passingDecision, ...options.guard },

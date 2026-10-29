@@ -3,7 +3,8 @@
  * files), which the content check reads before a job keeps it; outside actions send, buy, or
  * publish, and from a job that read outside content they need the reviewer's yes. The release
  * tables name them; a cell can declare more reading tools when it opens. The fixture reading tool
- * serves fixed test pages (tests and the test cell only).
+ * serves fixed test pages, and the fixture lookup tools fail on purpose or answer slowly (tests and
+ * the test cell only).
  */
 
 import type { Context } from "@earendil-works/chord";
@@ -82,4 +83,66 @@ export function createFixtureReaderExtension(pages: Readonly<Record<string, stri
     },
   });
   return defineExtension({ name: "secbot-fixture-reader", tools: [readPage] });
+}
+
+/** The fixture lookup's one answer: always the same error, so three calls trip the loop guard. */
+export const FIXTURE_LOOKUP_ERROR = "Lookup failed: temporary error. Try again with the same id.";
+
+/**
+ * The fixture lookup tools (tests and the test cell only): `fixture_lookup` always fails with the
+ * same error, so a live job can be made to fail three times in a row; `fixture_slow_lookup` waits
+ * `slowMs` and then answers, so a live job stays running while a stop or a capacity level arrives.
+ * Both read nothing and act on nothing, and report no progress output.
+ */
+export function createFixtureToolsExtension(options: { readonly slowMs: number }): Extension {
+  const lookup = defineTool({
+    name: "fixture_lookup",
+    description: "Look up one record by its id.",
+    parameters: Type.Object({
+      id: Type.String({ minLength: 1, description: "The record's id." }),
+    }),
+    // Read-only: safe to run again after a crash.
+    replay: "safe",
+    execute: async () => ({
+      content: [{ type: "text" as const, text: FIXTURE_LOOKUP_ERROR }],
+      isError: true,
+    }),
+  });
+  const slowLookup = defineTool({
+    name: "fixture_slow_lookup",
+    description: "Look up options for one topic. It takes a while to answer.",
+    parameters: Type.Object({
+      topic: Type.String({ minLength: 1, description: "The topic to look up." }),
+    }),
+    // Read-only: safe to run again after a crash.
+    replay: "safe",
+    execute: async (args, _api, context) => {
+      await waitFor(options.slowMs, context.abortSignal);
+      return {
+        content: [
+          { type: "text" as const, text: `Lookup result for ${args.topic}: three options found.` },
+        ],
+      };
+    },
+  });
+  return defineExtension({ name: "secbot-fixture-tools", tools: [lookup, slowLookup] });
+}
+
+/** Waits `ms`, or rejects with the signal's reason as soon as it aborts. */
+function waitFor(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal?.reason);
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
