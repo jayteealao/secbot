@@ -4,7 +4,14 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobBoardDoc } from "../src/docs.ts";
-import { applyOps, exchange, rowsFor, SharedJobsDoc, settle } from "../src/shared-jobs.ts";
+import {
+  applyOps,
+  effectsDone,
+  exchange,
+  rowsFor,
+  SharedJobsDoc,
+  settle,
+} from "../src/shared-jobs.ts";
 import { type Responder, until } from "./fixtures.ts";
 import { createHold } from "./responders.ts";
 import {
@@ -145,6 +152,16 @@ describe("shared operations in the household", () => {
       { person: "owner", jobs: [2] },
     ]);
     expect((await h.row(1))?.status).toBe("queued");
+    // A repeated stop whose effect never ran (the household ended after the commit) stops again,
+    // with the same answer; once the effect is recorded as done, a repeat stops nothing.
+    const again = await apply("second", { kind: "stop", opId: "s1", person: "second" });
+    expect(again.stops).toEqual([{ person: "second", jobs: [2] }]);
+    expect(again.acks).toEqual([{ opId: "s1" }]);
+    expect(again.pending).toEqual(["s1"]);
+    await h.commit((tx) => effectsDone(tx, ["s1"]));
+    const done = await apply("second", { kind: "stop", opId: "s1", person: "second" });
+    expect(done.stops).toEqual([]);
+    expect(done.pending).toEqual([]);
     hold.release("household");
   });
 });

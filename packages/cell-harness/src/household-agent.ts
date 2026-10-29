@@ -42,6 +42,7 @@ import { cellSettings } from "./settings.ts";
 import {
   type Budgets,
   createPayerGate,
+  effectsDone,
   exchange,
   overOf,
   rowsFor,
@@ -281,6 +282,11 @@ export async function openHouseholdAgent(options: HouseholdAgentOptions): Promis
       }
       const stopping = applied.stops.flatMap((each) => each.jobs);
       if (stopping.length > 0) await stop("person", stopping);
+      // Only now are the stop and aborts done: a household that ended before this point runs them
+      // again when the person repeats the operation.
+      if (applied.pending.length > 0) {
+        await harness.commit((tx) => effectsDone(tx, applied.pending), quiet);
+      }
       if (applied.aborts.length === 0 && stopping.length === 0) return answer;
       const over = overOf(await options.budgets());
       const rows = await harness.commit(

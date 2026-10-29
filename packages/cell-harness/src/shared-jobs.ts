@@ -38,6 +38,13 @@ import { payerOf, splitCharge } from "./shared-split.ts";
 /** One delivered operation's answer, kept so a repeat gets the same answer. */
 export type SharedAck = { opId: string; household?: number; error?: string };
 
+/**
+ * A stored answer, with the effects its operation asked for that have not run yet: the stop and
+ * the aborts run after the commit, so a household that ends between the two runs them again when
+ * the person repeats the operation. Never sent to a person.
+ */
+type StoredAck = SharedAck & { pending?: { stop?: true; aborts?: TaskId[] } };
+
 /** One shared job in the household. */
 export type SharedEntry = {
   requester: string;
@@ -55,7 +62,7 @@ export type SharedEntry = {
 /** `secbot.shared-jobs`: every shared job by its household number, and every applied operation. */
 export const SharedJobsDoc = defineDoc<{
   jobs: Record<string, SharedEntry>;
-  ops: Record<string, SharedAck>;
+  ops: Record<string, StoredAck>;
 }>({
   kind: "secbot.shared-jobs",
   version: 1,
@@ -80,6 +87,8 @@ export interface Applied {
   readonly aborts: TaskId[];
   /** Household jobs a join started. */
   readonly started: number[];
+  /** Operations whose stop or aborts run after the commit; `effectsDone` clears them. */
+  readonly pending: string[];
 }
 
 const RESUME_REFUSALS: Record<ResumeRefusal, (n: number, status: string) => string> = {
@@ -215,20 +224,53 @@ export async function applyOps(
   const shared = await tx.doc(SharedJobsDoc);
   const out: Out = { stops: [], aborts: [], started: [] };
   const acks: SharedAck[] = [];
+  const pending: string[] = [];
   for (const op of ops) {
     const done = shared.ops[op.opId];
     if (done !== undefined) {
-      acks.push({ ...done });
+      // An effect that never ran (the household ended after the commit) runs again now.
+      if (done.pending?.stop === true) {
+        out.stops.push({ person: op.person, jobs: await jobsOfPerson(tx, op.person) });
+      }
+      if (done.pending?.aborts !== undefined) out.aborts.push(...done.pending.aborts);
+      if (done.pending !== undefined) pending.push(op.opId);
+      acks.push(answerOf(done));
       continue;
     }
-    const ack =
+    const stops = out.stops.length;
+    const aborts = out.aborts.length;
+    const ack: StoredAck =
       op.person !== person
         ? { opId: op.opId, error: `an operation of ${op.person} came from ${person}` }
         : await applyOne(tx, op, deps, out);
+    const stopped = out.stops.length > stops;
+    const replaced = out.aborts.slice(aborts);
+    if (stopped || replaced.length > 0) {
+      ack.pending = {
+        ...(stopped ? { stop: true as const } : {}),
+        ...(replaced.length > 0 ? { aborts: replaced } : {}),
+      };
+      pending.push(op.opId);
+    }
     shared.ops[op.opId] = ack;
-    acks.push({ ...ack });
+    acks.push(answerOf(ack));
   }
-  return { acks, ...out };
+  return { acks, ...out, pending };
+}
+
+/** The answer a person gets: the stored answer without its pending effects. */
+const answerOf = (stored: StoredAck): SharedAck => {
+  const { pending: _pending, ...answer } = stored;
+  return { ...answer };
+};
+
+/** Records that the stop and aborts of these operations ran (after the exchange's commit). */
+export async function effectsDone(tx: Tx, opIds: readonly string[]): Promise<void> {
+  const shared = await tx.doc(SharedJobsDoc);
+  for (const opId of opIds) {
+    const stored = shared.ops[opId];
+    if (stored !== undefined) delete stored.pending;
+  }
 }
 
 /** One person's newest month as the household budget board has it. */
