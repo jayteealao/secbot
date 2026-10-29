@@ -29,6 +29,11 @@ export interface Alerts {
   send(kind: AlertKind): Promise<boolean>;
   /** The owner alert of one limit line; no amount and no private detail. */
   sendLimit(limit: LimitAlert): Promise<boolean>;
+  /**
+   * The owner alert that more jobs run at once than the cell was measured to handle; it says
+   * nothing is held back.
+   */
+  sendCapacity(jobsAtOnce: number, measured: number): Promise<boolean>;
 }
 
 export const ALERT_SUMMARIES: Record<AlertKind, (person: string) => string> = {
@@ -65,6 +70,16 @@ export function limitDescription(limit: LimitAlert): string {
   return limit.line >= 100
     ? "Hand-offs, routines, and reminders wait until you raise this person's limit (secbot limits set <person> <usd>) or the month resets. Nothing is dropped; chat with the lead continues."
     : "This person's agents have used most of their monthly limit. At the limit, hand-offs, routines, and reminders wait; chat with the lead continues. Raise it with secbot limits set <person> <usd>.";
+}
+
+/** The summary of a capacity alert: the jobs running at once and the measured number. */
+export function capacitySummary(person: string, jobsAtOnce: number, measured: number): string {
+  return `Secbot ${person} cell: ${jobsAtOnce} jobs at once, measured at ${measured}`;
+}
+
+/** What a capacity alert means: a warning only; nothing is held back. */
+export function capacityDescription(): string {
+  return "More jobs are running at once than this cell was measured to handle. Nothing is held back; a cell that runs out of memory restarts and its jobs resume. See secbot jobs.";
 }
 
 export function createAlerts(
@@ -123,6 +138,12 @@ export function createAlerts(
         kind: "limit",
         budget: limit.budget,
         line: limit.line,
+      }),
+    sendCapacity: (jobsAtOnce, measured) =>
+      post(capacitySummary(person, jobsAtOnce, measured), capacityDescription(), {
+        kind: "capacity",
+        parallel_jobs: jobsAtOnce,
+        measured,
       }),
   };
 }
