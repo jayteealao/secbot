@@ -430,7 +430,8 @@ fleet.
 
 ## Test-cell routes: `/lab/…`
 
-The test-cell worker only (never a person cell's release) answers these guard bench routes, with
+The test-cell worker only (never a person cell's release) answers these guard bench and capacity
+bench routes, with
 the operator key only (401 and `ops.refused` without it). The release tool's `lab` command calls
 them; `measure:guard` reads the bench.
 
@@ -439,16 +440,16 @@ them; `measure:guard` reads the bench.
 | POST | `/lab/guard-bench?calls=<1-200>[&adapter=<a>]` | `{started, calls, warmup, adapter}`: the latency run starts (5 warm-up calls, then `calls` permitted `household_read` calls); 409 while a run goes, 400 for a bad value |
 | POST | `/lab/guard-bench?examples=1[&repeat=<1-3>][&adapter=<a>]` | `{started, kind: "examples", examples, repeat, heldOut, calls, adapter}`: the examples run starts. The bench scores each decision-model tuning example (every example whose tool an agent has) `repeat` times (default 2), then each held-out call (`heldOut`, 60) once, in order, with the decision model alone and no threshold cap. 400 for `examples` with `calls` or a bad `repeat` |
 | GET | `/lab/guard-bench-state` | `{done, kind, measured, results?}`. For the latency run, `results` holds the percentiles, marks, fallbacks, models, and cost. For the examples run, `results` is `{tuning: {examples: [{name, tool, expected, threshold, scores, marked, ok}], allOk}, heldOut: {calls: [{name, tool, kind, threshold, score, marked, rule, ok}], perTool: {<tool>: {risky, caught, missed, routine, falseMarks, falseMarkRate, ruleHolds}}, allCaught}, calls, models, fallbacks, costUsd, timedOut, allOk}`: each score is judged on the tool's release threshold. A held-out call's `rule` names the release owner rule that would hold it (`owner card number`, `owner secret word`), or is null; a risky held-out call is caught when it is marked or a rule holds it. `allOk` is true only when every repeat of every risky tuning example (`expected: "mark"`) scored at or above the threshold, every routine tuning one below it, and every risky held-out call was caught, with no fallback and no timeout; routine held-out false marks are counted, not failed |
-
 | POST | `/lab/guard-bench?corpus=1[&adapter=<a>]` | `{started, kind: "corpus", cases, adapter}`: the corpus run starts. The bench runs the content check's decision model on every case of the held-out injection corpus once. 400 for `corpus` with `calls` or `examples` |
 | POST | `/lab/capacity?jobs=<1-16>&slow=<5-300>` | `{started, level, jobs, slowSeconds}`: one capacity level starts on the capacity bench, a cell of its own with a scripted lead: `jobs` live jobs at once, each holding `slow` seconds on `fixture_slow_lookup` before it answers. 409 while a level runs, 400 for a bad value, 503 without the bench in the bundle |
 | GET | `/lab/capacity-state` | `{level, done, startedAt, processStartedAt, jobs: [{n, status, createdAt, receiptMs, endedAt, costUsd}]}` for the current level only; a changed `processStartedAt` between two reads means the bench restarted |
 
+`adapter` is `clef`, `clef-flash`, or `jev`; the bench keeps it for its next run. The bench never
+reads a threshold cap.
+
 For the corpus run, `GET /lab/guard-bench-state` holds `results: {cases: [{name, group, label,
 outcome, chunks, cause}], models, timedOut}`, where `label` is `injection` or `clean` and `outcome`
 is `hit`, `clean`, `timeout`, or `error`.
-`adapter` is `clef`, `clef-flash`, or `jev`; the bench keeps it for its next run. The bench never
-reads a threshold cap.
 
 ### The test-cell lookup tools
 
