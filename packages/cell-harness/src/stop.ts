@@ -22,6 +22,15 @@ export interface StopParts {
   readonly root: Conversation;
   readonly person: string;
   readonly now: () => number;
+  /**
+   * A person cell's shared jobs: the stop sends the household one stop of every joined shared job
+   * the person is part of, and runs one bounded exchange before it answers. Undefined in a cell
+   * with no household, and in the household itself.
+   */
+  readonly shared?: {
+    readonly opId: () => string;
+    readonly sync: (context: Context) => Promise<unknown>;
+  };
 }
 
 /** What one stop stopped: how many jobs, and whether the lead was in a turn. */
@@ -47,10 +56,23 @@ export async function stopJobs(
   const at = parts.now();
   const started = Date.now();
   const turn = (await harness.snapshot(LiveDoc, root.id, context))?.run !== undefined;
-  const marked = await harness.commit(async (tx) => {
+  const locked = await harness.commit(async (tx) => {
     (await tx.doc(StopDoc)).active = { at, by };
     const board = await tx.doc(JobBoardDoc);
     const jobs: { number: number; taskId: TaskId }[] = [];
+    // A joined shared job runs in the household: one stop op asks it to stop them all. An offer
+    // nobody joined has nothing running and stays as it is.
+    const shared = Object.values(board.jobs).filter(
+      (row) =>
+        parts.shared !== undefined &&
+        row.shared !== null &&
+        row.shared.household !== null &&
+        row.shared.consent === "joined" &&
+        !ENDED.has(row.status),
+    );
+    if (parts.shared !== undefined && shared[0]?.shared) {
+      shared[0].shared.outbox.push({ kind: "stop", opId: parts.shared.opId(), person });
+    }
     for (const row of Object.values(board.jobs)) {
       if (ENDED.has(row.status) || row.taskId === null || !select(row)) continue;
       const task = await tx.task(row.taskId);
@@ -58,8 +80,10 @@ export async function stopJobs(
       row.stop = { at, by };
       jobs.push({ number: row.number, taskId: row.taskId });
     }
-    return jobs;
+    return { jobs, shared: shared.length };
   }, context);
+  const marked = locked.jobs;
+  const count = marked.length + locked.shared;
   await seams.afterLock?.();
   const quiet = withoutAbortSignal(context);
   for (const job of marked) await harness.abortTask(job.taskId, quiet);
@@ -69,7 +93,7 @@ export async function stopJobs(
   const left = await harness.commit(async (tx) => {
     const stop = await tx.doc(StopDoc);
     stop.active = null;
-    stop.last = { at, by, jobs: marked.length, turn };
+    stop.last = { at, by, jobs: count, turn };
     const board = await tx.doc(JobBoardDoc);
     const running: number[] = [];
     for (const job of marked) {
@@ -85,12 +109,14 @@ export async function stopJobs(
     if (!left.includes(job.number)) logEvent("job.stopped", { cell: person, job: job.number, by });
   }
   if (left.length > 0) logEvent("stop.left_running", { cell: person, jobs: left.length }, "warn");
+  // Bounded by the exchange's own timeout; an unanswered household keeps the op for the next one.
+  if (locked.shared > 0) await parts.shared?.sync(quiet).catch(() => undefined);
   logEvent("stop.done", {
     cell: person,
     by,
-    jobs: marked.length,
+    jobs: count,
     turn,
     duration_ms: Date.now() - started,
   });
-  return { jobs: marked.length, turn };
+  return { jobs: count, turn };
 }

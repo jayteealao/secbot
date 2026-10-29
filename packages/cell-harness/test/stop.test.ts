@@ -11,6 +11,7 @@ import {
   createFauxGateway,
   type FauxRequest,
   fauxAssistantMessage,
+  fauxText,
   fauxToolCall,
   loggedEvents,
   openTestCell,
@@ -19,6 +20,7 @@ import {
 } from "./fixtures.ts";
 import { toolResultsOf } from "./job-helpers.ts";
 import { createHold, type Hold, jobResponder, startJobLine } from "./responders.ts";
+import { answerFrom, openPair, proposeFrom } from "./shared-pair.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -257,5 +259,55 @@ describe("the cell's stop, board view, and reorder", () => {
       job: 1,
     });
     expect((await t.cell.jobsView()).rows).toEqual([]);
+  });
+});
+
+describe("the person's stop of shared jobs", () => {
+  it("stops a joined shared job in the household with the person's own job, and leaves an unjoined offer waiting", async () => {
+    const hold = createHold();
+    hold.hold("household");
+    hold.hold("unknown");
+    hold.hold("research");
+    const pair = await openPair(hold.wrap(() => fauxAssistantMessage([fauxText("Plan.")])));
+    await proposeFrom(pair);
+    await pair.sync("owner");
+    await pair.sync("second");
+    await answerFrom(pair, 1, true);
+    await pair.sync("second");
+    await until(() => hold.waiting("household") + hold.waiting("unknown") === 1);
+    await pair.sync("owner");
+    expect((await pair.row("owner", 1))?.shared?.consent).toBe("joined");
+    await (
+      await pair.owner.cell.submit(
+        startJobLine({ title: "flights", brief: "find flights", template: "research" }),
+        "own",
+      )
+    ).wait(BACKGROUND_CONTEXT);
+    await until(() => hold.waiting("research") === 1);
+    await proposeFrom(pair, "the garden");
+    await pair.sync("owner");
+    await pair.sync("second");
+
+    const stopping = pair.owner.cell.stop("person");
+    await until(
+      async () =>
+        (await pair.owner.cell.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.active != null ||
+        (await pair.row("owner", 2))?.status === "stopped",
+    );
+    hold.release("research");
+    // The household's stop aborts its job at the held step, once the stop op has reached it.
+    await until(() =>
+      pair.requests.some((request) => request.ops.some((op) => op.kind === "stop")),
+    );
+    hold.release("household");
+    hold.release("unknown");
+    const answer = await stopping;
+    expect(answer.jobs).toBe(2);
+    expect(pair.requests.flatMap((request) => request.ops).map((op) => op.kind)).toContain("stop");
+    expect(await pair.row("owner", 2)).toMatchObject({ status: "stopped" });
+    expect(await pair.row("owner", 1)).toMatchObject({ status: "stopped" });
+    expect((await pair.row("owner", 1))?.shared?.outbox).toEqual([]);
+    expect(await pair.row("owner", 3)).toMatchObject({ status: "waiting" });
+    expect((await pair.row("second", 2))?.shared?.consent).toBe("offered");
   });
 });

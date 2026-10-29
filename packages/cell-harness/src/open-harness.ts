@@ -150,7 +150,13 @@ import { createSecretsExtension, redactionLoader, type SecretsClient } from "./s
 import { createLeadExtension, type TimeEnv, timeZoneOf } from "./sections.ts";
 import { type Frame, openSessionStream, type SessionStream } from "./session-stream.ts";
 import { cellSettings } from "./settings.ts";
-import { kickShared, type SharedParts, type SyncOutcome, syncShared } from "./shared-relay.ts";
+import {
+  kickShared,
+  type SharedParts,
+  type SyncOutcome,
+  sharedOpId,
+  syncShared,
+} from "./shared-relay.ts";
 import { type StopAnswer, stopJobs } from "./stop.ts";
 import { agentNames, createTelemetryExtension } from "./telemetry.ts";
 import { templatesOf } from "./templates.ts";
@@ -420,8 +426,22 @@ export class CellHarness implements CellParts {
    * every cell.
    */
   stop(by: JobStop["by"] = "person", context: Context = BACKGROUND_CONTEXT): Promise<StopAnswer> {
+    const shared = this.shared;
     return stopJobs(
-      { harness: this.harness, root: this.root, person: this.person, now: this.now },
+      {
+        harness: this.harness,
+        root: this.root,
+        person: this.person,
+        now: this.now,
+        ...(shared === undefined
+          ? {}
+          : {
+              shared: {
+                opId: () => sharedOpId(this.person, this.now()),
+                sync: (quiet: Context) => syncShared(shared, quiet),
+              },
+            }),
+      },
       by,
       context,
     );
