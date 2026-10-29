@@ -372,6 +372,57 @@ describe("jobs that ended before the month", () => {
     expect(after.filter((each) => each.job !== undefined).map((each) => each.job)).toEqual([2, 3]);
   });
 
+  it("counts a shared job's charge that arrives after the roll retired its conversation", async () => {
+    const { JobBoardDoc, MonthLedgerDoc } = await import("../src/docs.ts");
+    const usage = (cost: number) => ({ models: { x: { cost: { total: cost } } }, tools: {} });
+    // A shared job ended in September; October's roll baselined it and November's retires it.
+    const row = {
+      number: 1,
+      template: "household",
+      endedAt: Date.UTC(2026, 8, 20),
+      conversationId: 71,
+      runs: [],
+      review: null,
+    };
+    const ledger: Record<string, unknown> = {
+      month: "2026-10",
+      zone: "UTC",
+      startsAt: Date.UTC(2026, 9, 1),
+      endsAt: Date.UTC(2026, 10, 1),
+      nextZone: null,
+      baseline: { "71": { "m:x": 0.2 } },
+      hours: {},
+      seen: {},
+      retired: {},
+    };
+    const costs: Record<string, Record<string, unknown>> = { "71": usage(0.2) };
+    const docs = new Map<unknown, unknown>([
+      [JobBoardDoc, { jobs: { "1": row } }],
+      [MonthLedgerDoc, ledger],
+    ]);
+    const tx = {
+      doc: async (doc: unknown, id?: unknown) => {
+        if (doc !== UsageDoc) return docs.get(doc);
+        costs[String(id)] ??= { models: {}, tools: {} };
+        return costs[String(id)];
+      },
+    };
+    const harness = {
+      snapshot: async (doc: unknown, ...rest: unknown[]) =>
+        doc === UsageDoc ? costs[String(rest[0])] : docs.get(doc),
+      commit: async (work: (value: typeof tx) => Promise<unknown>) => work(tx),
+    } as unknown as Parameters<typeof readMonth>[0];
+    await readMonth(harness, Date.UTC(2026, 10, 2), "UTC", BACKGROUND_CONTEXT);
+    expect(Object.keys(ledger.retired as Record<string, true>)).toEqual(["71"]);
+    // The household's late charge reaches the person cell on 4 November.
+    const { addToolUsage, costOnlyUsage, unretire } = await import("../src/month-ledger.ts");
+    const charge = tx as unknown as Parameters<typeof unretire>[0];
+    await unretire(charge, 71 as never);
+    await addToolUsage(charge, 71 as never, "shared_charge", costOnlyUsage(0.15));
+    const after = await readMonth(harness, Date.UTC(2026, 10, 4), "UTC", BACKGROUND_CONTEXT);
+    expect(after.person.spentUsd).toBeCloseTo(0.15, 6);
+  });
+
   it("does not retire a review made between the listing and the roll", async () => {
     const { JobBoardDoc, MonthLedgerDoc } = await import("../src/docs.ts");
     const usage = (cost: number) => ({ models: { x: { cost: { total: cost } } }, tools: {} });

@@ -29,7 +29,7 @@ import {
   type SharedSyncRow,
 } from "./household-contract.ts";
 import { createSharedRow, endRow, placeInQueue } from "./job-board.ts";
-import { addToolUsage, costOnlyUsage } from "./month-ledger.ts";
+import { addToolUsage, costOnlyUsage, unretire } from "./month-ledger.ts";
 import {
   RESULT_WAKE_MS,
   SHARED_CHARGE_KEY,
@@ -300,6 +300,8 @@ async function reconcile(
     for (const charge of remote.charges) {
       if (charge.person !== parts.person || link.charges.includes(charge.id)) continue;
       if (row.conversationId !== null) {
+        // A charge that arrives after a month roll retired the conversation still counts.
+        await unretire(tx, row.conversationId);
         await addToolUsage(tx, row.conversationId, SHARED_CHARGE_KEY, costOnlyUsage(charge.usd));
       }
       link.charges.push(charge.id);

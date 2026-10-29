@@ -498,6 +498,22 @@ export async function addGuardUsage(
 }
 
 /**
+ * Brings a retired conversation back into the month before a late cost is booked on it in `tx` (a
+ * shared job's charge that the household sent after the roll retired the job's conversation), so
+ * the cost counts in this month. One retired with no baseline takes its totals now as one, so only
+ * the late cost counts.
+ */
+export async function unretire(tx: Tx, conversationId: ConversationId): Promise<void> {
+  const ledger = await tx.doc(MonthLedgerDoc);
+  const id = String(conversationId);
+  if (ledger.retired === undefined || !Object.hasOwn(ledger.retired, id)) return;
+  delete ledger.retired[id];
+  if (!Object.hasOwn(ledger.baseline, id)) {
+    ledger.baseline[id] = costsOf(await tx.doc(UsageDoc, conversationId));
+  }
+}
+
+/**
  * Adds one model call's usage to a conversation's `pi.usage` under a tool key. A key that is not a
  * guard key counts as the conversation's own agent spend: the lead's hand-off note is booked this
  * way on the lead's conversation, so it is in the person's month and their limits.
