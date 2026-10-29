@@ -56,25 +56,28 @@ export async function jobCostOf(
   row: Pick<JobRow, "conversationId" | "runs" | "review">,
   context: Context,
 ): Promise<number> {
-  let total = 0;
-  for (const id of jobConversations(row)) {
-    total += conversationTotal(await reader.snapshot(UsageDoc, id, context));
-  }
-  return total;
+  const states = await Promise.all(
+    jobConversations(row).map((id) => reader.snapshot(UsageDoc, id, context)),
+  );
+  return states.reduce((total, state) => total + conversationTotal(state), 0);
 }
 
-/** The board with each job's cost as shown (shownCost): a live job's is read from its ledgers. */
+/**
+ * The board with each job's cost as shown (shownCost): a live job's is read from its ledgers. It
+ * runs on every lead prompt and board read, so every job's reads go out at once.
+ */
 export async function withLiveCosts<B extends { readonly jobs: Readonly<Record<string, JobRow>> }>(
   reader: Pick<DocumentReader, "snapshot">,
   board: B,
   context: Context,
 ): Promise<B> {
-  const jobs: Record<string, JobRow> = {};
-  for (const [key, row] of Object.entries(board.jobs)) {
-    const cost = await shownCost(row, () => jobCostOf(reader, row, context));
-    jobs[key] = cost === row.cost ? row : { ...row, cost };
-  }
-  return { ...board, jobs };
+  const entries = await Promise.all(
+    Object.entries(board.jobs).map(async ([key, row]) => {
+      const cost = await shownCost(row, () => jobCostOf(reader, row, context));
+      return [key, cost === row.cost ? row : { ...row, cost }] as const;
+    }),
+  );
+  return { ...board, jobs: Object.fromEntries(entries) as Record<string, JobRow> };
 }
 
 /** The wake notice of a paused job, as the lead reads it. */
