@@ -76,6 +76,8 @@ describe("the person's guard routes (device key)", () => {
       "resume_job",
       "answer_job",
       "ask_person",
+      "propose_shared_job",
+      "offer_shared",
       "mark_risky",
       "job_transcript",
       "ask_lead",

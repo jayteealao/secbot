@@ -81,6 +81,8 @@ const FIRST_RUN = [
   "all        resume_job         any                            permit",
   "all        answer_job         any                            permit",
   "all        ask_person         any                            permit",
+  "all        propose_shared_job any                            permit",
+  "all        offer_shared       any                            permit",
   "all        mark_risky         any                            permit",
   "all        job_transcript     any                            permit",
   "all        ask_lead           any                            permit",

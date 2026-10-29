@@ -540,6 +540,8 @@ describe("the rule store", () => {
       ["all", "resume_job", "permit", "default"],
       ["all", "answer_job", "permit", "default"],
       ["all", "ask_person", "permit", "default"],
+      ["all", "propose_shared_job", "permit", "default"],
+      ["all", "offer_shared", "permit", "default"],
       ["all", "mark_risky", "permit", "default"],
       ["all", "job_transcript", "permit", "default"],
       ["all", "ask_lead", "permit", "default"],
@@ -553,7 +555,7 @@ describe("the rule store", () => {
     await test.cell.removeRule("person", { agent: "all", tool: "search_history" });
     await test.reopen();
     const after = await test.cell.rules();
-    expect(after.person).toHaveLength(13);
+    expect(after.person).toHaveLength(15);
     expect(after.owner).toHaveLength(3);
   });
 
@@ -581,6 +583,8 @@ describe("the rule store", () => {
       "resume_job",
       "answer_job",
       "ask_person",
+      "propose_shared_job",
+      "offer_shared",
       "mark_risky",
       "job_transcript",
       "ask_lead",

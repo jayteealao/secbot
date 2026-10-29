@@ -23,14 +23,23 @@ import {
   LEAD_INSTRUCTIONS,
   LOOP_LIMIT,
   MARK_THRESHOLDS,
+  HOUSEHOLD_AGENT_RULES,
+  HOUSEHOLD_AGENT_TOOLS,
   NEAR_SAME_MAX_DISTANCE,
   OUTSIDE_ACTION_TOOLS,
   OUTSIDE_CONTENT_TOOLS,
   RESULT_REVIEW_PROMPT,
   RESULT_WAKE_MS,
   RISKY_TEMPLATES,
+  PAYER_POLL_MS,
   RISKY_TOOLS,
   resumeInput,
+  SHARED_CHARGE_KEY,
+  SHARED_DECLINED,
+  SHARED_SYNC_EVERY_MS,
+  SHARED_SYNC_TIMEOUT_MS,
+  sharedJoinedText,
+  sharedOfferText,
   TIER_CAPS_USD,
   TIER_MODELS,
   TIERS,
@@ -239,6 +248,59 @@ describe("release defaults of the stop, the resume, and the hand-off note", () =
       verdict: "permit",
     });
     expect(MARK_THRESHOLDS.resume_job).toBe(MARK_THRESHOLDS.restart_job);
+  });
+});
+
+describe("release defaults of shared household jobs", () => {
+  it("syncs every 2 minutes with a 10-second bound and polls payers every minute", () => {
+    expect(SHARED_SYNC_EVERY_MS).toBe(120_000);
+    expect(SHARED_SYNC_TIMEOUT_MS).toBe(10_000);
+    expect(PAYER_POLL_MS).toBe(60_000);
+  });
+
+  it("books a share under a key no model tool can have", () => {
+    expect(SHARED_CHARGE_KEY).toBe("secbot-shared:charge");
+    expect(SHARED_CHARGE_KEY).toContain(":");
+  });
+
+  it("gives the household agent two tools and rules that never address a person", () => {
+    expect(HOUSEHOLD_AGENT_TOOLS).toEqual(["household_read", "household_change"]);
+    expect(HOUSEHOLD_AGENT_RULES).toContain("one job, from a brief written for both people");
+    expect(HOUSEHOLD_AGENT_RULES).toContain("goes to both people's leads");
+    expect(HOUSEHOLD_AGENT_RULES).toContain("Never address a person");
+    expect(HOUSEHOLD_AGENT_RULES).toContain("state your assumptions in the answer");
+  });
+
+  it("wakes the other lead with the offer, its half, and the limit variant", () => {
+    expect(sharedOfferText(15, "sam", "plan the May trip", 0.4, false)).toBe(
+      "[job 15 shared offer from sam: plan the May trip; the person's half is about $0.40. Call offer_shared with job 15, then ask the person in your own words whether to share the cost]",
+    );
+    expect(sharedOfferText(15, "sam", "plan the May trip", 0.4, true)).toBe(
+      "[job 15 shared offer from sam: plan the May trip; the person's limit is reached, so sam pays all. Call offer_shared with job 15, then ask the person in your own words whether to see it on their board]",
+    );
+  });
+
+  it("wakes the requesting lead with the one line to give after a join", () => {
+    expect(sharedJoinedText(14, "alex", "plan the May trip")).toBe(
+      "[job 14 shared: alex agreed to share the cost. Tell the person in one line: On it, for both of you: plan the May trip (job 14, household, shared)]",
+    );
+    expect(SHARED_DECLINED("alex")).toBe("alex declined to share the cost");
+  });
+
+  it("tells the lead how to propose and offer a shared job", () => {
+    expect(LEAD_INSTRUCTIONS).toContain(
+      "When a request is about the household and both people, propose a shared job with propose_shared_job",
+    );
+    expect(LEAD_INSTRUCTIONS).toContain("give the person's offer with offer_shared");
+    expect(LEAD_INSTRUCTIONS).toContain("A shared job keeps its tier");
+  });
+
+  it("permits and thresholds the two shared tools as start_job and ask_person are", () => {
+    for (const tool of ["propose_shared_job", "offer_shared"]) {
+      expect(DEFAULT_PERSON_RULES).toContainEqual({ agent: "all", tool, verdict: "permit" });
+    }
+    expect(MARK_THRESHOLDS.propose_shared_job).toBe(MARK_THRESHOLDS.start_job);
+    expect(MARK_THRESHOLDS.offer_shared).toBe(MARK_THRESHOLDS.ask_person);
   });
 });
 
