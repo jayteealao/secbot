@@ -288,8 +288,11 @@ export class CellHarness implements CellParts {
     });
   }
 
-  /** The job board and shared jobs: the person's and the owner's job moves (cell-jobs.ts). */
-  readonly jobs: CellJobs;
+  /**
+   * The job board and shared jobs: the person's and the owner's job moves (cell-jobs.ts). Private:
+   * the one-line methods below are the only route, so callers keep one surface on the cell.
+   */
+  private readonly jobs: CellJobs;
 
   syncShared(...args: Parameters<CellJobs["syncShared"]>): ReturnType<CellJobs["syncShared"]> {
     return this.jobs.syncShared(...args);
