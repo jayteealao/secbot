@@ -227,7 +227,7 @@ modes. The owner switches a cell to enforce with `PUT /ops/mode`.
 | `rows` | Live jobs in queue order, each a `BoardRow`. |
 | `finished` | Jobs that ended in the last 24 hours, newest first. |
 | `shown` | How many rows both lists hold. |
-| `capacity` | `{jobsAtOnce, measured, at, on}` only when more jobs run at once than the cell was measured at (`on` is the day as `d Mon`); otherwise `null`. Nothing is held back. |
+| `capacity` | `{jobsAtOnce, measured, at, on}` only when more jobs run at once than the cell was measured at (`on` is the day as `d Mon`); otherwise `null`. Nothing is held back. The measured number is the cell's own (set with `PUT /ops/capacity`), else the release's; with neither there is no line. |
 | `templates` | `[{name, tier}]`: the job templates and the tier each starts on. |
 
 A `BoardRow` is `{number, title, priority, tier, effort, try, cost, cap, status, reason, shared?}`.
@@ -318,6 +318,7 @@ route here. A device key never opens them, and no device-key route changes the m
 | PUT | `/ops/limits?budget=developer` | Body `{"limitUsd": <usd>}`; `{timeZone, developerLimitUsd}`. A household setting: every person cell reads it again. 400 for a bad amount, 503 without a household cell. |
 | PUT | `/ops/time-zone` | Body `{"timeZone": "<IANA zone>"}`; `{timeZone, developerLimitUsd}`. Months follow it from the next month in each cell. 400 for a zone the runtime does not know. |
 | GET | `/ops/jobs?cell=<person\|household>` | That person's `BoardView` with `operator: true`, or the household's shared jobs. A cell another fleet serves is read through that fleet's `/internal/jobs`; 503 `cell <name> did not answer` when it does not. 400 without `?cell=`. |
+| PUT | `/ops/capacity?cell=<person>` | Body `{"measured": <jobs 1-1000>, "at": <epoch ms>}` sets the person cell's measured number of jobs at once and the day it was measured; `{"measured": null, "at": null}` clears it, so the release's number (if any) applies again. Answers `{person, measured, at}`. The number only warns: the board's capacity line and one owner alert per episode; nothing is held back. Logs `ops.capacity_set` with `cell`, `ok`, and `measured`. 400 for any other body; 404 for the household or secrets cell, which have no number. |
 | POST | `/ops/stop` | The owner's stop of every cell: each person cell this fleet serves and the household cell when served, then the cells another fleet serves through its `/internal/stop` (three attempts). Answers `{cells: [{cell, jobs, turn, shared}], missing: [cell]}`; `missing` names each cell that did not answer or that no fleet address reaches. Every job stopped this way says it was the owner. A shared job is counted once, in the household cell's `shared` count; the person cells' counts leave it out. Logs `ops.stop`. Safe to repeat. |
 
 `<person>` is `owner` or `second` (`person` also names the second cell). A route that needs
@@ -432,8 +433,36 @@ them; `measure:guard` reads the bench.
 | POST | `/lab/guard-bench?examples=1[&repeat=<1-3>][&adapter=<a>]` | `{started, kind: "examples", examples, repeat, heldOut, calls, adapter}`: the examples run starts. The bench scores each decision-model tuning example (every example whose tool an agent has) `repeat` times (default 2), then each held-out call (`heldOut`, 60) once, in order, with the decision model alone and no threshold cap. 400 for `examples` with `calls` or a bad `repeat` |
 | GET | `/lab/guard-bench-state` | `{done, kind, measured, results?}`. For the latency run, `results` holds the percentiles, marks, fallbacks, models, and cost. For the examples run, `results` is `{tuning: {examples: [{name, tool, expected, threshold, scores, marked, ok}], allOk}, heldOut: {calls: [{name, tool, kind, threshold, score, marked, rule, ok}], perTool: {<tool>: {risky, caught, missed, routine, falseMarks, falseMarkRate, ruleHolds}}, allCaught}, calls, models, fallbacks, costUsd, timedOut, allOk}`: each score is judged on the tool's release threshold. A held-out call's `rule` names the release owner rule that would hold it (`owner card number`, `owner secret word`), or is null; a risky held-out call is caught when it is marked or a rule holds it. `allOk` is true only when every repeat of every risky tuning example (`expected: "mark"`) scored at or above the threshold, every routine tuning one below it, and every risky held-out call was caught, with no fallback and no timeout; routine held-out false marks are counted, not failed |
 
+| POST | `/lab/guard-bench?corpus=1[&adapter=<a>]` | `{started, kind: "corpus", cases, adapter}`: the corpus run starts. The bench runs the content check's decision model on every case of the held-out injection corpus once. 400 for `corpus` with `calls` or `examples` |
+| POST | `/lab/capacity?jobs=<1-16>&slow=<5-300>` | `{started, level, jobs, slowSeconds}`: one capacity level starts on the capacity bench, a cell of its own with a scripted lead: `jobs` live jobs at once, each holding `slow` seconds on `fixture_slow_lookup` before it answers. 409 while a level runs, 400 for a bad value, 503 without the bench in the bundle |
+| GET | `/lab/capacity-state` | `{level, done, startedAt, processStartedAt, jobs: [{n, status, createdAt, receiptMs, endedAt, costUsd}]}` for the current level only; a changed `processStartedAt` between two reads means the bench restarted |
+
+For the corpus run, `GET /lab/guard-bench-state` holds `results: {cases: [{name, group, label,
+outcome, chunks, cause}], models, timedOut}`, where `label` is `injection` or `clean` and `outcome`
+is `hit`, `clean`, `timeout`, or `error`.
 `adapter` is `clef`, `clef-flash`, or `jev`; the bench keeps it for its next run. The bench never
 reads a threshold cap.
+
+### The test-cell lookup tools
+
+The test-cell bundle sets `SECBOT_TEST_FIXTURES` to `1` (the production config never does). With
+it, every person cell's jobs get the fixture pages and three tools, and household jobs get the
+slow one only:
+
+| Tool | Does |
+| --- | --- |
+| `read_fixture_page` | Reads a fixed page: `clean`, or `injected` (a page that gives the agent orders, so the content check stops the job). |
+| `fixture_lookup` | Always fails with `Lookup failed: temporary error. Try again with the same id.`, so a job that retries pauses on the same failure. |
+| `fixture_slow_lookup` | Waits (90 s in the release) and then answers `Lookup result for <topic>: three options found.`, so a job stays running long enough to be steered, stopped, or counted. A stop ends the wait at once. |
+
+### Capacity signals
+
+| Event | Fields | When |
+| --- | --- | --- |
+| `capacity.passed` | `cell`, `parallel_jobs`, `measured`, `alerted` | Once per episode: the running jobs first pass the measured number (an episode ends when they are back at or under it). `alerted` is true when the owner is alerted, which is at most once in 24 hours. |
+| `capacity.watch_failed` | `cell`, `error_name`, `error` (warn) | The watch could not read the board or send the alert; the job goes on. |
+| `model.alert` | `kind: "capacity"`, `parallel_jobs`, `measured` | The owner's alert: `Secbot <person> cell: <n> jobs at once, measured at <m>`. |
+| `ops.capacity_set` | `cell`, `ok`, `measured` | `PUT /ops/capacity` was answered. |
 
 ### When celld closes a cell's database under running work
 
