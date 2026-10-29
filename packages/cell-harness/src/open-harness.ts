@@ -377,6 +377,24 @@ export class CellHarness implements CellParts {
     const task = this.tasks?.job;
     if (task === undefined) throw new Error("the job task is not registered");
     const done = await this.harness.commit(async (tx) => {
+      // A shared job runs in the household: its resume goes there as an operation, never as a
+      // job task here on this person's own model and budget.
+      const row = (await tx.doc(JobBoardDoc)).jobs[String(n)];
+      const link = row?.shared ?? null;
+      if (row !== undefined && link !== null) {
+        if ((await tx.doc(StopDoc)).active !== null)
+          return { ok: false, reason: "locked" } as const;
+        if (link.household === null || (row.status !== "stopped" && row.status !== "blocked")) {
+          return { ok: false, reason: "not-stopped" } as const;
+        }
+        link.outbox.push({
+          kind: "resume",
+          opId: sharedOpId(this.person, this.now()),
+          person: this.person,
+          household: link.household,
+        });
+        return { ok: true, job: row.number, title: row.title, resumes: 0, shared: true } as const;
+      }
       const resumed = await resumeJobTask(tx, task, n, this.now(), by);
       return "refused" in resumed
         ? ({ ok: false, reason: resumed.refused } as const)
@@ -385,9 +403,11 @@ export class CellHarness implements CellParts {
             job: resumed.ok.number,
             title: resumed.ok.title,
             resumes: resumed.ok.resumes,
+            shared: false,
           } as const);
     }, context);
     if (!done.ok) return done;
+    if (done.shared) this.kickShared(context);
     logEvent("job.resumed", { cell: this.person, job: n, by, resumes: done.resumes });
     return { ok: true, job: done.job, title: done.title };
   }

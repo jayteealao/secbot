@@ -6,8 +6,15 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobBoardDoc, type JobRow, StopDoc } from "../src/docs.ts";
 import { SHARED_KEEPS_TIER, SHARED_NO_MARK, SHARED_NO_QUESTIONS } from "../src/lead-tools.ts";
 import { leadCalls } from "./escalation-helpers.ts";
-import { createFauxGateway, openTestCell, type TestCell, until } from "./fixtures.ts";
-import { jobResponder } from "./responders.ts";
+import {
+  createFauxGateway,
+  fauxAssistantMessage,
+  fauxText,
+  openTestCell,
+  type TestCell,
+  until,
+} from "./fixtures.ts";
+import { createHold, jobResponder } from "./responders.ts";
 import { answerFrom, openPair, type SharedPair } from "./shared-pair.ts";
 
 const PROPOSAL = {
@@ -181,5 +188,78 @@ describe("lead tools on a shared row", () => {
     expect(await leadCalls(pair.owner, "read_job", { job: 1 })).toContain(
       "Shared with second (you pay half), proposed by you, consent asking.",
     );
+  });
+});
+
+describe("the person's restart of a shared job", () => {
+  async function joinedAndRunning() {
+    const hold = createHold();
+    hold.hold("household");
+    const pair = await openPair(
+      hold.wrap(() => fauxAssistantMessage([fauxText("Plan for both: the coast.")])),
+    );
+    await offered(pair);
+    await answerFrom(pair, 1, true);
+    await pair.sync("second");
+    await until(() => hold.waiting("household") >= 1);
+    await pair.sync("owner");
+    return { pair, hold };
+  }
+
+  it("sends a resume to the household with no local job task, and both sides run it again", async () => {
+    const { pair, hold } = await joinedAndRunning();
+    try {
+      // The household's stop waits for the held model step, so the hold opens once it is stopping
+      // and closes again for the resumed run.
+      const stopping = pair.second.cell.stop("person").then(() => pair.sync("second"));
+      await until(
+        async () =>
+          (await pair.agent.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.active != null,
+      );
+      hold.release("household");
+      await stopping;
+      hold.hold("household");
+      await pair.sync("owner");
+      expect((await pair.row("owner", 1))?.status).toBe("stopped");
+      expect((await pair.row("second", 1))?.status).toBe("stopped");
+      pair.setDown(true);
+      expect(await pair.owner.cell.resumeJob(1)).toEqual({
+        ok: true,
+        job: 1,
+        title: "plan the May trip",
+      });
+      const ops = (await pair.row("owner", 1))?.shared?.outbox ?? [];
+      expect(ops.filter((op) => op.kind === "resume")).toHaveLength(1);
+      expect(ops.at(-1)).toMatchObject({ kind: "resume", person: "owner", household: 1 });
+      expect((await pair.row("owner", 1))?.taskId).toBeNull();
+      pair.setDown(false);
+      await pair.sync("owner");
+      // The resumed run reaches its first model step and waits there.
+      await until(() => hold.waiting("household") >= 1);
+      expect((await pair.agent.view()).rows.find((row) => row.number === 1)?.status).toBe(
+        "running",
+      );
+      await pair.sync("owner");
+      await pair.sync("second");
+      expect((await pair.row("owner", 1))?.status).toBe("running");
+      expect((await pair.row("second", 1))?.status).toBe("running");
+      expect((await pair.row("owner", 1))?.taskId).toBeNull();
+    } finally {
+      hold.release("household");
+    }
+  });
+
+  it("refuses a shared job that is not stopped, and an offer not yet answered", async () => {
+    const { pair, hold } = await joinedAndRunning();
+    try {
+      expect(await pair.owner.cell.resumeJob(1)).toEqual({ ok: false, reason: "not-stopped" });
+      pair.setDown(true);
+      await leadCalls(pair.owner, "propose_shared_job", { ...PROPOSAL, title: "paint the hall" });
+      expect(await pair.owner.cell.resumeJob(2)).toEqual({ ok: false, reason: "not-stopped" });
+      expect((await pair.row("owner", 2))?.taskId).toBeNull();
+      expect((await pair.row("owner", 1))?.shared?.outbox ?? []).toEqual([]);
+    } finally {
+      hold.release("household");
+    }
   });
 });
