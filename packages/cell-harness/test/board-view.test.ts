@@ -262,7 +262,6 @@ describe("the board view", () => {
       charges: [],
       resultAt: null,
       waitingBudget: false,
-      syncedAt: NOW,
       ...change,
     });
     const shared = (number: number, change: Partial<JobRow>, linked: Parameters<typeof link>[0]) =>

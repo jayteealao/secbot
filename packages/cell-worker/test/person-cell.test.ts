@@ -413,7 +413,6 @@ describe("PersonCell", () => {
               charges: [],
               resultAt: null,
               waitingBudget: false,
-              syncedAt: 1,
             },
           });
           return row.number;

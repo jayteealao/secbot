@@ -741,7 +741,6 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
             charges: [],
             resultAt: null,
             waitingBudget: false,
-            syncedAt: null,
           },
         });
         row.status = "waiting";

@@ -9,6 +9,7 @@ import {
   effectsDone,
   exchange,
   rowsFor,
+  SHARED_OPS_KEEP_MS,
   SharedJobsDoc,
   settle,
 } from "../src/shared-jobs.ts";
@@ -90,6 +91,19 @@ describe("shared operations in the household", () => {
     const again = await apply("owner", op);
     expect(again.acks).toEqual(first.acks);
     expect(Object.keys((await shared()).jobs)).toEqual(["1"]);
+  });
+
+  it("forgets an applied operation's answer once it is older than the keep time", async () => {
+    const { h, shared } = await open();
+    const at = Date.now();
+    const applyAt = (now: number, ...ops: Parameters<typeof applyOps>[2]) =>
+      h.commit((tx) => applyOps(tx, "owner", ops, { task: h.task, now }));
+    const old = propose();
+    await applyAt(at, old);
+    expect((await shared()).ops[old.opId]).toMatchObject({ opId: old.opId, at });
+    const fresh = propose("owner", "second", { title: "book the ferry" });
+    await applyAt(at + SHARED_OPS_KEEP_MS + 1, fresh);
+    expect(Object.keys((await shared()).ops)).toEqual([fresh.opId]);
   });
 
   it("refuses an answer from the requester, a stranger, an op sent by another cell, and a second answer", async () => {

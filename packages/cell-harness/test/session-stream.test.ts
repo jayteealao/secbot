@@ -154,7 +154,6 @@ describe("the shared frame", () => {
     charges: [],
     resultAt: null,
     waitingBudget: false,
-    syncedAt: 1,
   });
 
   it("lists the offers the lead gave the person, with who pays", () => {

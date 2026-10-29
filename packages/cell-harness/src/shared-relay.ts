@@ -125,7 +125,6 @@ function emptyLink(remote: SharedSyncRow, role: SharedLink["role"]): SharedLink 
     charges: [],
     resultAt: null,
     waitingBudget: false,
-    syncedAt: null,
   };
 }
 
@@ -147,6 +146,9 @@ function mirrorOf(
  * The reconcile commit: acks clear their operations; each household row updates or creates its
  * mirror; new results are stored once; new charges are booked once. Returns the notices to send.
  */
+/** Whether two plain values are equal, field by field. */
+const same = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
+
 async function reconcile(
   tx: Tx,
   parts: SharedParts,
@@ -239,16 +241,18 @@ async function reconcile(
     } else if (remote.consent === "asked" && role === "requester" && before === "asking") {
       link.consent = "asked";
     }
-    link.payer = remote.payer;
-    link.estimateUsd = remote.estimateUsd;
-    link.waitingBudget = remote.waitingBudget;
-    link.syncedAt = now;
-    row.tier = remote.tier;
-    row.effort = { requested: remote.effort.requested, applied: remote.effort.applied };
-    row.attempts = { raises: remote.attempts.raises, restarts: remote.attempts.restarts };
-    row.cost = Math.max(row.cost, remote.cost);
-    row.cap = remote.cap;
-    row.pause =
+    // Only what changed is written: most exchanges change nothing on most mirrored rows.
+    if (link.payer !== remote.payer) link.payer = remote.payer;
+    if (link.estimateUsd !== remote.estimateUsd) link.estimateUsd = remote.estimateUsd;
+    if (link.waitingBudget !== remote.waitingBudget) link.waitingBudget = remote.waitingBudget;
+    if (row.tier !== remote.tier) row.tier = remote.tier;
+    const effort = { requested: remote.effort.requested, applied: remote.effort.applied };
+    if (!same(row.effort, effort)) row.effort = effort;
+    const attempts = { raises: remote.attempts.raises, restarts: remote.attempts.restarts };
+    if (!same(row.attempts, attempts)) row.attempts = attempts;
+    if (remote.cost > row.cost) row.cost = remote.cost;
+    if (row.cap !== remote.cap) row.cap = remote.cap;
+    const pause: JobRow["pause"] =
       remote.pause === null
         ? null
         : {
@@ -256,7 +260,8 @@ async function reconcile(
             at: remote.pause.at,
             detail: remote.pause.detail,
           };
-    row.block =
+    if (!same(row.pause, pause)) row.pause = pause;
+    const block: JobRow["block"] =
       remote.block === null || remote.status !== "blocked"
         ? null
         : {
@@ -266,6 +271,7 @@ async function reconcile(
             chunk: null,
             at: remote.block.at,
           };
+    if (!same(row.block, block)) row.block = block;
     if (
       !(remote.consent === "declined" && role === "other") &&
       remote.result !== null &&

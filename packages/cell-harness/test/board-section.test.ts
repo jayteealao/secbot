@@ -147,7 +147,6 @@ describe("the lead's prompt sections", () => {
       charges: [],
       resultAt: null,
       waitingBudget: false,
-      syncedAt: 1,
     };
     const board = {
       nextNumber: 4,

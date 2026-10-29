@@ -147,7 +147,6 @@ const fullRow: JobRow = {
     charges: ["shared:3:1:owner"],
     resultAt: null,
     waitingBudget: false,
-    syncedAt: 2_700,
   },
 };
 
@@ -463,7 +462,6 @@ describe("board operations", () => {
           charges: [],
           resultAt: null,
           waitingBudget: false,
-          syncedAt: null,
         },
       });
       return { ...shared, shared: shared.shared === null ? null : { ...shared.shared } };

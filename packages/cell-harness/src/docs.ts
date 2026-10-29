@@ -456,8 +456,6 @@ export type SharedLink = {
   resultAt: number | null;
   /** The household holds the job until a payer has budget again. */
   waitingBudget: boolean;
-  /** The last exchange that answered this row; null before the first. */
-  syncedAt: number | null;
   /**
    * Notices for the lead about this job that were not delivered yet (each leaves when it is), so
    * a cell that restarts before a delivery sends it on its next exchange. Absent on older rows.

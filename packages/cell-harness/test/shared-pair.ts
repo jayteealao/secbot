@@ -155,7 +155,6 @@ export async function proposeFrom(pair: SharedPair, title = "plan the May trip")
         charges: [],
         resultAt: null,
         waitingBudget: false,
-        syncedAt: null,
       },
     });
     row.status = "waiting";

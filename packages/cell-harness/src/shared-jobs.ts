@@ -43,7 +43,17 @@ export type SharedAck = { opId: string; household?: number; error?: string };
  * the aborts run after the commit, so a household that ends between the two runs them again when
  * the person repeats the operation. Never sent to a person.
  */
-type StoredAck = SharedAck & { pending?: { stop?: true; aborts?: TaskId[] } };
+type StoredAck = SharedAck & {
+  pending?: { stop?: true; aborts?: TaskId[] };
+  /** When the operation was applied; absent on answers stored before this was kept. */
+  at?: number;
+};
+
+/**
+ * How long an applied operation's answer is kept for a repeat. A person cell repeats an operation
+ * only until its answer arrives, within minutes; a month leaves room for a cell that was down.
+ */
+export const SHARED_OPS_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 
 /** One shared job in the household. */
 export type SharedEntry = {
@@ -252,17 +262,30 @@ export async function applyOps(
       };
       pending.push(op.opId);
     }
+    ack.at = deps.now;
     shared.ops[op.opId] = ack;
     acks.push(answerOf(ack));
   }
+  pruneOps(shared.ops, deps.now);
   return { acks, ...out, pending };
 }
 
-/** The answer a person gets: the stored answer without its pending effects. */
+/** The answer a person gets: the stored answer without its pending effects or its time. */
 const answerOf = (stored: StoredAck): SharedAck => {
-  const { pending: _pending, ...answer } = stored;
+  const { pending: _pending, at: _at, ...answer } = stored;
   return { ...answer };
 };
+
+/**
+ * Drops the answers kept longer than SHARED_OPS_KEEP_MS whose effects all ran. An answer stored
+ * before its time was kept gets the time now, and goes once that much has passed again.
+ */
+function pruneOps(ops: Record<string, StoredAck>, now: number): void {
+  for (const [opId, stored] of Object.entries(ops)) {
+    if (stored.at === undefined) stored.at = now;
+    else if (stored.pending === undefined && now - stored.at > SHARED_OPS_KEEP_MS) delete ops[opId];
+  }
+}
 
 /** Records that the stop and aborts of these operations ran (after the exchange's commit). */
 export async function effectsDone(tx: Tx, opIds: readonly string[]): Promise<void> {
