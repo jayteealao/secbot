@@ -411,11 +411,15 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
             requested,
             applied: appliedEffort(deps.models(), modelId, requested),
           });
-          await tx.createTask(
+          // The task id is on the row from this commit, so a stop that lands before the task
+          // opens finds the job and aborts it.
+          const taskId = await tx.createTask(
             JobTask,
             { number: row.number, attempt: 0 },
             { ownership: { kind: "conversation" }, background: true },
           );
+          const placed = (await tx.doc(JobBoardDoc)).jobs[String(row.number)];
+          if (placed !== undefined) placed.taskId = taskId as TaskId;
           return { ...row, effort: { ...row.effort } };
         }
         const template = templateNamed(
@@ -438,11 +442,13 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
           turn,
           createdAt: deps.now(),
         });
-        await tx.createTask(
+        const taskId = await tx.createTask(
           JobTask,
           { number: row.number, attempt: 0 },
           { ownership: { kind: "conversation" }, background: true },
         );
+        const placed = (await tx.doc(JobBoardDoc)).jobs[String(row.number)];
+        if (placed !== undefined) placed.taskId = taskId as TaskId;
         return { ...row, effort: { ...row.effort } };
       }, context);
       if ("error" in started) return refusal(started.error);
