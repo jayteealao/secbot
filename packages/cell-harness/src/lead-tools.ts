@@ -59,6 +59,7 @@ import {
 import { DEFAULT_JOB_EFFORT, JOB_EFFORTS, TIERS } from "./release-defaults.ts";
 import { createReviewTask, type ReviewTask, reviewHold, startReview } from "./result-review.ts";
 import { sharedOpId } from "./shared-relay.ts";
+import { payerText } from "./shared-split.ts";
 import { STOP_RUNNING } from "./stop.ts";
 import { appliedEffort, capOf, templateNamed, templatesOf, tierModelOf } from "./templates.ts";
 
@@ -119,11 +120,7 @@ export const sharedNotStartedText = (n: number, other: string) =>
 
 /** Who pays a shared job, from this person's side. */
 export function sharedPayerText(link: NonNullable<JobRow["shared"]>): string {
-  return link.payer === "half"
-    ? "you pay half"
-    : link.payer === "you"
-      ? "you pay all"
-      : `${link.with} pays all`;
+  return payerText(link.payer, link.with);
 }
 
 /** The lead's note when a job will wait above a limit before it starts. */

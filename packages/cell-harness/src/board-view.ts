@@ -13,6 +13,7 @@ import {
   queueOf,
 } from "./job-board.ts";
 import type { JobTemplate } from "./release-defaults.ts";
+import { declinedOffer, payerText } from "./shared-split.ts";
 
 /** How far back the board lists jobs that ended: 24 hours. */
 export const FINISHED_WINDOW_MS = 24 * 60 * 60_000;
@@ -183,7 +184,21 @@ export function reasonOf(
         : { code: "question-lead", text: `asks the lead: "${question.text}"` },
     };
   }
-  if (input.budgetJobs.has(row.number) && !ENDED.has(row.status)) {
+  const link = row.shared;
+  if (link !== null && link.consent !== "joined" && !ENDED.has(row.status)) {
+    // A shared job runs only once the other person agrees to share its cost.
+    return {
+      status: "waiting",
+      reason:
+        link.role === "requester"
+          ? { code: "consent", text: `waiting for ${link.with} to agree to share the cost` }
+          : { code: "consent-you", text: "waiting for you to agree to share the cost" },
+    };
+  }
+  if (
+    (input.budgetJobs.has(row.number) || link?.waitingBudget === true) &&
+    !ENDED.has(row.status)
+  ) {
     return {
       status: "waiting",
       reason: {
@@ -214,6 +229,11 @@ function boardRow(row: JobRow, input: BoardViewInput): BoardRow {
     cap: row.cap,
     status,
     reason,
+    ...(row.shared === null
+      ? {}
+      : {
+          shared: `shared with ${row.shared.with}; ${payerText(row.shared.payer, row.shared.with)}`,
+        }),
   };
 }
 
@@ -223,13 +243,16 @@ export function boardView(input: BoardViewInput): BoardView {
   const reviewing = Object.values(board.jobs)
     .filter((row) => ENDED.has(row.status) && row.review?.status === "running")
     .sort((a, b) => a.number - b.number);
-  const rows = [...queueOf(board), ...reviewing].map((row) => boardRow(row, input));
+  const rows = [...queueOf(board), ...reviewing]
+    .filter((row) => !declinedOffer(row.shared))
+    .map((row) => boardRow(row, input));
   const listed = new Set(rows.map((row) => row.number));
   const finished = Object.values(board.jobs)
     .filter(
       (row) =>
         ENDED.has(row.status) &&
         !listed.has(row.number) &&
+        !declinedOffer(row.shared) &&
         row.endedAt !== null &&
         now - row.endedAt < FINISHED_WINDOW_MS,
     )

@@ -248,4 +248,78 @@ describe("the board view", () => {
       ].sort(),
     ).toEqual([1, 2]);
   });
+  it("prints a shared job's line and its consent reason lines, and hides a declined offer", () => {
+    const link = (
+      change: Partial<NonNullable<JobRow["shared"]>>,
+    ): NonNullable<JobRow["shared"]> => ({
+      household: 3,
+      role: "requester",
+      with: "alex",
+      consent: "joined",
+      payer: "half",
+      estimateUsd: 0.25,
+      outbox: [],
+      charges: [],
+      resultAt: null,
+      waitingBudget: false,
+      syncedAt: NOW,
+      ...change,
+    });
+    const shared = (number: number, change: Partial<JobRow>, linked: Parameters<typeof link>[0]) =>
+      base(number, {
+        template: "household",
+        tier: "cheap",
+        cap: 0.25,
+        cost: 0.09,
+        ...change,
+        shared: link(linked),
+      });
+    const board = boardOf([
+      shared(1, {}, {}),
+      shared(2, {}, { payer: "you" }),
+      shared(3, {}, { payer: "them" }),
+      shared(4, { status: "queued", taskId: null }, { consent: "asked" }),
+      shared(
+        5,
+        { status: "queued", taskId: null },
+        { role: "other", with: "sam", consent: "offered" },
+      ),
+      shared(6, {}, { waitingBudget: true }),
+      shared(7, ended("failed", NOW - HOUR), { role: "other", with: "sam", consent: "declined" }),
+      shared(8, { status: "queued", taskId: null }, { consent: "asking", household: null }),
+    ]);
+    const view = boardView(input(board));
+    const listed = [...view.rows, ...view.finished].map((row) => [
+      row.number,
+      row.status,
+      row.shared,
+      row.reason?.text ?? null,
+    ]);
+    expect(listed).toEqual([
+      [1, "running", "shared with alex; you pay half", null],
+      [2, "running", "shared with alex; you pay all", null],
+      [3, "running", "shared with alex; alex pays all", null],
+      [
+        4,
+        "waiting",
+        "shared with alex; you pay half",
+        "waiting for alex to agree to share the cost",
+      ],
+      [5, "waiting", "shared with sam; you pay half", "waiting for you to agree to share the cost"],
+      [
+        6,
+        "waiting",
+        "shared with alex; you pay half",
+        "over your monthly limit; waits for the owner or 1 Nov",
+      ],
+      [
+        8,
+        "waiting",
+        "shared with alex; you pay half",
+        "waiting for alex to agree to share the cost",
+      ],
+    ]);
+    expect(view.rows.find((row) => row.number === 1)).not.toHaveProperty("reason.code", "consent");
+    expect(boardView(input(boardOf([base(1)]))).rows[0]).not.toHaveProperty("shared");
+  });
 });

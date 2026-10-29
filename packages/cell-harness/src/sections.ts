@@ -28,6 +28,7 @@ import {
 import { openReceipts } from "./receipts.ts";
 import { ESCALATION_LIMITS, type JobTemplate, LOOP_LIMIT } from "./release-defaults.ts";
 import { localTime } from "./reminder.ts";
+import { declinedOffer, payerText } from "./shared-split.ts";
 import { templatesOf } from "./templates.ts";
 
 export interface TimeEnv {
@@ -83,6 +84,10 @@ export function bookmarkSection(bookmark: Bookmark | null): string | undefined {
  */
 export function jobStateDetails(row: JobRow): string {
   const details: string[] = [];
+  const link = row.shared;
+  if (link !== null && link.role === "other" && link.consent === "offered") {
+    details.push(`offer from ${link.with}: give it with offer_shared`);
+  }
   if (row.status === "paused" && row.pause !== null) {
     details.push(
       row.pause.reason === "cap"
@@ -102,6 +107,7 @@ export function jobStateDetails(row: JobRow): string {
   if (row.status === "blocked" && row.block !== null) {
     details.push(`blocked: ${blockReason(row.block)}`);
   }
+  if (link !== null) details.push(`shared with ${link.with}, ${payerText(link.payer, link.with)}`);
   const { raises, restarts } = row.attempts;
   if (raises > 0 || restarts > 0) {
     details.push(
@@ -141,7 +147,7 @@ export function jobsSection(
     (row) => ENDED.has(row.status) && row.review?.status === "running",
   );
   // Live jobs in the order they run (the person can reorder them), then those under review.
-  const live = [...liveRows(board), ...reviewing];
+  const live = [...liveRows(board), ...reviewing].filter((row) => !declinedOffer(row.shared));
   if (live.length === 0) lines.push("No live jobs.");
   else {
     lines.push("Live jobs, in queue order:");

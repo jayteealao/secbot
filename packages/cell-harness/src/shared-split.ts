@@ -48,3 +48,12 @@ export function payerOf(
   const meOver = role === "requester" ? requesterOver : otherOver;
   return meOver ? "them" : "you";
 }
+
+/** Who pays a shared job, as the person reads it: `you pay half`, `you pay all`, or `<other> pays all`. */
+export function payerText(payer: "half" | "you" | "them", other: string): string {
+  return payer === "half" ? "you pay half" : payer === "you" ? "you pay all" : `${other} pays all`;
+}
+
+/** A person-side row the board and the lead do not list: an offer this person declined. */
+export const declinedOffer = (link: { role: string; consent: string } | null): boolean =>
+  link !== null && link.role === "other" && link.consent === "declined";

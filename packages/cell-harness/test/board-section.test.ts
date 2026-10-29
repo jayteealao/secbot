@@ -135,6 +135,48 @@ describe("the lead's prompt sections", () => {
     ]);
   });
 
+  it("lists a shared job with who it is shared with and who pays, and an offer to give", () => {
+    const link = {
+      household: 3,
+      role: "requester" as const,
+      with: "alex",
+      consent: "joined" as const,
+      payer: "half" as const,
+      estimateUsd: 0.25,
+      outbox: [],
+      charges: [],
+      resultAt: null,
+      waitingBudget: false,
+      syncedAt: 1,
+    };
+    const board = {
+      nextNumber: 4,
+      byConversation: {},
+      jobs: {
+        "1": row(1, { template: "household", tier: "cheap", shared: link }),
+        "2": row(2, {
+          template: "household",
+          tier: "cheap",
+          status: "queued",
+          shared: { ...link, role: "other", with: "sam", consent: "offered", payer: "them" },
+        }),
+        "3": row(3, {
+          template: "household",
+          tier: "cheap",
+          status: "failed",
+          endedAt: 2,
+          shared: { ...link, role: "other", with: "sam", consent: "declined" },
+        }),
+      },
+    };
+    const lines = jobsSection(board, templatesOf(), []).split("\n").slice(2, 4);
+    expect(lines).toEqual([
+      "#1 household cheap/medium running routine $0.12/$1 job title 1 (shared with alex, you pay half)",
+      "#2 household cheap/medium queued routine $0.12/$1 job title 2 (offer from sam: give it with offer_shared; shared with sam, sam pays all)",
+    ]);
+    expect(jobsSection(board, templatesOf(), [])).not.toContain("job title 3");
+  });
+
   it("says when no job is live and nothing waits", () => {
     expect(jobsSection({ nextNumber: 1, jobs: {}, byConversation: {} }, templatesOf(), [])).toBe(
       [
