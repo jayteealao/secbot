@@ -97,6 +97,8 @@ export interface JobTaskDeps {
    * reviewed first.
    */
   readonly relay?: boolean;
+  /** The instructions every job of this task gets in place of its template's (the household agent). */
+  readonly instruction?: string;
 }
 
 const textOf = (message: AssistantMessage | undefined): string =>
@@ -113,6 +115,7 @@ export async function configureJob(
   tx: Tx,
   row: Pick<JobRow, "template" | "tier" | "effort" | "conversationId">,
   extensions: readonly Extension[],
+  instruction?: string,
 ): Promise<void> {
   if (row.conversationId === null) return;
   const overrides = (await tx.doc(RoleModelsDoc)).overrides;
@@ -123,7 +126,7 @@ export async function configureJob(
     model: modelRef(tierModelOf(row.tier, overrides)),
     thinkingLevel: row.effort.applied as ModelThinkingLevel,
     extensions,
-    instructions: template?.instruction ?? `You are the ${row.template} specialist.`,
+    instructions: instruction ?? template?.instruction ?? `You are the ${row.template} specialist.`,
   });
 }
 
@@ -278,7 +281,7 @@ export function createJobTask(deps: JobTaskDeps) {
           row.status = "running";
           (await tx.doc(JobBoardDoc)).byConversation[String(child.id)] = n;
           await tx.doc(UsageDoc, child.id);
-          await configureJob(tx, row, deps.extensions());
+          await configureJob(tx, row, deps.extensions(), deps.instruction);
           started = { ...row, effort: { ...row.effort } };
           return { status: "running", checkpoint: { phase: "run" } };
         }, context);

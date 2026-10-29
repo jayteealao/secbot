@@ -44,6 +44,8 @@ export interface JobGateDeps {
   readonly harness: () => Harness;
   readonly holds: JobHolds;
   readonly now: () => number;
+  /** The household agent: no lead to notify of a pause; the pause shows on both people's boards. */
+  readonly relay?: boolean;
 }
 
 const usd = (value: number) => `$${value.toFixed(2)}`;
@@ -90,7 +92,7 @@ export function createJobGate(deps: JobGateDeps): Extension {
 
   /** One wake notice per pause: the request id is made from the job and the pause's time. */
   const notify = async (row: JobRow, context: Context) => {
-    if (row.pause === null) return;
+    if (row.pause === null || deps.relay === true) return;
     const lead = await harness().conversation(ROOT_CONVERSATION_ID, context);
     await lead?.submit(
       {
