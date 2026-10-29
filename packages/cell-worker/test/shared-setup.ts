@@ -11,11 +11,14 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DEFAULT_PERSON_LIMIT_USD } from "@secbot/cell-harness";
 import {
+  addSpend,
   type FauxRequest,
   fauxAssistantMessage,
   fauxText,
   fauxToolCall,
+  until,
 } from "@secbot/cell-harness/testing";
 import type { Io } from "../../cli/src/io.ts";
 import { run } from "../../cli/src/main.ts";
@@ -122,8 +125,20 @@ export interface SharedSetup extends GuardSetup {
    * `operator`), with no TTY.
    */
   secbotAs(person: string, argv: readonly string[], options?: { operator?: boolean }): Promise<Ran>;
-  /** Sets a person's monthly limit under their spend, so their budget counts as used up. */
+  /**
+   * Books spend over a small limit for `person` and waits until the household's budget board reads
+   * the person as used up, as the household reads it when it splits a charge.
+   */
   budgetOver(person: string): Promise<void>;
+  /** Raises `person`'s limit back to the default and waits until the household reads it. */
+  budgetBack(person: string): Promise<void>;
+  /**
+   * Two fleets: the next shared-job exchange `person` sends across fleets reaches the household,
+   * which applies it, and its answer is lost (a 503), so the person sends the same ops again.
+   */
+  dropNextAnswer(person: string): void;
+  /** Each shared-job exchange sent across fleets: who sent it, its op ids, and the answer status. */
+  readonly crossFleetSyncs: { person: string; opIds: string[]; status: number }[];
   close(): Promise<void>;
 }
 
@@ -213,15 +228,41 @@ export async function sharedSetup(options: {
     });
     return { code, out, err };
   };
+  const drops = new Set<string>();
+  const crossFleetSyncs: { person: string; opIds: string[]; status: number }[] = [];
+  /** Waits until the household's newest spend report for `person` reads used up (or not). */
+  const householdReads = async (person: string, over: boolean) => {
+    const household = setup.household;
+    if (household === undefined) throw new Error("no household cell");
+    await until(async () => {
+      const report = (await household.budget()).reports.find((each) => each.cell === person);
+      return report !== undefined && report.spentUsd >= report.limitUsd === over;
+    });
+  };
+  const limitTo = async (person: string, usd: number, over: boolean) => {
+    const harness = setup.harness(person);
+    await harness.setLimit(usd, "owner");
+    harness.budget.watch.trigger();
+    await harness.budget.watch.settled();
+    await householdReads(person, over);
+  };
   let restoreFetch: (() => void) | undefined;
   if (options.fleets === 2) {
     const original = globalThis.fetch;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
-      if (url.startsWith(HOUSEHOLD_URL)) {
-        return route(new Request(input instanceof Request ? input : url, init), setup.env);
-      }
-      return original(input, init);
+      if (!url.startsWith(HOUSEHOLD_URL)) return original(input, init);
+      const request = new Request(input instanceof Request ? input : url, init);
+      if (!url.endsWith("/internal/household/shared-sync")) return route(request, setup.env);
+      const body = (await request.clone().json()) as {
+        person: string;
+        ops: { opId: string }[];
+      };
+      const answered = await route(request, setup.env);
+      const lost = drops.delete(body.person);
+      const status = lost ? 503 : answered.status;
+      crossFleetSyncs.push({ person: body.person, opIds: body.ops.map((op) => op.opId), status });
+      return lost ? Response.json({ error: "unavailable" }, { status: 503 }) : answered;
     }) as typeof fetch;
     restoreFetch = () => {
       globalThis.fetch = original;
@@ -233,9 +274,18 @@ export async function sharedSetup(options: {
     fleets: options.fleets,
     fetchFor,
     secbotAs,
+    crossFleetSyncs,
     budgetOver: async (person) => {
-      // A zero limit: any spend at all is at or over it.
-      await setup.harness(person).setLimit(0, "owner");
+      // The limit must be above zero, so the spend goes over a small one.
+      await addSpend(setup.harness(person), 0.02);
+      await limitTo(person, 0.01, true);
+    },
+    budgetBack: (person) => limitTo(person, DEFAULT_PERSON_LIMIT_USD, false),
+    dropNextAnswer: (person) => {
+      if (options.fleets !== 2 || person !== "owner") {
+        throw new Error("only the owner's exchange crosses fleets");
+      }
+      drops.add(person);
     },
     close: async () => {
       restoreFetch?.();
