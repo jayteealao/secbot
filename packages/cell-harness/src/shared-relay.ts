@@ -12,7 +12,7 @@ import type { Context } from "@earendil-works/chord";
 import { withoutAbortSignal } from "@earendil-works/chord/context";
 import { type Harness, ROOT_CONVERSATION_ID, type Tx } from "@earendil-works/pi-durable";
 import type { BudgetWaiter } from "./budget-gate.ts";
-import { errorFields, logEvent } from "./cell-parts.ts";
+import { errorFields, logEvent, syncFailed } from "./cell-parts.ts";
 import {
   ENDED,
   JobBoardDoc,
@@ -603,17 +603,6 @@ export function syncShared(parts: SharedParts, context: Context): Promise<SyncOu
   running.set(parts.harness, next);
   return next;
 }
-
-/**
- * The handler of an exchange that failed where nobody awaits its answer (a reconcile commit or a
- * notice delivery that threw): it logs the failure, and the outbox waits for the next exchange.
- */
-export const syncFailed =
-  (person: string) =>
-  (error: unknown): undefined => {
-    logEvent("shared.sync_failed", { cell: person, ...errorFields(error) }, "warn");
-    return undefined;
-  };
 
 /** Starts an exchange in the background (never awaited by a tool); a failure only logs. */
 export function kickShared(parts: SharedParts, context: Context): void {

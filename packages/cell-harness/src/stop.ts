@@ -13,9 +13,8 @@
 import type { Context } from "@earendil-works/chord";
 import { withoutAbortSignal } from "@earendil-works/chord/context";
 import { type Conversation, type Harness, LiveDoc, type TaskId } from "@earendil-works/pi-durable";
-import { errorFields, logEvent } from "./cell-parts.ts";
+import { errorFields, logEvent, syncFailed } from "./cell-parts.ts";
 import { ENDED, JobBoardDoc, type JobRow, type JobStop, StopDoc } from "./docs.ts";
-import { syncFailed } from "./shared-relay.ts";
 
 export interface StopParts {
   readonly harness: Harness;

@@ -100,3 +100,15 @@ export function errorFields(error: unknown): { error_name: string; error: string
   }
   return { error_name: typeof error, error: safeErrorText(String(error)) };
 }
+
+/**
+ * The handler of a shared-job exchange that failed where nobody awaits its answer (a reconcile
+ * commit or a notice delivery that threw): it logs the failure, and the outbox waits for the next
+ * exchange.
+ */
+export const syncFailed =
+  (person: string) =>
+  (error: unknown): undefined => {
+    logEvent("shared.sync_failed", { cell: person, ...errorFields(error) }, "warn");
+    return undefined;
+  };
