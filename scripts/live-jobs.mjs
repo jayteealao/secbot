@@ -354,7 +354,22 @@ export async function signals({ out, since, until = String(Math.floor(Date.now()
   const { values } = await privateValues();
   await writeEvidence(out, "signals.txt", text, values);
   console.log(text);
+  // A count the runner could not give is not evidence: the run fails instead of looking complete.
+  const all = Object.values(counts).flatMap((byCell) => Object.values(byCell));
+  const missed = all.filter((count) => count === undefined).length;
+  if (missed > 0) {
+    console.error(
+      `signals: could not count ${missed} of ${all.length} (is .scratch/tc.sh present?)`,
+    );
+    return 1;
+  }
   return 0;
+}
+
+/** An evidence file is present when it exists; signals.txt also needs every count (no `?`). */
+async function evidencePresent(out, file) {
+  if (!existsSync(join(out, file))) return false;
+  return file !== "signals.txt" || !(await readFile(join(out, file), "utf8")).includes("?");
 }
 
 /** summary.md: every group's results, one line per step and per criterion. */
@@ -365,8 +380,10 @@ export async function report({ out }) {
   }
   const files = ["models-live.txt", ...new Set(STEPS.map((step) => step.evidence)), "signals.txt"];
   const lines = [buildReport(results, STEPS).trimEnd(), "", "EVIDENCE FILES"];
+  const present = {};
   for (const file of files) {
-    lines.push(`${file.padEnd(28)}${existsSync(join(out, file)) ? "present" : "missing"}`);
+    present[file] = await evidencePresent(out, file);
+    lines.push(`${file.padEnd(28)}${present[file] ? "present" : "missing"}`);
   }
   const alert = results.alert?.status ?? "not run";
   lines.push("", `${"capacity alert".padEnd(21)}${alert}`);
@@ -374,7 +391,7 @@ export async function report({ out }) {
   await writeEvidence(out, "summary.md", text, {});
   console.log(text);
   const passed = STEPS.every((step) => results[step.id]?.status === "pass") && alert === "pass";
-  return passed && files.every((file) => existsSync(join(out, file))) ? 0 : 1;
+  return passed && files.every((file) => present[file]) ? 0 : 1;
 }
 
 const main = async () => {
