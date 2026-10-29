@@ -68,7 +68,7 @@ export interface FauxRequest {
   readonly last: Message | undefined;
   readonly lastText: string;
   readonly modelId: string;
-  /** "lead", or the specialist named in the system prompt, or "unknown". */
+  /** "lead", "household", or the specialist named in the system prompt, or "unknown". */
   readonly role: string;
 }
 
@@ -90,7 +90,9 @@ export function describeRequest(context: TranscriptContext, modelId: string): Fa
   const custom = /You are the custom specialist "([a-z0-9-]+)"/.exec(system)?.[1];
   const role = system.includes("You are the lead agent")
     ? "lead"
-    : (specialist ?? custom ?? "unknown");
+    : system.includes("You are the household agent")
+      ? "household"
+      : (specialist ?? custom ?? "unknown");
   return { system, last, lastText: last === undefined ? "" : text(last.content), modelId, role };
 }
 

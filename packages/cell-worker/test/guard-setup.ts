@@ -68,6 +68,15 @@ export async function guardSetup(
     readonly respond?: Responder;
     /** A household cell (with its budget board) behind the person cells' binding. */
     readonly household?: boolean;
+    /**
+     * The household's people: the household cell runs their shared jobs on the faux gateway, and
+     * each person cell knows the other person to share with.
+     */
+    readonly persons?: readonly string[];
+    /** The fetch the household cell uses for its outbound calls (heartbeat pings). */
+    readonly householdFetch?: typeof fetch;
+    /** Extra worker settings per person cell (for example a household reached over HTTP). */
+    readonly personEnv?: (person: string) => Record<string, string>;
     /** The person cells' environment (for example the alert stand-in's settings). */
     readonly cellEnv?: CellEnv;
     /** The fetch the person cells use for alerts. */
@@ -88,9 +97,21 @@ export async function guardSetup(
     readonly fixturePages?: OpenCellOptions["fixturePages"];
   } = {},
 ): Promise<GuardSetup> {
+  const gateway = createFauxGateway(options.respond ?? scripted);
   const household =
     options.household === true
-      ? new HouseholdCell({ storage: new FakeCelldStorage() }, {})
+      ? new HouseholdCell(
+          { storage: new FakeCelldStorage() },
+          {},
+          options.persons === undefined
+            ? {}
+            : {
+                persons: options.persons,
+                models: gateway.models,
+                ...(options.now === undefined ? {} : { now: options.now }),
+                ...(options.householdFetch === undefined ? {} : { fetch: options.householdFetch }),
+              },
+        )
       : undefined;
   const householdBinding =
     household === undefined
@@ -124,7 +145,6 @@ export async function guardSetup(
             get: () => secrets as unknown as SecretsStubLike,
           },
         };
-  const gateway = createFauxGateway(options.respond ?? scripted);
   const opened: CellHarness[] = [];
   const cells = new Map<string, PersonCell>();
   const byPerson = new Map<string, CellHarness>();
@@ -149,7 +169,7 @@ export async function guardSetup(
           : {};
       cell = new PersonCell(
         { storage, ...socketState },
-        { ...householdBinding, ...secretsBinding },
+        { ...householdBinding, ...secretsBinding, ...options.personEnv?.(person) },
         async (storage, name, extras) => {
           const harness = await openCellHarness(storage, {
             person: name,
@@ -161,6 +181,7 @@ export async function guardSetup(
             ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
             ...(options.now === undefined ? {} : { now: options.now }),
             ...(options.fixturePages === undefined ? {} : { fixturePages: options.fixturePages }),
+            ...(options.persons === undefined ? {} : { persons: options.persons }),
             // A passing decision model unless a test gives its own: the suites that are not about
             // the model layers keep their request counts.
             guard: { decision: passingDecision, ...options.guard },
