@@ -5,6 +5,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { describe, expect, it, vi } from "vitest";
 import { JobBoardDoc } from "../src/docs.ts";
+import { SHARED_OPS_MAX } from "../src/household-contract.ts";
 import { readMonth } from "../src/month-ledger.ts";
 import { sharedOpId, syncShared } from "../src/shared-relay.ts";
 import {
@@ -131,6 +132,25 @@ describe("the person side's reconcile", () => {
     expect(view.rows).toEqual([]);
     await until(async () => asked === 1);
     release();
+  });
+
+  it("sends at most the household's number of operations at once, and the rest next time", async () => {
+    const pair = await openPair();
+    const n = await proposeFrom(pair);
+    await pair.sync("owner");
+    await pair.owner.cell.harness.commit(async (tx) => {
+      const link = (await tx.doc(JobBoardDoc)).jobs[String(n)]?.shared;
+      if (link === null || link === undefined) throw new Error("no link");
+      for (let i = 0; i < SHARED_OPS_MAX + 5; i++) {
+        link.outbox.push({ kind: "stop", opId: `stop-${i}`, person: "owner" });
+      }
+    }, BACKGROUND_CONTEXT);
+    await pair.sync("owner");
+    expect(pair.requests.at(-1)?.ops).toHaveLength(SHARED_OPS_MAX);
+    expect((await pair.row("owner", n))?.shared?.outbox).toHaveLength(5);
+    await pair.sync("owner");
+    expect(pair.requests.at(-1)?.ops).toHaveLength(5);
+    expect((await pair.row("owner", n))?.shared?.outbox).toEqual([]);
   });
 
   it("ends the requesting row failed with the decline text, and the offer row too", async () => {

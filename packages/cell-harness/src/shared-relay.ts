@@ -21,11 +21,12 @@ import {
   type ResultKind,
   type SharedLink,
 } from "./docs.ts";
-import type {
-  HouseholdClient,
-  SharedOp,
-  SharedSyncAnswer,
-  SharedSyncRow,
+import {
+  type HouseholdClient,
+  SHARED_OPS_MAX,
+  type SharedOp,
+  type SharedSyncAnswer,
+  type SharedSyncRow,
 } from "./household-contract.ts";
 import { createSharedRow, endRow, placeInQueue } from "./job-board.ts";
 import { addToolUsage, costOnlyUsage } from "./month-ledger.ts";
@@ -505,7 +506,8 @@ async function syncOnce(parts: SharedParts, context: Context): Promise<SyncOutco
   if (client?.sharedSync === undefined) return { outcome: "skipped" };
   const started = Date.now();
   const board = await parts.harness.snapshot(JobBoardDoc, context);
-  const sent = outboxOf(board ?? { jobs: {} });
+  // The household takes at most SHARED_OPS_MAX at once; the rest go in the next exchange.
+  const sent = outboxOf(board ?? { jobs: {} }).slice(0, SHARED_OPS_MAX);
   let answer: SharedSyncAnswer;
   try {
     answer = await withTimeout(

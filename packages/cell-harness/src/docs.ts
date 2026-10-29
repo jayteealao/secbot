@@ -12,7 +12,7 @@ import {
 } from "@earendil-works/pi-durable";
 import type { ActivityRecord } from "./activity.ts";
 import type { HeldCall } from "./approvals.ts";
-import type { SharedOp } from "./household-contract.ts";
+import type { JOB_PRIORITIES, SharedOp } from "./household-contract.ts";
 import {
   DEFAULT_DECISION_ADAPTER,
   type DecisionAdapter,
@@ -317,7 +317,7 @@ export const HouseholdBudgetDoc = defineDoc<{
   }),
 });
 
-export type JobPriority = "urgent" | "deadline" | "routine" | "research";
+export type JobPriority = (typeof JOB_PRIORITIES)[number];
 /**
  * A job's status. `paused` waits for the lead's escalation move (cap or loop guard); `waiting`
  * waits for an answer to its question; `rejected` is a risky result the reviewer turned down;

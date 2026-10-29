@@ -3,19 +3,22 @@
  * household's people, and every operation has a known kind, an operation id, and fields of the
  * right shape and length. Anything else is refused before it reaches the shared store.
  */
-import type { SharedOp, SharedSyncRequest } from "@secbot/cell-harness";
+import {
+  JOB_EFFORTS,
+  JOB_PRIORITIES,
+  SHARED_OPS_MAX,
+  type SharedOp,
+  type SharedSyncRequest,
+  TIERS,
+} from "@secbot/cell-harness";
 import { RefusedHouseholdChange } from "./change-log.ts";
 
 /** The operation id pattern of the change log and the budget board. */
 const OP_ID = /^[A-Za-z0-9._:-]{1,200}$/;
 const ISO_DATE = /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/;
 
-/** The most operations one exchange carries. */
-export const SHARED_OPS_MAX = 50;
-
-const PRIORITIES = ["urgent", "deadline", "routine", "research"] as const;
-const TIERS = ["cheap", "mid", "frontier"] as const;
-const EFFORTS = ["low", "medium", "high"] as const;
+/** The most operations one exchange carries (the contract's number, which a person cell keeps). */
+export { SHARED_OPS_MAX };
 
 type Fields = Record<string, unknown>;
 
@@ -90,10 +93,10 @@ function validateOp(value: unknown, person: string, persons: readonly string[]):
         local: number(value, "local"),
         title: line(value, "title", 80),
         brief: text(value, "brief", 8_000),
-        priority: oneOf(value, "priority", PRIORITIES),
+        priority: oneOf(value, "priority", JOB_PRIORITIES),
         deadline,
         tier: oneOf(value, "tier", TIERS),
-        effort: oneOf(value, "effort", EFFORTS),
+        effort: oneOf(value, "effort", JOB_EFFORTS),
         estimateUsd: estimate,
       };
     }

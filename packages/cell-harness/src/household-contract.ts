@@ -5,6 +5,15 @@
  * use one definition.
  */
 
+/** The job tiers, cheapest first; the household checks a shared job's tier against these. */
+export const TIERS = ["cheap", "mid", "frontier"] as const;
+/** The efforts the lead can ask for. */
+export const JOB_EFFORTS = ["low", "medium", "high"] as const;
+/** A job's priorities, as the board orders them. */
+export const JOB_PRIORITIES = ["urgent", "deadline", "routine", "research"] as const;
+/** The most operations one shared-job exchange carries; a person cell sends no more at once. */
+export const SHARED_OPS_MAX = 50;
+
 /** A cell name: owner, second, household, and later cells. */
 export const CELL_NAME = /^[a-z][a-z0-9-]{0,31}$/;
 
@@ -144,10 +153,10 @@ export type SharedOp =
       readonly local: number;
       readonly title: string;
       readonly brief: string;
-      readonly priority: "urgent" | "deadline" | "routine" | "research";
+      readonly priority: (typeof JOB_PRIORITIES)[number];
       readonly deadline: string | null;
-      readonly tier: "cheap" | "mid" | "frontier";
-      readonly effort: "low" | "medium" | "high";
+      readonly tier: (typeof TIERS)[number];
+      readonly effort: (typeof JOB_EFFORTS)[number];
       readonly estimateUsd: number;
     }
   | {
@@ -201,8 +210,8 @@ export interface SharedSyncRow {
   readonly pause: { readonly reason: string; readonly at: number; readonly detail: string } | null;
   readonly block: { readonly cause: string; readonly at: number } | null;
   readonly waitingBudget: boolean;
-  readonly tier: "cheap" | "mid" | "frontier";
-  readonly effort: { readonly requested: "low" | "medium" | "high"; readonly applied: string };
+  readonly tier: (typeof TIERS)[number];
+  readonly effort: { readonly requested: (typeof JOB_EFFORTS)[number]; readonly applied: string };
   readonly attempts: { readonly raises: number; readonly restarts: number };
   readonly cost: number;
   readonly cap: number;

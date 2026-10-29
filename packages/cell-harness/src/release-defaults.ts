@@ -43,8 +43,10 @@ export const STARTER_SPECIALISTS: readonly StarterSpecialist[] = [
   },
 ];
 
-/** The job tiers, cheapest first. The lead picks one per job; the owner maps each to a model. */
-export const TIERS = ["cheap", "mid", "frontier"] as const;
+import { JOB_EFFORTS, TIERS } from "./household-contract.ts";
+
+/** The job tiers, cheapest first (owned by the household contract, which checks them too). */
+export { JOB_EFFORTS, TIERS };
 
 export type Tier = (typeof TIERS)[number];
 
@@ -57,9 +59,6 @@ export const TIER_MODELS: Readonly<Record<Tier, string>> = {
 
 /** The release per-job cost cap of each tier, in USD (the owner changes it with no release). */
 export const TIER_CAPS_USD: Readonly<Record<Tier, number>> = { cheap: 0.25, mid: 1, frontier: 3 };
-
-/** The efforts the lead can ask for; the model may clamp it, and the board keeps both. */
-export const JOB_EFFORTS = ["low", "medium", "high"] as const;
 
 export type JobEffort = (typeof JOB_EFFORTS)[number];
 
