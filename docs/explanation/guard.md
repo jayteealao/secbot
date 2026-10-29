@@ -168,8 +168,8 @@ to the lead. For a health or production target, the secrets cell makes the outsi
   on a test cell, and the reviewer on outside actions covers what it misses.
 - **The household agent runs shared jobs without the guard.** The household cell has no person
   to answer a held call, so its agent gets no rule stage, decision model, or reviewer before a
-  call. Its jobs get two tools only, `household_read` and `household_change`; any other tool is
-  refused. A `household_change` marks the result risky, so a reviewer on another model checks it
+  call. Its jobs get `household_read` and `household_change`, plus a search of their own earlier
+  attempts; any other tool is refused. A `household_change` marks the result risky, so a reviewer on another model checks it
   before either lead may use it, but the change itself has already been made. A person's prohibit
   or ask-first rule on `household_change` does not bind a shared job, and the other person agrees
   to the job's title and cost, not its brief. A shared job can therefore edit or remove a shared
