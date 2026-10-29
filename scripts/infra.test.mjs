@@ -368,3 +368,21 @@ test("the first release's snapshot skips only the fleets that fail and were neve
     ["prod-owner-cell", "prod-shared-cell"],
   );
 });
+
+test("the release tool runs the capacity bench and the corpus run on the test cell with the operator key", () => {
+  const routes = /\[\[ "\$lab_route" =~ \^\(([^)]*)\)\$ \]\]/.exec(releaseTool)?.[1].split("|");
+  assert.ok(routes?.includes("capacity") && routes.includes("capacity-state"));
+  assert.match(releaseTool, /--jobs\) jobs="\$value"/);
+  assert.match(releaseTool, /--slow\) slow="\$value"/);
+  assert.match(releaseTool, /--corpus\) corpus=1/);
+  const lab = shellFunction("do_lab");
+  assert.match(lab, /capacity\) path="\/lab\/capacity\?jobs=\$jobs&slow=\$slow" ;;/);
+  assert.match(lab, /capacity-state\) method=GET ;;/);
+  assert.match(lab, /path="\/lab\/guard-bench\?corpus=1\$\{adapter:\+&adapter=\$adapter\}"/);
+  assert.match(
+    lab,
+    /capacity \| capacity-state\) header="\$\(operator_header "\$\(env_of_fleet test\)"\)" ;;/,
+  );
+  assert.ok(releaseTool.includes('die "lab --route capacity needs --jobs and --slow"'));
+  assert.ok(releaseTool.includes('die "send --corpus alone, not with --calls or --examples"'));
+});

@@ -34,7 +34,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -144,6 +144,10 @@ const flags = (argv) =>
       adapter: { type: "string" },
       examples: { type: "boolean" },
       repeat: { type: "string" },
+      "parallel-jobs": { type: "string" },
+      "slow-seconds": { type: "string" },
+      out: { type: "string" },
+      corpus: { type: "boolean" },
     },
     allowPositionals: true,
   }).values;
@@ -882,8 +886,84 @@ export function judgeHeap(samples, limit = HEAP_LIMIT_BYTES, fleet = "test") {
   };
 }
 
-export async function measureHeap({ env, seconds = "180" }) {
+/** The `--slow-seconds` value: how long each bench job holds on the slow tool, 5-300. Pure. */
+export function slowSeconds(value = "60") {
+  const n = /^\d{1,3}$/.test(String(value)) ? Number(value) : Number.NaN;
+  if (!(n >= 5 && n <= 300)) throw new Error("measure-heap needs --slow-seconds 5-300");
+  return n;
+}
+
+/** The day of `at` as YYYY-MM-DD (UTC). Pure. */
+export const dayOf = (at) => new Date(at).toISOString().slice(0, 10);
+
+/**
+ * The capacity measurement on the test cell's capacity bench: for each level, under the VPS lease,
+ * 10 s of idle celld samples, then N live jobs at once, celld /state every second until every job
+ * has answered or the level's time box ends (the slow wait plus 300 s). Stops after the first level
+ * that fails. Writes capacity.json (the measured number with its day, and every level) to `out`.
+ */
+async function measureCapacity({ env, levels, slow, out }) {
+  const results = [];
+  for (const jobs of levels) {
+    const level = await withLease("capacity", async () => {
+      const idle = [];
+      for (let i = 0; i < 10; i++) {
+        idle.push(parseJson(await runRemote(["state", "--env", "all"], { echo: false }), "state"));
+        await pause(1_000);
+      }
+      const before = await lab(env, "capacity-state");
+      await lab(env, "capacity", ["--jobs", String(jobs), "--slow", String(slow)]);
+      const samples = [];
+      let state = before;
+      const end = Date.now() + (slow + 300) * 1000;
+      while (Date.now() < end) {
+        samples.push(
+          parseJson(await runRemote(["state", "--env", "all"], { echo: false }), "state"),
+        );
+        if (samples.length % 5 === 0) {
+          state = await lab(env, "capacity-state").catch(() => state);
+          if (state.done === true && state.level > (before.level ?? 0)) break;
+        }
+        await pause(1_000);
+      }
+      state = await lab(env, "capacity-state").catch(() => state);
+      return levelOf(samples, state, { idle, jobs, processStartedAt: before.processStartedAt });
+    });
+    results.push(level);
+    for (const line of capacityLines({ measured: null, on: "", levels: [level] }).slice(0, 2)) {
+      console.log(line);
+    }
+    if (!level.ok) break;
+  }
+  const result = {
+    measured: measuredOf(results),
+    on: dayOf(Date.now()),
+    slowSeconds: slow,
+    levels: results,
+  };
+  await mkdir(out, { recursive: true });
+  await writeFile(join(out, "capacity.json"), `${JSON.stringify(result, null, 2)}\n`);
+  console.log(capacityLines(result).at(-1));
+  if (result.measured === null) throw new Error("capacity: no level passed; no measured number");
+  return result;
+}
+
+export async function measureHeap({
+  env,
+  seconds = "180",
+  "parallel-jobs": parallel,
+  "slow-seconds": slow,
+  out,
+}) {
   if (env !== "test-cell") throw new Error("measure-heap runs only with --env test-cell");
+  if (parallel !== undefined) {
+    if (!out) throw new Error("measure-heap --parallel-jobs needs --out <folder>");
+    await measureCapacity({ env, levels: parallelLevels(parallel), slow: slowSeconds(slow), out });
+    return;
+  }
+  if (slow !== undefined || out !== undefined) {
+    throw new Error("measure-heap --slow-seconds and --out need --parallel-jobs");
+  }
   await withLease("heap", async () => {
     await lab(env, "load");
     const samples = [];
@@ -911,6 +991,113 @@ export async function measureHeap({ env, seconds = "180" }) {
     }
     console.log("heap ok: fallback not needed");
   });
+}
+
+/** The most jobs one capacity level runs at once (the bench's limit). */
+export const MAX_PARALLEL_JOBS = 16;
+
+/** The `--parallel-jobs` levels: whole numbers 1-16, strictly ascending, or an error. Pure. */
+export function parallelLevels(text = "1,4,8,16") {
+  const levels = String(text)
+    .split(",")
+    .map((part) => part.trim());
+  const numbers = levels.map((part) => (/^\d{1,2}$/.test(part) ? Number(part) : Number.NaN));
+  const ok =
+    numbers.length > 0 &&
+    numbers.every(
+      (n, i) => n >= 1 && n <= MAX_PARALLEL_JOBS && (i === 0 || n > (numbers[i - 1] ?? 0)),
+    );
+  if (!ok) {
+    throw new Error(
+      `measure-heap needs --parallel-jobs with ascending levels 1-${MAX_PARALLEL_JOBS} (for example 1,4,8,16)`,
+    );
+  }
+  return numbers;
+}
+
+/**
+ * One capacity level's numbers. celld's /state has one heap entry per Worker script, not per cell
+ * (celld docs/README.md:692-705, read in .scratch/sources/git/celld), so the bench's memory is the
+ * test fleet's heap at the level's peak less its median while idle, over the level's jobs. The job
+ * rows give the receipt time (level start to the lead's receipt) and the job time (start to result).
+ * A level passes when every job answered, the bench did not restart, and the peak heap per isolate
+ * stayed under HEAP_LIMIT_BYTES. Pure.
+ */
+export function levelOf(samples, state, { idle, jobs, processStartedAt }) {
+  const heaps = (list) =>
+    list.map((sample) => heapOfState(sample?.fleets?.test)).filter((each) => each.heap > 0);
+  const during = heaps(samples);
+  const idleHeap = summarizeDelays(heaps(idle).map((each) => each.heap)).median ?? 0;
+  const peakHeap = Math.max(0, ...during.map((each) => each.heap));
+  const peakIsolateHeap = Math.max(0, ...during.map((each) => each.isolateHeap));
+  const rows = Array.isArray(state?.jobs) ? state.jobs : [];
+  const answered = rows.filter((row) => row.status === "done").length;
+  const receipts = summarizeDelays(rows.map((row) => Number(row.receiptMs)));
+  const latencies = summarizeDelays(
+    rows
+      .filter((row) => row.endedAt !== null && row.endedAt !== undefined)
+      .map((row) => Number(row.endedAt) - Number(row.createdAt)),
+  );
+  const restarted =
+    processStartedAt !== undefined && Number(state?.processStartedAt) !== Number(processStartedAt);
+  return {
+    jobs,
+    idleHeap,
+    peakHeap,
+    peakIsolateHeap,
+    heapPerJob: jobs > 0 ? Math.max(0, peakHeap - idleHeap) / jobs : 0,
+    receipt: { median: receipts.median, p95: receipts.p95 },
+    latency: { median: latencies.median, p95: latencies.p95 },
+    answered,
+    restarted,
+    ok:
+      during.length > 0 &&
+      answered === jobs &&
+      !restarted &&
+      peakIsolateHeap > 0 &&
+      peakIsolateHeap < HEAP_LIMIT_BYTES,
+  };
+}
+
+/**
+ * The measured number: the last level that passed before the first one that failed, or null when
+ * the first level failed (a number past a failure is not one the cell handled). Pure.
+ */
+export function measuredOf(levels) {
+  let measured = null;
+  for (const level of levels) {
+    if (!level.ok) break;
+    measured = level.jobs;
+  }
+  return measured;
+}
+
+/** Two lines per level and the measured number with its day, each within 80 columns. Pure. */
+export function capacityLines(result) {
+  const mib = (bytes) => (Number(bytes) / MIB).toFixed(1);
+  const ms = (value) => (value === null || value === undefined ? "--" : `${Math.round(value)}`);
+  const s = (value) =>
+    value === null || value === undefined ? "--" : (Number(value) / 1000).toFixed(1);
+  const lines = [];
+  for (const level of result.levels ?? []) {
+    const verdict = level.ok ? "ok" : level.restarted ? "restarted: fail" : "fail";
+    lines.push(
+      `level ${level.jobs}: ${level.answered}/${level.jobs} answered; heap/job ${mib(level.heapPerJob)} MiB; ${verdict}`.slice(
+        0,
+        LINE_WIDTH,
+      ),
+      `  peak ${mib(level.peakHeap)} MiB (isolate ${mib(level.peakIsolateHeap)}), receipt ${ms(level.receipt?.median)}/${ms(level.receipt?.p95)} ms, job ${s(level.latency?.median)}/${s(level.latency?.p95)} s`.slice(
+        0,
+        LINE_WIDTH,
+      ),
+    );
+  }
+  lines.push(
+    result.measured === null
+      ? "capacity: no level passed; no measured number"
+      : `capacity: measured ${result.measured} jobs at once on ${result.on}`,
+  );
+  return lines;
 }
 
 export const GUARD_BUDGET_MS = 800;
