@@ -9,6 +9,7 @@ import { JobBoardDoc, type JobRow } from "../src/docs.ts";
 import { type HouseholdAgent, openHouseholdAgent } from "../src/household-agent.ts";
 import type { HouseholdClient, SharedSyncRequest } from "../src/household-contract.ts";
 import { createSharedRow } from "../src/job-board.ts";
+import { readMonth } from "../src/month-ledger.ts";
 import { type SharedParts, sharedOpId, syncShared } from "../src/shared-relay.ts";
 import {
   createFauxGateway,
@@ -47,10 +48,14 @@ export interface SharedPair {
 
 export async function openPair(
   respond: Responder = () => fauxAssistantMessage([fauxText("Plan for both: the coast.")]),
+  stepCostUsd?: (modelId: string) => number,
 ): Promise<SharedPair> {
   vi.spyOn(console, "log").mockImplementation(() => {});
   const clock = { now: Date.now() };
-  const gateway = createFauxGateway(resultReviewer(respond));
+  const gateway = createFauxGateway(
+    resultReviewer(respond),
+    stepCostUsd === undefined ? {} : { stepCostUsd },
+  );
   const agent = await openHouseholdAgent({
     cell: "household",
     storage: (await openCelldStorageWithDatabase(new FakeCelldStorage())).storage,
@@ -323,5 +328,40 @@ describe("notices to the lead", () => {
       ],
     });
     expect((await pair.sync("owner")) as { notices: unknown[] }).toMatchObject({ notices: [] });
+  });
+});
+
+describe("charges on the person's month", () => {
+  it("books each person's half under household, once, also when an answer is lost and sent again", async () => {
+    const pair = await openPair(undefined, () => 0.1);
+    await proposeFrom(pair);
+    await pair.sync("owner");
+    await pair.sync("second");
+    await answerFrom(pair, 1, true);
+    await pair.sync("second");
+    await until(
+      async () =>
+        (await pair.agent.exchange({ person: "owner", ops: [] })).rows[0]?.status === "done",
+    );
+    pair.dropNext("owner");
+    expect((await pair.sync("owner")).outcome).toBe("failed");
+    await pair.sync("owner");
+    await pair.sync("owner");
+    await pair.sync("second");
+    const owner = await readMonth(
+      pair.owner.cell.harness,
+      pair.clock.now,
+      "UTC",
+      BACKGROUND_CONTEXT,
+    );
+    const second = await readMonth(
+      pair.second.cell.harness,
+      pair.clock.now,
+      "UTC",
+      BACKGROUND_CONTEXT,
+    );
+    expect(owner.person.byRole.household).toBeCloseTo(0.05, 6);
+    expect(second.person.byRole.household).toBeCloseTo(0.05, 6);
+    expect((await pair.row("owner", 1))?.shared?.charges).toEqual(["shared:1:1:owner"]);
   });
 });
