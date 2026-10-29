@@ -142,7 +142,6 @@ export async function stopJobs(
   const left = await harness.commit(async (tx) => {
     const stop = await tx.doc(StopDoc);
     stop.active = null;
-    stop.last = { at, by, jobs: count, turn };
     const board = await tx.doc(JobBoardDoc);
     const running: number[] = [];
     for (const job of marked) {
@@ -152,6 +151,8 @@ export async function stopJobs(
       row.stop = null;
       if (!ENDED.has(row.status)) running.push(job.number);
     }
+    // What it stopped, as the answer says: a job still ending is not counted.
+    stop.last = { at, by, jobs: count - running.length, turn };
     return running;
   }, quiet);
   for (const job of marked) {

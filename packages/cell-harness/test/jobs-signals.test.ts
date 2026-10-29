@@ -655,6 +655,11 @@ describe("the stop, restart, and reorder signals", () => {
     expect(
       loggedEvents(warn.mock.calls).filter((line) => line.event === "stop.left_running"),
     ).toEqual([{ event: "stop.left_running", level: "warn", cell: "owner", jobs: 1 }]);
+    // The stop's record agrees with its answer.
+    expect((await t.cell.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.last).toMatchObject({
+      jobs: 0,
+      turn: false,
+    });
     expect((await job(t, 1))?.stop).toBeNull();
     vi.mocked(t.cell.harness.abortTask).mockRestore();
     vi.mocked(t.cell.harness.waitForTask).mockRestore();
