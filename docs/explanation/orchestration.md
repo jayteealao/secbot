@@ -233,6 +233,27 @@ it once, on the household's line.
 restart goes to the household as an operation, never as a job on that person's own model and
 budget, and the household resumes the job from its kept brief and transcript, as any resume does.
 
+## Capacity: a warning, not a limit
+
+A cell has no job slots. The owner chose that the person's work is never queued behind a number:
+the lead starts every job it decides to start, and a cell that runs out of memory is restarted by
+celld while its jobs resume from their kept state. What a cell can carry is still worth knowing,
+so each cell has a measured number of jobs at once. Passing it shows the capacity line on the board
+and sends the owner one alert for that busy stretch; it never holds a job back.
+
+The number is measured on the test cell's capacity bench, a cell of its own with a scripted lead,
+so only the jobs' own model calls cost money. Each level starts that many live jobs at once, each
+holding on a slow lookup so that they run together, while the host reads celld's heap every
+second. A level passes when every job answers, the bench does not restart, and the peak heap of
+one isolate stays under its limit; the receipt and job times are recorded with it. Levels stop at
+the first failure, and the measured number is the last level that passed before it. Heap per job
+is the test fleet's peak heap less its idle median, divided by the jobs, because celld reports one
+heap per Worker script rather than per cell.
+
+A later release measures again when the benchmark trips: more than 25 % more memory per job, or
+10 % more latency at a level, than the last measurement. Until then the release's number stands,
+and the owner can give one cell its own number, or clear it, with the operator key.
+
 ## Frozen specialists
 
 A cell opened before jobs keeps its four specialist conversations. No tool reaches them, and the

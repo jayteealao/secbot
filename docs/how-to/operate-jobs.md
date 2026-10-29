@@ -112,3 +112,36 @@ line counts only their own jobs.
 
 To read a person's board, use `secbot jobs --person <name>`; for the shared jobs, `secbot jobs
 --household`.
+
+## Read the capacity line and the owner's alert
+
+When more jobs run at once in a cell than it was measured to handle, `secbot jobs` shows one line
+above the columns:
+
+```
+[ 3 jobs at once; this cell was measured at 2 on 29 Oct ] nothing is held back
+```
+
+At the same moment the owner gets one Better Stack alert, `Secbot <person> cell: 3 jobs at once,
+measured at 2`. It is a warning only: every job keeps running, and no job waits for a slot. If the
+cell runs short of memory, celld restarts it and its jobs resume from their kept state. More jobs
+in the same busy stretch send nothing more; once the count is back at or under the number, a later
+stretch alerts again, at most once a day. When the line shows often, stop or move work with
+`secbot stop` and `secbot jobs restart <#>`, or measure the cell again.
+
+## Set or clear a cell's measured number (owner)
+
+A cell uses the release's measured number unless it has its own. With the operator key, set a
+person cell's own number (the jobs at once and the day it was measured, in milliseconds since
+1970) or clear it:
+
+```
+$ curl -X PUT "$SECBOT_CELL_URL/ops/capacity?cell=owner" \
+    -H "x-secbot-operator: $SECBOT_OPERATOR_KEY" -H "content-type: application/json" \
+    -d '{"measured": 6, "at": 1793232000000}'
+$ curl -X PUT "$SECBOT_CELL_URL/ops/capacity?cell=owner" \
+    -H "x-secbot-operator: $SECBOT_OPERATOR_KEY" -H "content-type: application/json" \
+    -d '{"measured": null, "at": null}'
+```
+
+The answer is `{person, measured, at}`. The household and secrets cells have no number.
