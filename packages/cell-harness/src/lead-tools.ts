@@ -27,6 +27,7 @@ import {
   TemplatesDoc,
   TierSettingsDoc,
 } from "./docs.ts";
+import type { SharedOp } from "./household-contract.ts";
 import {
   answerQuestion,
   blockReason,
@@ -92,6 +93,39 @@ export const proposedText = (n: number, other: string) =>
 export const offerText = (n: number) =>
   `Ask the person in your own words now; the chat adds "[ job ${n} shared ]" and their /join or /decline goes to the household.`;
 
+/** The lead's refusal when a move would change a shared job both people agreed to. */
+export const SHARED_KEEPS_TIER =
+  "a shared job keeps the tier both people agreed to; ask the person whether to start a new shared job.";
+
+/** The lead's refusal of a question move on a shared job: the household agent asks nobody. */
+export const SHARED_NO_QUESTIONS =
+  "a shared job asks no questions; the household agent states its assumptions in its answer.";
+
+/** The lead's refusal of a risky mark on a shared job: the household marks and reviews it. */
+export const SHARED_NO_MARK =
+  "a shared job's result is marked and reviewed in the household before either lead gets it.";
+
+/** The other person's refusal: only the requesting lead restarts a shared job. */
+export const sharedRestartOwnerText = (requester: string) =>
+  `only ${requester}'s lead restarts this shared job.`;
+
+/** The requesting lead's refusal once the shared job's one restart is used. */
+export const sharedRestartUsedText = (n: number) =>
+  `Refused: shared job ${n} has used its restart. Ask the person in your own words whether to start a new shared job at a higher tier.`;
+
+/** The lead's refusal while a shared job waits for the other person's yes: nothing runs yet. */
+export const sharedNotStartedText = (n: number, other: string) =>
+  `job ${n} waits for ${other} to agree to share the cost; nothing runs yet.`;
+
+/** Who pays a shared job, from this person's side. */
+export function sharedPayerText(link: NonNullable<JobRow["shared"]>): string {
+  return link.payer === "half"
+    ? "you pay half"
+    : link.payer === "you"
+      ? "you pay all"
+      : `${link.with} pays all`;
+}
+
 /** The lead's note when a job will wait above a limit before it starts. */
 export const JOB_WAITS_NOTE =
   " The person is over their monthly limit, so the job waits until the limit rises or the month resets.";
@@ -151,7 +185,11 @@ export function jobSummary(row: JobRow): string {
       : ` Its question waits: "${open.text}"${open.toPerson ? " (asked the person)" : ""}; answer with answer_job.`;
   const blocked =
     row.status === "blocked" && row.block !== null ? ` blocked: ${blockReason(row.block)}.` : "";
-  return `job ${row.number} "${row.title}": ${row.status}, ${row.template} on ${row.tier}, ${effort}, $${row.cost.toFixed(2)} of $${row.cap}, priority ${row.priority}${due}, ${row.attempts.raises} raises and ${row.attempts.restarts} restarts; ${result}.${question}${blocked}`;
+  const shared =
+    row.shared === null
+      ? ""
+      : ` Shared with ${row.shared.with} (${sharedPayerText(row.shared)}), proposed by ${row.shared.role === "requester" ? "you" : "them"}, consent ${row.shared.consent}.`;
+  return `job ${row.number} "${row.title}": ${row.status}, ${row.template} on ${row.tier}, ${effort}, $${row.cost.toFixed(2)} of $${row.cap}, priority ${row.priority}${due}, ${row.attempts.raises} raises and ${row.attempts.restarts} restarts; ${result}.${question}${blocked}${shared}`;
 }
 
 /** The longest answer to a job's question, from the lead or the person. */
@@ -249,6 +287,33 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     extensions: deps.jobExtensions,
   });
   const jobParameter = Type.Integer({ minimum: 1, description: "The job's number." });
+
+  /**
+   * A lead move on a shared row becomes one operation in the row's outbox for the household, which
+   * runs the job; the background exchange delivers it. Null when job `n` is not shared.
+   */
+  const sharedMove = async (
+    api: Pick<ToolExecutionApi, "commit">,
+    context: Context,
+    n: number,
+    decide: (
+      row: JobRow,
+      link: NonNullable<JobRow["shared"]>,
+    ) => { readonly op: SharedOp } | { readonly error: string },
+  ): Promise<{ readonly attempts: number } | { readonly error: string } | null> => {
+    const moved = await api.commit(async (tx) => {
+      const board = await tx.doc(JobBoardDoc);
+      const row = Object.hasOwn(board.jobs, String(n)) ? board.jobs[String(n)] : undefined;
+      if (row === undefined || row.shared === null) return null;
+      if ((await tx.doc(StopDoc)).active !== null) return { error: STOP_RUNNING };
+      const decided = decide(row, row.shared);
+      if ("error" in decided) return decided;
+      row.shared.outbox.push(decided.op);
+      return { attempts: row.attempts.raises + row.attempts.restarts };
+    }, context);
+    if (moved !== null && !("error" in moved)) deps.shared?.()?.kick();
+    return moved;
+  };
 
   /**
    * A job past its escalations ended failed in the caller's commit: its task stops (a paused run
@@ -461,6 +526,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
       const changed = await api.commit(async (tx) => {
         const found = await rowOrError(tx, args.job);
         if ("error" in found) return found;
+        if (found.shared !== null) return { error: SHARED_KEEPS_TIER };
         if (ENDED.has(found.status)) {
           return { error: `job ${args.job} is ${found.status}; only a live job changes.` };
         }
@@ -708,6 +774,35 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     replay: "unsafe",
     execute: async (args, api, context) => {
       const at = deps.now();
+      const shared = await sharedMove(api, context, args.job, (row, link) => {
+        if (link.role !== "requester") return { error: sharedRestartOwnerText(link.with) };
+        if (link.household === null) return { error: sharedNotStartedText(row.number, link.with) };
+        if (row.attempts.restarts > 0) return { error: sharedRestartUsedText(row.number) };
+        return {
+          op: {
+            kind: "restart",
+            opId: sharedOpId(person, at),
+            person,
+            household: link.household,
+            note: args.note,
+          },
+        };
+      });
+      if (shared !== null) {
+        if ("error" in shared) return refusal(shared.error);
+        logEvent("job.restarted", {
+          cell: person,
+          job: args.job,
+          attempts: shared.attempts + 1,
+          note_chars: args.note.length,
+        });
+        return {
+          ...text(
+            `job ${args.job} restarts in the household with a fresh subagent and your note; this was its one restart.`,
+          ),
+          details: { job: args.job },
+        };
+      }
       const changed = await api.commit(async (tx) => {
         const answer = await restartRow(tx, JobTask, args.job, args.note, at);
         if ("missing" in answer) return (await rowOrError(tx, args.job)) as { error: string };
@@ -745,6 +840,30 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     // A crash mid-call gives the model an interrupted result instead of a second resume.
     replay: "unsafe",
     execute: async (args, api, context) => {
+      const shared = await sharedMove(api, context, args.job, (row, link) => {
+        if (link.household === null) return { error: sharedNotStartedText(row.number, link.with) };
+        if (row.status !== "stopped" && row.status !== "blocked") {
+          return { error: resumeRefusalText(row.number, "not-stopped", row.status) };
+        }
+        return {
+          op: {
+            kind: "resume",
+            opId: sharedOpId(person, deps.now()),
+            person,
+            household: link.household,
+          },
+        };
+      });
+      if (shared !== null) {
+        if ("error" in shared) return refusal(shared.error);
+        logEvent("job.resumed", { cell: person, job: args.job, by: "lead", resumes: 0 });
+        return {
+          ...text(
+            `job ${args.job} resumes in the household from its kept brief and transcript; this does not use its restart.`,
+          ),
+          details: { job: args.job },
+        };
+      }
       const answer = await api.commit(async (tx) => {
         const resumed = await resumeJobTask(tx, JobTask, args.job, deps.now(), "lead");
         if ("refused" in resumed) {
@@ -785,7 +904,9 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
       if (args.risky === false) {
         const found = await api.commit(async (tx) => {
           const row = await rowOrError(tx, args.job);
-          return "error" in row ? row : { code: row.risky.code.length, lead: row.risky.lead };
+          if ("error" in row) return row;
+          if (row.shared !== null) return { error: SHARED_NO_MARK };
+          return { code: row.risky.code.length, lead: row.risky.lead };
         }, context);
         if ("error" in found) return refusal(found.error);
         const by = found.code > 0 ? "code" : found.lead !== null ? "you" : undefined;
@@ -798,6 +919,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
       const marked = await api.commit(async (tx) => {
         const found = await rowOrError(tx, args.job);
         if ("error" in found) return found;
+        if (found.shared !== null) return { error: SHARED_NO_MARK };
         const row = await markRisky(tx, args.job, { lead: args.reason });
         // An unpulled routine result is reviewed before the lead uses it.
         const result = row.result;
@@ -844,6 +966,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
       const answered = await api.commit(async (tx) => {
         const found = await rowOrError(tx, args.job);
         if ("error" in found) return found;
+        if (found.shared !== null) return { error: SHARED_NO_QUESTIONS };
         const open = openQuestion(found);
         if (open === null) return { error: `job ${args.job} has no question waiting.` };
         if (open.from !== "job") {
@@ -877,6 +1000,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
       const asked = await api.commit(async (tx) => {
         const found = await rowOrError(tx, args.job);
         if ("error" in found) return found;
+        if (found.shared !== null) return { error: SHARED_NO_QUESTIONS };
         const open = openQuestion(found);
         if (open === null) return { error: `job ${args.job} has no question waiting.` };
         const fresh = !open.toPerson;

@@ -3,11 +3,12 @@
 // neither waits for the household (AC-9).
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { StopDoc } from "../src/docs.ts";
+import { JobBoardDoc, type JobRow, StopDoc } from "../src/docs.ts";
+import { SHARED_KEEPS_TIER, SHARED_NO_MARK, SHARED_NO_QUESTIONS } from "../src/lead-tools.ts";
 import { leadCalls } from "./escalation-helpers.ts";
 import { createFauxGateway, openTestCell, type TestCell, until } from "./fixtures.ts";
 import { jobResponder } from "./responders.ts";
-import { openPair, type SharedPair } from "./shared-pair.ts";
+import { answerFrom, openPair, type SharedPair } from "./shared-pair.ts";
 
 const PROPOSAL = {
   title: "plan the May trip",
@@ -83,5 +84,102 @@ describe("propose_shared_job and offer_shared", () => {
     pair.setDown(false);
     await pair.sync("owner");
     expect((await pair.row("owner", 1))?.shared?.outbox).toEqual([]);
+  });
+});
+
+describe("lead tools on a shared row", () => {
+  async function joined(pair: SharedPair) {
+    await offered(pair);
+    await answerFrom(pair, 1, true);
+    await pair.sync("second");
+    await pair.sync("owner");
+  }
+
+  async function setRow(pair: SharedPair, who: "owner" | "second", change: (row: JobRow) => void) {
+    await pair[who].cell.harness.commit(async (tx) => {
+      const row = (await tx.doc(JobBoardDoc)).jobs["1"];
+      if (row === undefined) throw new Error("no row");
+      change(row);
+    }, BACKGROUND_CONTEXT);
+  }
+
+  it("refuses set_job, mark_risky, answer_job, and ask_person on either side", async () => {
+    const pair = await openPair();
+    await joined(pair);
+    for (const who of ["owner", "second"] as const) {
+      const t = pair[who];
+      expect(await leadCalls(t, "set_job", { job: 1, tier: "frontier" })).toBe(SHARED_KEEPS_TIER);
+      expect(await leadCalls(t, "mark_risky", { job: 1, reason: "money" })).toBe(SHARED_NO_MARK);
+      expect(await leadCalls(t, "mark_risky", { job: 1, reason: "x", risky: false })).toBe(
+        SHARED_NO_MARK,
+      );
+      expect(await leadCalls(t, "answer_job", { job: 1, answer: "yes" })).toBe(SHARED_NO_QUESTIONS);
+      expect(await leadCalls(t, "ask_person", { job: 1 })).toBe(SHARED_NO_QUESTIONS);
+      expect((await pair.row(who, 1))?.taskId).toBeNull();
+    }
+  });
+
+  it("sends the requester's one restart to the household and refuses the other person's and a second", async () => {
+    const pair = await openPair();
+    await joined(pair);
+    expect(await leadCalls(pair.second, "restart_job", { job: 1, note: "try again" })).toBe(
+      "only owner's lead restarts this shared job.",
+    );
+    expect(await leadCalls(pair.owner, "restart_job", { job: 1, note: "try the coast" })).toBe(
+      "job 1 restarts in the household with a fresh subagent and your note; this was its one restart.",
+    );
+    await until(async () =>
+      pair.requests.some((request) => request.ops.some((op) => op.kind === "restart")),
+    );
+    const restart = pair.requests
+      .flatMap((request) => request.ops)
+      .find((op) => op.kind === "restart");
+    expect(restart).toMatchObject({ person: "owner", household: 1, note: "try the coast" });
+    await setRow(pair, "owner", (row) => {
+      row.attempts.restarts = 1;
+    });
+    expect(await leadCalls(pair.owner, "restart_job", { job: 1, note: "again" })).toBe(
+      "Refused: shared job 1 has used its restart. Ask the person in your own words whether to start a new shared job at a higher tier.",
+    );
+    expect((await pair.row("owner", 1))?.taskId).toBeNull();
+  });
+
+  it("sends a resume of a stopped shared job from either side, and refuses one that is not stopped", async () => {
+    const pair = await openPair();
+    await joined(pair);
+    await setRow(pair, "second", (row) => {
+      row.status = "running";
+    });
+    expect(await leadCalls(pair.second, "resume_job", { job: 1 })).toContain(
+      "only a stopped or blocked job resumes",
+    );
+    for (const who of ["owner", "second"] as const) {
+      await setRow(pair, who, (row) => {
+        row.status = "stopped";
+      });
+      pair.setDown(true);
+      expect(await leadCalls(pair[who], "resume_job", { job: 1 })).toBe(
+        "job 1 resumes in the household from its kept brief and transcript; this does not use its restart.",
+      );
+      const ops = (await pair.row(who, 1))?.shared?.outbox ?? [];
+      expect(ops.at(-1)).toMatchObject({ kind: "resume", person: who, household: 1 });
+      expect((await pair.row(who, 1))?.taskId).toBeNull();
+      pair.setDown(false);
+    }
+  });
+
+  it("refuses a restart or resume while the offer is not yet answered, and reads the shared line", async () => {
+    const pair = await openPair();
+    pair.setDown(true);
+    await leadCalls(pair.owner, "propose_shared_job", PROPOSAL);
+    expect(await leadCalls(pair.owner, "restart_job", { job: 1, note: "n" })).toBe(
+      "job 1 waits for second to agree to share the cost; nothing runs yet.",
+    );
+    expect(await leadCalls(pair.owner, "resume_job", { job: 1 })).toBe(
+      "job 1 waits for second to agree to share the cost; nothing runs yet.",
+    );
+    expect(await leadCalls(pair.owner, "read_job", { job: 1 })).toContain(
+      "Shared with second (you pay half), proposed by you, consent asking.",
+    );
   });
 });
