@@ -130,6 +130,7 @@ export {
   priorityKey,
   StopDoc,
 } from "./docs.ts";
+export { LIVE_FIXTURE_ORDER, LIVE_FIXTURE_PAGES } from "./fixture-pages.ts";
 export { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 export {
   createGuardExtension,
