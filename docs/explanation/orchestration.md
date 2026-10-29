@@ -186,6 +186,53 @@ prompt after it (and after a restart), and its call is the lead's spend. Job sta
 the note: it is on the board. A failed note call keeps the previous note and never stops the
 compaction.
 
+## Shared household jobs
+
+Some work belongs to both people: planning a trip, sorting the shopping. Such a job runs once, in
+the household cell, and shows on both people's boards; each person's lead stays the only agent
+that talks to its person.
+
+**The household agent.** The household cell runs its own agent for shared jobs, on the fleet's own
+model key, like the person cells beside it. It never talks to a person and has no lead: it runs
+each shared job in a fresh subagent with two tools only, `household_read` and `household_change`,
+and no tool call ever waits for a person. A job that changed a household document is marked risky,
+so a reviewer on a different model checks its result before either lead may use it.
+
+**Consent.** The requesting person's lead proposes the job; the other person's lead gives them the
+offer in its own words, and the chat adds the line with the job's number. Only the other person's
+`/join` starts the job; a `/decline` ends it, and the requesting lead hears it as a failure. Until
+they answer, nothing runs and nothing is spent: the job waits on both boards, however long it
+takes. When the other person's limit is reached, their lead still gives the offer, because the
+requesting person would pay all of it.
+
+**The pull exchange.** The household never calls a person cell. Each person cell pulls one
+exchange, `shared-sync`: it sends its queued operations (a proposal, an answer, a restart, a
+resume, a stop) and gets back every shared job it is part of, which it mirrors onto its own
+board. Each operation has an id, and the household applies an id once, so an exchange whose answer
+was lost is simply sent again. A person cell exchanges every 2 minutes, at once after a shared
+action, and before it shows the board. A notice the lead must hear (a joined job, a result) is
+committed with the exchange and goes to the lead as a follow-up; while the person's limit is
+reached, it waits for the limit without holding up later exchanges.
+
+**Who pays.** The household settles each joined job's new cost at every exchange and splits it
+into charges per person: half each; when one person's monthly limit is reached, the other pays
+all; while both are reached, the job waits and spends nothing until a limit is raised or the month
+resets. Each person cell books its own charges once on its own month, where its limit and its cost
+view count them under `household`.
+
+**Escalation.** A shared job keeps the tier and the estimate the other person agreed to, so no
+lead may raise it. Only the requesting person's lead may restart it, once, with a failure note;
+after that, the lead asks its person, who can start a new shared job at a higher tier.
+
+**Stop.** Either person's `secbot stop` stops a shared job, because it spends that person's money.
+It shows `stopped` on both boards with its state kept; the other person's own jobs keep running.
+The owner's `secbot stop --all` reaches the household cell itself, which stops the job and counts
+it once, on the household's line.
+
+**Restart.** Either person restarts a stopped shared job by the number on their own board. The
+restart goes to the household as an operation, never as a job on that person's own model and
+budget, and the household resumes the job from its kept brief and transcript, as any resume does.
+
 ## Frozen specialists
 
 A cell opened before jobs keeps its four specialist conversations. No tool reaches them, and the
