@@ -53,6 +53,7 @@ import {
   type SecretsClient,
   SecretsRefused,
   SecretsUnavailable,
+  type StopAnswer,
 } from "@secbot/cell-harness";
 import type { CellDump } from "@secbot/cell-storage";
 import { HOUSEHOLD_CELL_NAME, isRefusedHouseholdChange } from "@secbot/household-cell";
@@ -109,7 +110,7 @@ export interface GuardStub {
   refreshBudget?(person: string): Promise<void>;
   /** The job board and the owner's stop; absent on a stub built before them. */
   jobsOf?(person: string): Promise<Answer<unknown>>;
-  stopOf?(person: string): Promise<Answer<{ jobs: number; turn: boolean; running?: number }>>;
+  stopOf?(person: string): Promise<Answer<StopAnswer>>;
   /** The measured number of jobs at once; absent on a stub built before it. */
   setCapacityOf?(
     person: string,
@@ -121,7 +122,7 @@ export interface GuardStub {
 /** The household cell's shared-jobs board and stop, when this fleet serves it. */
 export interface HouseholdJobsStub {
   jobs?(): Promise<unknown>;
-  stopJobs?(): Promise<{ jobs: number; turn: boolean; running?: number }>;
+  stopJobs?(): Promise<StopAnswer>;
 }
 
 /** Another fleet's private address and the operator key, for the routes that reach every cell. */
@@ -156,14 +157,13 @@ export interface OpsDeps {
   remote?(): RemoteFleet | undefined;
 }
 
-/** One cell's part of the owner's stop: jobs stopped, whether a lead turn was, shared jobs. */
-export type CellStop = {
+/**
+ * One cell's part of the owner's stop: the cell's own stop answer (jobs stopped, whether a lead
+ * turn was, aborted jobs still ending), and whether it is the household's shared jobs.
+ */
+export type CellStop = StopAnswer & {
   readonly cell: string;
-  readonly jobs: number;
-  readonly turn: boolean;
   readonly shared: boolean;
-  /** Aborted jobs that had not ended by the cell's stop bound (absent when none). */
-  readonly running?: number;
 };
 
 /** How long the owner's stop waits for another fleet to answer. */
@@ -222,7 +222,7 @@ async function stopOne(deps: OpsDeps, cell: string): Promise<CellStop | null> {
 }
 
 /** The `running` count of a cell's stop, kept only when some aborted job had not ended. */
-const ending = (stopped: { readonly running?: number }) =>
+const ending = (stopped: StopAnswer) =>
   stopped.running !== undefined && stopped.running > 0 ? { running: stopped.running } : {};
 
 /** `work`, or a rejection once `ms` have passed. */
