@@ -287,8 +287,12 @@ export function remoteWraps(
   );
 }
 
-/** What a sensitive receipt holds once the lead has read it. */
-export const SENSITIVE_READ = "(read once; the value is not kept)";
+/**
+ * What a sensitive receipt holds once the lead has read it. A read that the cell replays after a
+ * crash (the call's result was never recorded) finds this text, so it says how to get the value.
+ */
+export const SENSITIVE_READ =
+  "(read once; the value is not kept. If you did not get it, call secret_get again.)";
 
 /** The lead's `read_result`: a receipt's stored answer, or that it is still running. */
 export function createReadResultTool(now: () => number) {
@@ -310,8 +314,10 @@ export function createReadResultTool(now: () => number) {
         const at = open.indexOf(args.receipt);
         if (at !== -1) open.splice(at, 1);
         const text = receipt.text;
-        // A secret's value is handed over once and not kept: the receipt holds no second copy.
-        if (receipt.sensitive && receipt.readAt !== null) receipt.text = SENSITIVE_READ;
+        // A secret's value is handed over once and not kept: the receipt holds no second copy. A
+        // replayed read (the cell died before this call's result was recorded) gets SENSITIVE_READ,
+        // which tells the lead to ask for the secret again.
+        if (receipt.sensitive) receipt.text = SENSITIVE_READ;
         return { tool: receipt.tool, text, isError: receipt.isError };
       }, context);
       if ("error" in read) {
