@@ -273,7 +273,7 @@ describe("release defaults of shared household jobs", () => {
 
   it("wakes the other lead with the offer, its half, and the limit variant", () => {
     expect(sharedOfferText(15, "sam", "plan the May trip", 0.4, false)).toBe(
-      "[job 15 shared offer from sam: plan the May trip; the person's half is about $0.40. Call offer_shared with job 15, then ask the person in your own words whether to share the cost]",
+      "[job 15 shared offer from sam: plan the May trip; the person's half is at most $0.40, or up to $0.80 if sam's limit is reached first. Call offer_shared with job 15, then ask the person in your own words whether to share the cost]",
     );
     expect(sharedOfferText(15, "sam", "plan the May trip", 0.4, true)).toBe(
       "[job 15 shared offer from sam: plan the May trip; the person's limit is reached, so sam pays all. Call offer_shared with job 15, then ask the person in your own words whether to see it on their board]",

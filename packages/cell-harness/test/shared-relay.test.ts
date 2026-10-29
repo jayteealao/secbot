@@ -183,7 +183,7 @@ describe("notices to the lead", () => {
         {
           job: 1,
           requestId: "shared:1:offer",
-          text: "[job 1 shared offer from owner: plan the May trip; the person's half is about $0.13. Call offer_shared with job 1, then ask the person in your own words whether to share the cost]",
+          text: "[job 1 shared offer from owner: plan the May trip; the person's half is at most $0.13, or up to $0.25 if owner's limit is reached first. Call offer_shared with job 1, then ask the person in your own words whether to share the cost]",
         },
       ],
     });

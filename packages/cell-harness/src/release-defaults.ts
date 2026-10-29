@@ -483,7 +483,11 @@ export const HOUSEHOLD_AGENT_TOOLS = ["household_read", "household_change"] as c
 export const HOUSEHOLD_AGENT_RULES =
   "You are the household agent. You work on one job, from a brief written for both people in the household, and your answer goes to both people's leads, who each tell their own person. Never address a person, and never ask anyone a question: you have no tool to ask or to start other work, so state your assumptions in the answer. You can read and change the household's shared lists.";
 
-/** The wake notice to the other person's lead when a shared job is offered to its person. */
+/**
+ * The wake notice to the other person's lead when a shared job is offered to its person. The
+ * estimate is the job's tier cap: the person's half is at most half of it, and all of it when the
+ * requester's limit is reached while the job runs, so the notice names both.
+ */
 export function sharedOfferText(
   n: number,
   from: string,
@@ -493,7 +497,7 @@ export function sharedOfferText(
 ): string {
   return limitReached
     ? `[job ${n} shared offer from ${from}: ${title}; the person's limit is reached, so ${from} pays all. Call offer_shared with job ${n}, then ask the person in your own words whether to see it on their board]`
-    : `[job ${n} shared offer from ${from}: ${title}; the person's half is about $${halfUsd.toFixed(2)}. Call offer_shared with job ${n}, then ask the person in your own words whether to share the cost]`;
+    : `[job ${n} shared offer from ${from}: ${title}; the person's half is at most $${halfUsd.toFixed(2)}, or up to $${(halfUsd * 2).toFixed(2)} if ${from}'s limit is reached first. Call offer_shared with job ${n}, then ask the person in your own words whether to share the cost]`;
 }
 
 /** The wake notice to the requesting lead once the other person joined, with the line to give. */
