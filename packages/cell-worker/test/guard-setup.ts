@@ -66,6 +66,8 @@ export async function guardSetup(
   options: {
     readonly guard?: OpenCellOptions["guard"];
     readonly respond?: Responder;
+    /** The cost of one answered model step, in USD, by model id (default 0, as the faux model). */
+    readonly stepCostUsd?: (modelId: string) => number;
     /** A household cell (with its budget board) behind the person cells' binding. */
     readonly household?: boolean;
     /**
@@ -97,7 +99,10 @@ export async function guardSetup(
     readonly fixturePages?: OpenCellOptions["fixturePages"];
   } = {},
 ): Promise<GuardSetup> {
-  const gateway = createFauxGateway(options.respond ?? scripted);
+  const gateway = createFauxGateway(
+    options.respond ?? scripted,
+    options.stepCostUsd === undefined ? {} : { stepCostUsd: options.stepCostUsd },
+  );
   const household =
     options.household === true
       ? new HouseholdCell(
