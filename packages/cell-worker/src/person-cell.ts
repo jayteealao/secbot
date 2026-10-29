@@ -570,6 +570,12 @@ export class PersonCell {
     this.state.waitUntil(work);
   }
 
+  /** Keeps the cell up while work just started runs, and re-arms its alarm for what comes next. */
+  private runBusy(cell: CellHarness): void {
+    this.keepBusy(cell);
+    this.rearmSoon(cell.person);
+  }
+
   /** celld calls this when the alarm is due, also on an idle or evicted cell. */
   async alarm(info?: CelldAlarmInfo): Promise<void> {
     const person = this.storedName();
@@ -681,8 +687,7 @@ export class PersonCell {
       if (request.method === "POST" && route === "/stop") {
         const stopped = await cell.stop("person");
         // Aborted work settles in the background; keep the cell up until it has.
-        this.keepBusy(cell);
-        this.rearmSoon(person);
+        this.runBusy(cell);
         return json(stopped);
       }
       const jobRestartRoute = /^\/jobs\/([1-9][0-9]{0,8})\/restart$/.exec(route);
@@ -814,8 +819,7 @@ export class PersonCell {
     try {
       const answered = await cell.answer(number, choice, { device });
       // The waiting call continues in this activation; keep the cell up while it runs.
-      this.keepBusy(cell);
-      this.rearmSoon(cell.person);
+      this.runBusy(cell);
       return json({
         number,
         status: answered.call.status,
@@ -854,8 +858,7 @@ export class PersonCell {
       return json({ error: answered.message }, answered.reason === "no-job" ? 404 : 409);
     }
     // The job continues in this activation; keep the cell up while it runs.
-    this.keepBusy(cell);
-    this.rearmSoon(cell.person);
+    this.runBusy(cell);
     return json({ job: answered.job, title: answered.title });
   }
 
@@ -896,8 +899,7 @@ export class PersonCell {
       return json({ error, reason, job: n, title }, 409);
     }
     // The resumed job runs in this activation; keep the cell up while it does.
-    this.keepBusy(cell);
-    this.rearmSoon(cell.person);
+    this.runBusy(cell);
     return json({ job: resumed.job, title: resumed.title });
   }
 
@@ -952,8 +954,7 @@ export class PersonCell {
     const cell = await this.cell(person);
     return guardAnswer(async () => {
       const stopped = await cell.stop("owner");
-      this.keepBusy(cell);
-      this.rearmSoon(person);
+      this.runBusy(cell);
       return stopped;
     });
   }
@@ -1022,8 +1023,7 @@ export class PersonCell {
     return guardAnswer(async () => {
       const result = await cell.setLimit(usd, "owner");
       // Work waiting above the old limit may run now; keep the cell up while it does.
-      this.keepBusy(cell);
-      this.rearmSoon(person);
+      this.runBusy(cell);
       return { person, ...result };
     });
   }
@@ -1032,8 +1032,7 @@ export class PersonCell {
   async refreshBudget(person: string): Promise<void> {
     const cell = await this.cell(person);
     await cell.refreshHouseholdBudget(householdClientOf(this.env));
-    this.keepBusy(cell);
-    this.rearmSoon(person);
+    this.runBusy(cell);
   }
 
   /** RPC (operator routes): the owner switches the decision model; the next call uses it. */
