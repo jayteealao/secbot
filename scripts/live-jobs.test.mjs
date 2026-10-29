@@ -3,13 +3,22 @@
 // numbers; the scrubber; and the report.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PREFLIGHT_PAD } from "./live-guard.mjs";
 import { literalHits, scrub } from "./live-guard-steps.mjs";
-import { preflight, privateValues } from "./live-jobs.mjs";
+import {
+  argumentProblem,
+  LIVE_CELLS,
+  LIVE_SIGNALS,
+  measuredBack,
+  preflight,
+  privateValues,
+  report,
+  signalLines,
+} from "./live-jobs.mjs";
 import {
   ALL_CHECKS,
   buildReport,
@@ -278,4 +287,108 @@ test("the report names each step and criterion within 80 columns", () => {
   assert.ok(lines.includes("steer-mid-job        fail"));
   assert.ok(lines.includes("capacity-line        not run"));
   assert.ok(lines.every((line) => line.length <= 80));
+});
+
+test("each command refuses missing or malformed arguments", () => {
+  assert.equal(argumentProblem("preflight", {}), undefined);
+  assert.match(argumentProblem("bogus", {}), /^usage: live-jobs\.mjs preflight/);
+  for (const command of ["models", "charter", "stop-all", "capacity-line", "signals", "report"]) {
+    assert.equal(argumentProblem(command, {}), `${command} needs --out <dir>`);
+  }
+  assert.equal(argumentProblem("charter", { out: "d" }), undefined);
+  assert.equal(argumentProblem("charter", { out: "d", "max-usd": "10" }), undefined);
+  assert.equal(
+    argumentProblem("stop-all", { out: "d", "max-usd": "0" }),
+    "--max-usd is a number 0-50",
+  );
+  assert.equal(
+    argumentProblem("charter", { out: "d", "max-usd": "x" }),
+    "--max-usd is a number 0-50",
+  );
+  assert.equal(
+    argumentProblem("models", { out: "d", "max-usd": "5" }),
+    "models takes no --max-usd",
+  );
+  assert.equal(
+    argumentProblem("capacity-line", { out: "d" }),
+    "capacity-line needs --measured-from <capacity.json>",
+  );
+  assert.equal(
+    argumentProblem("capacity-line", { out: "d", "measured-from": "c.json" }),
+    undefined,
+  );
+  assert.equal(argumentProblem("signals", { out: "d" }), "signals needs --since <epoch seconds>");
+  assert.equal(
+    argumentProblem("signals", { out: "d", since: "12" }),
+    "signals needs --since <epoch seconds>",
+  );
+  assert.equal(argumentProblem("signals", { out: "d", since: "1793000000" }), undefined);
+  assert.equal(
+    argumentProblem("signals", { out: "d", since: "1793000000", until: "1792999999" }),
+    "--until comes after --since",
+  );
+});
+
+test("the measured number goes back as capacity.json holds it, or is cleared", () => {
+  assert.deepEqual(measuredBack({ measured: 6, on: "2026-10-29" }), {
+    measured: 6,
+    at: Date.UTC(2026, 9, 29),
+  });
+  assert.deepEqual(measuredBack({ measured: null, on: "2026-10-29" }), {
+    measured: null,
+    at: null,
+  });
+  assert.deepEqual(measuredBack(undefined), { measured: null, at: null });
+});
+
+test("the signals file has one line per signal and a column per cell", () => {
+  const lines = signalLines({ "job.started": { owner: 9, second: 2, household: 1 } }, "1", "2");
+  assert.equal(lines[0], "SIGNALS  1 to 2 (epoch seconds)");
+  assert.equal(lines.length, LIVE_SIGNALS.length + 2);
+  assert.match(lines[2], /^job\.started +9 +2 +1$/);
+  assert.match(lines.at(-1), /^capacity\.passed +\? +\? +\?$/);
+  assert.ok(lines.every((line) => line.length <= 80));
+  assert.deepEqual(LIVE_CELLS, ["owner", "second", "household"]);
+});
+
+test("the report passes only with every step, the owner's alert word, and every file", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "live-jobs-report-"));
+  const log = console.log;
+  console.log = () => {};
+  try {
+    const pass = { status: "pass" };
+    const charter = Object.fromEntries(
+      ["c1", "c2", "c3", "c4", "c5", "c6"].map((id) => [id, pass]),
+    );
+    await writeFile(join(dir, "results-charter.json"), JSON.stringify(charter));
+    await writeFile(join(dir, "results-stop-all.json"), JSON.stringify({ s7: pass }));
+    await writeFile(
+      join(dir, "results-capacity-line.json"),
+      JSON.stringify({ k1: pass, alert: { status: "fail" } }),
+    );
+    assert.equal(await report({ out: dir }), 1);
+    const summary = await readFile(join(dir, "summary.md"), "utf8");
+    assert.match(summary, /^capacity alert +fail$/m);
+    assert.match(summary, /^charter-1\.txt +missing$/m);
+    await writeFile(
+      join(dir, "results-capacity-line.json"),
+      JSON.stringify({ k1: pass, alert: pass }),
+    );
+    for (const file of [
+      "models-live.txt",
+      ...[1, 2, 3, 4, 5, 6].map((n) => `charter-${n}.txt`),
+      "stop-all.txt",
+      "capacity-line.txt",
+      "signals.txt",
+    ]) {
+      await writeFile(join(dir, file), "x\n");
+    }
+    assert.equal(await report({ out: dir }), 0);
+    const passed = await readFile(join(dir, "summary.md"), "utf8");
+    assert.match(passed, /^stop-all +pass$/m);
+    assert.ok(passed.split("\n").every((line) => line.length <= 80));
+  } finally {
+    console.log = log;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
