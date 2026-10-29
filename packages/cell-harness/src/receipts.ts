@@ -287,6 +287,9 @@ export function remoteWraps(
   );
 }
 
+/** What a sensitive receipt holds once the lead has read it. */
+export const SENSITIVE_READ = "(read once; the value is not kept)";
+
 /** The lead's `read_result`: a receipt's stored answer, or that it is still running. */
 export function createReadResultTool(now: () => number) {
   return defineTool({
@@ -306,7 +309,10 @@ export function createReadResultTool(now: () => number) {
         const open = (await tx.doc(ReceiptsDoc)).open;
         const at = open.indexOf(args.receipt);
         if (at !== -1) open.splice(at, 1);
-        return { tool: receipt.tool, text: receipt.text, isError: receipt.isError };
+        const text = receipt.text;
+        // A secret's value is handed over once and not kept: the receipt holds no second copy.
+        if (receipt.sensitive && receipt.readAt !== null) receipt.text = SENSITIVE_READ;
+        return { tool: receipt.tool, text, isError: receipt.isError };
       }, context);
       if ("error" in read) {
         return { content: [{ type: "text", text: read.error }], isError: true };

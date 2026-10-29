@@ -5,6 +5,7 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ReceiptDoc, ReceiptsDoc } from "../src/docs.ts";
 import type { HouseholdClient } from "../src/household-tools.ts";
+import { SENSITIVE_READ } from "../src/receipts.ts";
 import type { SecretsClient } from "../src/secret-tools.ts";
 import { job, leadCalls } from "./escalation-helpers.ts";
 import {
@@ -106,6 +107,15 @@ describe("background receipts", () => {
     expect(
       (await t.cell.harness.snapshot(ReceiptDoc, "r1", BACKGROUND_CONTEXT))?.receipt,
     ).toMatchObject({ tool: "secret_get", sensitive: true, isError: true });
+    const stored = (await t.cell.harness.snapshot(ReceiptDoc, "r1", BACKGROUND_CONTEXT))?.receipt;
+    await (await t.cell.submit('CALL read_result {"receipt":"r1"}', "req-2")).wait(
+      BACKGROUND_CONTEXT,
+    );
+    // The lead gets the answer once; the receipt keeps no copy of it.
+    expect((await toolResultsOf(t.cell.root)).at(-1)).toContain(stored?.text ?? "?");
+    expect(
+      (await t.cell.harness.snapshot(ReceiptDoc, "r1", BACKGROUND_CONTEXT))?.receipt?.text,
+    ).toBe(SENSITIVE_READ);
   });
 });
 
