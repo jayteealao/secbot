@@ -61,6 +61,12 @@ export {
   type WaitRequest,
 } from "./budget-gate.ts";
 export {
+  type CapacityWatchParts,
+  type EffectiveCapacity,
+  effectiveCapacity,
+  watchCapacity,
+} from "./capacity-watch.ts";
+export {
   type CellParts,
   errorFields,
   type LogLevel,
