@@ -878,6 +878,11 @@ describe("the queue order and the person's reorder", () => {
     expect(await order()).toEqual([4, 1, 2, 3]);
     // The priority stays: a move changes only the place.
     expect((await board()).jobs["4"]?.priority).toBe("routine");
+
+    // A move before itself keeps the job where it is.
+    const same = await ops((tx) => moveBefore(tx, 2, 2));
+    expect(same).toMatchObject({ ok: true, place: 3, of: 4 });
+    expect(await order()).toEqual([4, 1, 2, 3]);
   });
 
   it("refuses a missing number and an ended job, and drops an ended job from the queue", async () => {

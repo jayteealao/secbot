@@ -99,7 +99,9 @@ function requeue(board: MutableBoard, n: number, where: (queue: number[]) => num
   const queue = queueOf(board)
     .map((row) => row.number)
     .filter((other) => other !== n);
-  queue.splice(where(queue), 0, n);
+  const at = where(queue);
+  // A place that is not in the queue puts the job last rather than before the last job.
+  queue.splice(at < 0 ? queue.length : at, 0, n);
   board.queue = queue;
 }
 
@@ -156,7 +158,8 @@ export async function moveBefore(tx: Tx, n: number, m: number): Promise<ReorderA
   if ("refused" in found) return found;
   const target = await liveRowFor(tx, m);
   if ("refused" in target) return target;
-  requeue(found.board, n, (queue) => queue.indexOf(m));
+  // Moving a job before itself keeps its place.
+  if (n !== m) requeue(found.board, n, (queue) => queue.indexOf(m));
   return answered(found.board, found.row);
 }
 
