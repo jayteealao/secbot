@@ -24,6 +24,7 @@
  *   POST /ops/secrets/rotate             the next master key becomes current; records are re-wrapped
  *   POST /ops/stop                       every cell's jobs and lead turn stop, in every fleet
  *   GET  /ops/jobs?cell=                 a person's job board, or the household's shared jobs
+ *   PUT  /ops/capacity?cell=             a person cell's measured number ({"measured", "at"})
  *
  * The secrets cell is never snapshotted, wiped, or restored: the default cell set of those routes
  * leaves it out, and naming it is refused.
@@ -109,6 +110,12 @@ export interface GuardStub {
   /** The job board and the owner's stop; absent on a stub built before them. */
   jobsOf?(person: string): Promise<Answer<unknown>>;
   stopOf?(person: string): Promise<Answer<{ jobs: number; turn: boolean }>>;
+  /** The measured number of jobs at once; absent on a stub built before it. */
+  setCapacityOf?(
+    person: string,
+    measured: number | null,
+    at: number | null,
+  ): Promise<Answer<{ person: string; measured: number | null; at: number | null }>>;
 }
 
 /** The household cell's shared-jobs board and stop, when this fleet serves it. */
@@ -277,6 +284,59 @@ async function jobsRoute(url: URL, deps: OpsDeps): Promise<Response> {
     return json({ error: outcome.message ?? "refused" }, outcome.status ?? 400);
   }
   return json({ error: `cell ${cell} did not answer` }, 503);
+}
+
+/** The largest measured number the capacity route takes. */
+export const CAPACITY_MAX_JOBS = 1000;
+
+/**
+ * PUT /ops/capacity?cell=<person> with {"measured": <jobs 1-1000>, "at": <epoch ms>}, or both
+ * null to clear it: a person cell's measured number of jobs at once. Passing it only warns the
+ * owner and the board; nothing is held back. The household and secrets cells have no number.
+ */
+async function capacityRoute(request: Request, url: URL, deps: OpsDeps): Promise<Response> {
+  const raw = url.searchParams.get("cell") ?? "";
+  const cell = raw === "person" ? "second" : raw;
+  if (cell === "") return json({ error: "send ?cell=<person>" }, 400);
+  if (cell === SECRETS_CELL || cell === HOUSEHOLD_CELL_NAME) {
+    return json({ error: `${cell} has no capacity setting` }, 404);
+  }
+  if (!deps.cells.includes(cell)) {
+    return json({ error: `cell ${cell} is served by another fleet` }, 404);
+  }
+  const guard = deps.guardOf?.(cell);
+  if (guard?.setCapacityOf === undefined) {
+    return json({ error: `${cell} has no capacity setting` }, 404);
+  }
+  const body = await readBody(request);
+  const measured = body?.measured;
+  const at = body?.at;
+  const cleared = measured === null && at === null;
+  const set =
+    Number.isInteger(measured) &&
+    (measured as number) >= 1 &&
+    (measured as number) <= CAPACITY_MAX_JOBS &&
+    Number.isInteger(at) &&
+    (at as number) >= 0;
+  if (!cleared && !set) {
+    return json(
+      {
+        error: `send {"measured": <jobs 1-${CAPACITY_MAX_JOBS}>, "at": <epoch ms>}, or both null to clear`,
+      },
+      400,
+    );
+  }
+  const answer = await guard.setCapacityOf(
+    cell,
+    cleared ? null : (measured as number),
+    cleared ? null : (at as number),
+  );
+  logEvent("ops.capacity_set", {
+    cell,
+    ok: answer.ok,
+    measured: cleared ? null : measured,
+  });
+  return answer.ok ? json(answer.value) : json({ error: answer.error }, answer.status);
 }
 
 /**
@@ -647,6 +707,7 @@ export async function ops(request: Request, env: OpsEnv, deps: OpsDeps): Promise
 
   if (route === "POST /ops/stop") return stopRoute(deps);
   if (route === "GET /ops/jobs") return jobsRoute(url, deps);
+  if (route === "PUT /ops/capacity") return capacityRoute(request, url, deps);
 
   if (route === "POST /ops/write") {
     if (deps.write === undefined) return json({ error: "no write probe in this bundle" }, 404);

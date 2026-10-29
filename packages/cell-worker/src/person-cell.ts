@@ -933,6 +933,19 @@ export class PersonCell {
     return guardAnswer(async () => ({ ...(await cell.jobsView()), operator: true as const }));
   }
 
+  /**
+   * RPC (operator routes): the owner sets or clears this person cell's measured number (jobs at
+   * once) and its date; the operator route has checked both.
+   */
+  async setCapacityOf(
+    person: string,
+    measured: number | null,
+    at: number | null,
+  ): Promise<GuardAnswer<{ person: string; measured: number | null; at: number | null }>> {
+    const cell = await this.cell(person);
+    return guardAnswer(async () => ({ person, ...(await cell.setCapacity(measured, at)) }));
+  }
+
   /** RPC (operator routes): the owner's stop of this person's jobs and the lead's turn. */
   async stopOf(person: string): Promise<GuardAnswer<StopAnswer>> {
     const cell = await this.cell(person);

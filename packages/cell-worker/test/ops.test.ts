@@ -8,9 +8,14 @@ import { type CellHarness, openCellHarness } from "@secbot/cell-harness";
 import {
   createFauxGateway,
   FakeCelldStorage,
+  fauxAssistantMessage,
+  fauxText,
+  fauxToolCall,
   loggedEvents,
+  type Responder,
   until,
 } from "@secbot/cell-harness/testing";
+import { jobResponder, startJobLine } from "@secbot/cell-harness/testing/responders";
 import type { CellDump } from "@secbot/cell-storage";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -51,8 +56,8 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-function setup(extra: Partial<WorkerEnv> = {}): Setup {
-  const gateway = createFauxGateway();
+function setup(extra: Partial<WorkerEnv> = {}, respond?: Responder): Setup {
+  const gateway = createFauxGateway(respond);
   const storages = new Map<string, FakeCelldStorage>();
   const opened: CellHarness[] = [];
   const cells = new Map<string, PersonCell>();
@@ -94,11 +99,18 @@ function setup(extra: Partial<WorkerEnv> = {}): Setup {
   return s;
 }
 
-const call = (s: Setup, method: string, path: string, key: string | null = KEY) =>
+const call = (
+  s: Setup,
+  method: string,
+  path: string,
+  key: string | null = KEY,
+  payload?: unknown,
+) =>
   route(
     new Request(`http://cell${path}`, {
       method,
       headers: key === null ? {} : { [OPERATOR_HEADER]: key },
+      ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
     }),
     s.env,
   );
@@ -426,5 +438,77 @@ describe("the owner's stop and board across fleets", () => {
     expect((await call(s, "GET", "/ops/jobs?cell=owner", null)).status).toBe(401);
     expect((await call(s, "POST", "/internal/stop", null)).status).toBe(401);
     expect((await call(s, "POST", "/internal/jobs", "wrong")).status).toBe(401);
+  });
+});
+
+describe("a person cell's measured number", () => {
+  /** Research jobs that hold on the slow fixture tool (the test-cell switch is on). */
+  const slowJobs: Responder = (request) => {
+    if (request.role !== "research") return jobResponder(request);
+    return request.last?.role === "toolResult"
+      ? fauxAssistantMessage([fauxText("three options")])
+      : fauxAssistantMessage([fauxToolCall("fixture_slow_lookup", { topic: "flights" })], {
+          stopReason: "toolUse",
+        });
+  };
+  const AT = Date.UTC(2026, 9, 29);
+
+  it("sets and clears the number, and the owner's board shows the line once jobs pass it", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const s = setup({ SECBOT_TEST_FIXTURES: "1" }, slowJobs);
+    const set = await call(s, "PUT", "/ops/capacity?cell=owner", KEY, { measured: 1, at: AT });
+    expect(set.status).toBe(200);
+    expect(await body(set)).toEqual({ person: "owner", measured: 1, at: AT });
+    expect(loggedEvents(log.mock.calls).find((line) => line.event === "ops.capacity_set")).toEqual({
+      event: "ops.capacity_set",
+      level: "info",
+      cell: "owner",
+      ok: true,
+      measured: 1,
+    });
+    const harness = s.opened.find((opened) => opened.person === "owner");
+    if (harness === undefined) throw new Error("no owner harness");
+    const lines = [1, 2]
+      .map((n) => startJobLine({ title: `job ${n}`, brief: `look ${n}`, template: "research" }))
+      .join("\n");
+    await (await harness.submit(lines, "start")).wait(BACKGROUND_CONTEXT);
+    await until(
+      async () =>
+        Object.values((await harness.board()).jobs).filter((row) => row.status === "running")
+          .length === 2,
+    );
+    const board = await body(await call(s, "GET", "/ops/jobs?cell=owner"));
+    expect(board.capacity).toMatchObject({ jobsAtOnce: 2, measured: 1, at: AT });
+    const cleared = await call(s, "PUT", "/ops/capacity?cell=owner", KEY, {
+      measured: null,
+      at: null,
+    });
+    expect(await body(cleared)).toEqual({ person: "owner", measured: null, at: null });
+    expect((await body(await call(s, "GET", "/ops/jobs?cell=owner"))).capacity).toBeNull();
+  });
+
+  it("refuses a bad body, the household and secrets cells, and a call without the key", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const s = setup();
+    for (const payload of [
+      { measured: 0, at: AT },
+      { measured: 1001, at: AT },
+      { measured: 2.5, at: AT },
+      { measured: "4", at: AT },
+      { measured: 4, at: null },
+      { measured: null, at: AT },
+      { measured: 4, at: -1 },
+      {},
+    ]) {
+      expect((await call(s, "PUT", "/ops/capacity?cell=owner", KEY, payload)).status).toBe(400);
+    }
+    const good = { measured: 4, at: AT };
+    expect((await call(s, "PUT", "/ops/capacity?cell=household", KEY, good)).status).toBe(404);
+    expect((await call(s, "PUT", "/ops/capacity?cell=secrets", KEY, good)).status).toBe(404);
+    expect((await call(s, "PUT", "/ops/capacity", KEY, good)).status).toBe(400);
+    expect((await call(s, "PUT", "/ops/capacity?cell=owner", null, good)).status).toBe(401);
+    const alone = setup({ SECBOT_FLEET_CELLS: "owner" });
+    expect((await call(alone, "PUT", "/ops/capacity?cell=second", KEY, good)).status).toBe(404);
   });
 });

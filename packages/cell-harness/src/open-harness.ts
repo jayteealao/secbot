@@ -424,6 +424,21 @@ export class CellHarness implements CellParts {
   }
 
   /**
+   * Sets or clears this cell's measured number and its date (the owner's setting; the release
+   * default applies while it is unset); the last alert is kept, so a change sends no new alert.
+   */
+  async setCapacity(
+    measured: number | null,
+    at: number | null,
+    context: Context = BACKGROUND_CONTEXT,
+  ): Promise<{ measured: number | null; at: number | null }> {
+    await this.harness.commit(async (tx) => {
+      Object.assign(await tx.doc(CapacityDoc), { measured, at });
+    }, context);
+    return { measured, at };
+  }
+
+  /**
    * The person's board view: live jobs in queue order, then those that ended in the last 24 hours,
    * each with its reason line; the guard mode, the results waiting for the lead, and the capacity
    * warning when more jobs run than the cell was measured at.
