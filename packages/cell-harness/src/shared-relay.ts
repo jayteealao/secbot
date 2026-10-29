@@ -53,6 +53,11 @@ export type SharedNotice = {
   readonly job: number;
   readonly text: string;
   readonly requestId: string;
+  /**
+   * Sent without waiting on the person's limit: an offer this person pays nothing for (the
+   * requesting person pays all because this person's limit is reached).
+   */
+  readonly ungated?: boolean;
 };
 
 export type SyncOutcome =
@@ -196,6 +201,7 @@ async function reconcile(
           remote.payer === "them",
         ),
         requestId: `shared:${row.number}:offer`,
+        ...(remote.payer === "them" ? { ungated: true } : {}),
       });
       logEvent("shared.offered", {
         cell: parts.person,
@@ -311,17 +317,22 @@ const resultNotice = (n: number, kind: ResultKind): SharedNotice => ({
   requestId: `wake:${n}:${kind}`,
 });
 
-/** Sends each notice to the lead as a follow-up, after the person's limit allows it. */
+/**
+ * Sends each notice to the lead as a follow-up, after the person's limit allows it; an offer this
+ * person pays nothing for goes at once, so a person whose limit is reached still sees it.
+ */
 async function sendNotices(parts: SharedParts, notices: readonly SharedNotice[], context: Context) {
   if (notices.length === 0) return;
   const lead = await parts.harness.conversation(ROOT_CONVERSATION_ID, context);
   for (const notice of notices) {
-    await parts
-      .gate?.()
-      ?.waitUntilUnder(
-        { budget: "person", taskId: `shared:${notice.job}`, what: `job ${notice.job} result` },
-        context,
-      );
+    if (notice.ungated !== true) {
+      await parts
+        .gate?.()
+        ?.waitUntilUnder(
+          { budget: "person", taskId: `shared:${notice.job}`, what: `job ${notice.job} result` },
+          context,
+        );
+    }
     await lead?.submit(
       { type: "input", content: notice.text, whenBusy: "followUp", requestId: notice.requestId },
       context,

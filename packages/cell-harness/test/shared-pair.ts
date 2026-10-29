@@ -46,6 +46,10 @@ export interface SharedPair {
 export async function openPair(
   respond: Responder = () => fauxAssistantMessage([fauxText("Plan for both: the coast.")]),
   stepCostUsd?: (modelId: string) => number,
+  /** The persons' newest months, as the household budget board reads them (default none). */
+  budgets: () => Promise<
+    readonly { cell: string; spentUsd: number; limitUsd: number }[]
+  > = async () => [],
 ): Promise<SharedPair> {
   vi.spyOn(console, "log").mockImplementation(() => {});
   const clock = { now: Date.now() };
@@ -63,7 +67,7 @@ export async function openPair(
     onReport: () => {},
     onWakeChange: () => {},
     models: gateway.models,
-    budgets: async () => [],
+    budgets,
     household: createHouseholdStub(),
     persons: ["owner", "second"],
   });

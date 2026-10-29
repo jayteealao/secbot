@@ -11,7 +11,9 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_PERSON_LIMIT_USD } from "@secbot/cell-harness";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { Harness } from "@earendil-works/pi-durable";
+import { DEFAULT_PERSON_LIMIT_USD, JobBoardDoc, type JobRow } from "@secbot/cell-harness";
 import {
   addSpend,
   type FauxRequest,
@@ -421,4 +423,26 @@ export function chatSession(setup: SharedSetup, person: string): ChatSession {
     routed: () => routed,
   };
   return session;
+}
+
+/** The household's own board row for its job `n` (where its task id and conversation live). */
+export async function householdRow(setup: SharedSetup, n: number): Promise<JobRow | undefined> {
+  const household = setup.household as unknown as
+    | { open(): Promise<{ readonly harness: Harness }> }
+    | undefined;
+  if (household === undefined) throw new Error("no household cell");
+  // The household cell keeps its harness private; the stand-in reads its board directly.
+  const { harness } = await household.open();
+  return (await harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs[String(n)];
+}
+
+/** Every line within 80 columns, with no control code but the newline. */
+export function fitsTerminal(text: string): boolean {
+  return text
+    .split("\n")
+    .every(
+      (line) =>
+        line.length <= 80 &&
+        [...line].every((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127),
+    );
 }

@@ -5,6 +5,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { describe, expect, it, vi } from "vitest";
 import { readMonth } from "../src/month-ledger.ts";
+import { syncShared } from "../src/shared-relay.ts";
 import { openTestCell, type TestCell, until } from "./fixtures.ts";
 import { wakeNoticesOf } from "./job-helpers.ts";
 import { answerFrom, open, openPair, proposeFrom } from "./shared-pair.ts";
@@ -211,5 +212,38 @@ describe("the sync routine and its triggers", () => {
     open.cells.push(alone);
     expect(JSON.stringify(await alone.cell.wakes())).not.toContain("shared-sync");
     expect(await alone.cell.syncShared()).toEqual({ outcome: "skipped" });
+  });
+});
+
+describe("an offer to a person whose limit is reached", () => {
+  it("reaches their lead at once when the requesting person pays all; a half offer still waits", async () => {
+    const reports = [{ cell: "second", spentUsd: 0.02, limitUsd: 0.01 }];
+    const pair = await openPair(undefined, undefined, async () => reports);
+    // The person's limit is reached: every gated notice waits.
+    const over = {
+      isOver: async () => true,
+      waitUntilUnder: () => new Promise<void>(() => {}),
+    };
+    const parts = { ...pair.parts("second"), gate: () => over };
+    await proposeFrom(pair);
+    await pair.sync("owner");
+    const offered = await syncShared(parts, BACKGROUND_CONTEXT);
+    expect(offered).toMatchObject({
+      outcome: "ok",
+      notices: [{ requestId: "shared:1:offer" }],
+    });
+    expect((offered as { notices: { text: string }[] }).notices[0]?.text).toContain(
+      "so owner pays all",
+    );
+    await until(async () => (await wakeNoticesOf(pair.second.cell.root)).length === 1);
+
+    // With nobody over, the household asks for half: that offer waits on the limit.
+    reports.length = 0;
+    await proposeFrom(pair, "paint the hall");
+    await pair.sync("owner");
+    const waiting = syncShared(parts, BACKGROUND_CONTEXT);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(await wakeNoticesOf(pair.second.cell.root)).toHaveLength(1);
+    void waiting;
   });
 });
