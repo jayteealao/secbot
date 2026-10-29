@@ -1,6 +1,6 @@
 # How to guard your agents
 
-Use this guide to control what your lead and your specialists can do, to answer a call that waits
+Use this guide to control what your lead and its jobs can do, to answer a call that waits
 for you, and to read what your agents did and what it cost. Each section is one task.
 
 This guide assumes that:
@@ -33,10 +33,10 @@ a password, passcode, PIN, token, or API key asks first.
 1. Add a rule. Give the agent, the tool, the verdict, and an optional match:
 
    ```
-   $ secbot rules add lead handoff ask-first --exact specialist=research
+   $ secbot rules add lead start_job ask-first --exact template=research
    ```
 
-   The agent is `all`, `lead`, or a specialist's name. The tool is a tool name, `pay` (every pay
+   The agent is `all`, `lead`, or a job template's name. The tool is a tool name, `pay` (every pay
    tool), or `*` (any tool). The verdict is `permit`, `ask-first`, or `prohibit`. The match is
    one of `--exact`, `--prefix`, `--email-domain`, `--web-domain`, or `--regex`, followed by
    `<argument>=<value>`.
@@ -45,7 +45,7 @@ a password, passcode, PIN, token, or API key asks first.
 3. To remove a rule, give the same agent, tool, and match that you added:
 
    ```
-   $ secbot rules remove lead handoff --exact specialist=research
+   $ secbot rules remove lead start_job --exact template=research
    ```
 
 Inside your own rules, the most specific rule decides. Between the owner's rules and your rules,
@@ -92,12 +92,12 @@ At 80% and at 100% of your limit you get one notice, in `secbot chat` or in `sec
 
 ## Know what happens above your limit
 
-Above your limit, chat with the lead continues. Hand-offs, routines, and reminders wait. A
-specialist's running job finishes its current step, then waits. Nothing is dropped: the work
+Above your limit, chat with the lead continues. Jobs, routines, and reminders wait. A running
+job finishes its current step, then waits. Nothing is dropped: the work
 continues when the owner raises your limit or when the month resets. The month resets at local
 midnight on the first, in the household time zone.
 
-The developer specialist counts against the household developer budget, not your limit. Above
+Jobs on the developer template count against the household developer budget, not your limit. Above
 that budget, developer jobs wait in the same way, and your other work continues.
 
 Only the owner can change a limit or the developer budget. When you need more, ask the owner.

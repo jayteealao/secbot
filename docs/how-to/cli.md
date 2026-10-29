@@ -1,8 +1,8 @@
 # How to use the secbot command line
 
 The `secbot` command talks to your own cell's lead over the private network. Every line you type
-goes to the lead unchanged; the lead decides whether to answer itself or hand the question to a
-specialist. There is no flag that picks a specialist.
+goes to the lead unchanged; the lead decides whether to answer itself or start a job for it on
+your job board. There is no flag that picks a job's template or tier.
 
 Run it with `mise run cli -- <command>` from the repo, or `node packages/cli/src/main.ts <command>`.
 
@@ -49,13 +49,15 @@ device key is what proves the caller.
 | `secbot secrets list` | Your secrets: name, kind (`secret`, `health`, or `production`), and the agents each is granted to. Never a value. |
 | `secbot secrets grant <secret> <agent>` | Lets one of your agents use that secret. Only inside the owner's allowlist; anything else is refused on stderr (exit 1). |
 | `secbot secrets revoke <secret> <agent>` | Takes the grant back. |
-| `secbot activity [--month YYYY-MM] [--page N]` | This month's activity under the month's spend, newest first, 50 to a page: each guard verdict, held call, answer, and lapse, and each hand-off, routine, and reminder with its state (running, waiting, done); time, agent, tool or job, verdict or state, the layer, the cost, and the reason or step on the line below. |
+| `secbot activity [--month YYYY-MM] [--page N]` | This month's activity under the month's spend, newest first, 50 to a page: each guard verdict, held call, answer, and lapse, and each job, routine, and reminder with its state (running, waiting, done); time, agent, tool or job, verdict or state, the layer, the cost, and the reason or step on the line below. |
 
 The match option is one of `--exact`, `--prefix`, `--email-domain`, `--web-domain`, or `--regex`,
 each followed by `<argument>=<value>`, for example
-`secbot rules add lead handoff permit --exact specialist=research`. The agent is `all`, `lead`, or
-a specialist's name; the tool is a tool name, `pay` (every pay tool), or `*` (any tool). Inside
+`secbot rules add lead start_job permit --exact template=research`. The agent is `all`, `lead`,
+or a template's name (inside a job, the agent is the job's template); the tool is a tool name, `pay` (every pay tool), or `*` (any tool). Inside
 your rules the most specific one decides; between the owner's rules and yours the stricter wins.
+Rules and history that name the retired `handoff` tool or a specialist still read; no tool reaches
+a specialist now, so such a rule matches nothing new.
 
 ### Answer a held call
 
@@ -65,14 +67,14 @@ When an ask-first rule matches, the agent's call waits for you instead of runnin
 ```
 [ HELD #1 ] the lead wants to run a tool                   lapses in 23 h 58 m
   agent      lead
-  tool       handoff
-  arguments  specialist = research
+  tool       start_job
+  arguments  template = research
              brief = "Find direct trains to Leeds on Friday 10 Oct."
              api_key = [redacted]
-  why held   your rule: lead handoff (any) -> ask first
+  why held   your rule: lead start_job (any) -> ask first
   answer     /allow 1     allow once
-             /always 1    allow always; adds: lead handoff
-                          (specialist = research) -> permit
+             /always 1    allow always; adds: lead start_job
+                          (template = research) -> permit
              /deny 1      deny
 ```
 
@@ -88,7 +90,7 @@ unchanged, and a line that starts like an answer but is not exact (`/allow one`)
 `not sent: answer with /allow N, /always N, or /deny N`. A call with no answer in 24 hours lapses
 as a refusal; a late answer prints `[ lapsed ] #1 this request lapsed; nobody answered in 24 h`.
 While the lead waits on its own held call, your chat lines are kept and reach it after the answer;
-specialists, routines, and reminders keep running.
+jobs, routines, and reminders keep running.
 
 A call held while no session is open is listed first by `secbot missed`, with the answers to type
 in `secbot chat`, and the next `secbot chat` shows it before missed messages:
@@ -96,7 +98,7 @@ in `secbot chat`, and the next `secbot chat` shows it before missed messages:
 ```
 HELD CALLS
 ------------------------------------------------------------------------------
-#1  lead  handoff -> research  your rule: ask first        lapses in 21 h 10 m
+#1  lead  start_job -> research  your rule: ask first      lapses in 21 h 10 m
 answer in secbot chat: /allow 1, /always 1, /deny 1
 ```
 
@@ -230,17 +232,17 @@ open, in `secbot missed`; the owner gets one alert:
   routines, and reminders wait until the owner raises your limit or the
   month resets on 1 Nov. Nothing is dropped. Chat with the lead continues.
   3 waiting: routine morning check (06:00), reminder bins out (19:00),
-  handoff research train times (13:58)
+  job 4 research (13:58)
 ```
 
-Above your limit, chat with the lead continues; hand-offs, routines, and reminders wait, and a
-specialist's running job finishes its current step and then waits. Nothing is dropped: the work
-continues when the owner raises your limit or the month resets (local midnight on the first, in
-the household time zone). The developer specialist counts against the household developer budget
-instead, and its jobs wait above that budget the same way.
+Above your limit, chat with the lead continues; jobs, routines, and reminders wait, and a running
+job finishes its current step and then waits. Nothing is dropped: the work continues when the
+owner raises your limit or the month resets (local midnight on the first, in the household time
+zone). Jobs on the developer template count against the household developer budget instead, and
+wait above that budget the same way. (The notice still calls jobs "hand-offs".)
 
 Every person starts at a limit of 25 dollars a month, the owner included. When the owner's own
-spend is already above 25 dollars, the owner's hand-offs, routines, and reminders wait until the
+spend is already above 25 dollars, the owner's jobs, routines, and reminders wait until the
 owner raises their own limit:
 
 ```
@@ -265,19 +267,19 @@ number as the usage line and `secbot cost`):
 ACTIVITY  sam  October 2026                                  [ total: $11.52 ]
 ------------------------------------------------------------------------------
 TIME   AGENT      TOOL OR JOB              VERDICT       LAYER          COST
-14:02  lead       handoff -> research      allowed       person    $0.0000
+14:02  lead       start_job -> research    allowed       person    $0.0000
          allowed once by sam
-13:58  lead       handoff -> research      held          rule      $0.0000
-         your rule: lead handoff (any) -> ask first
-01:05  research   job: train times         running       job       $0.1310
+13:58  lead       start_job -> research    held          rule      $0.0000
+         your rule: lead start_job (any) -> ask first
+01:05  research   job 4: train times       running       job       $0.1310
          step 1 of 2: research is working
 showing 3 of 3 this month; older: secbot activity --month 2026-09
 ```
 
-A job is a hand-off to a specialist, a routine run, or a reminder. It shows `running` or
-`waiting` (above your limit, or a reminder before its time) while it lasts, and `done` once it
-ended, with its cost: a hand-off costs what the specialist spent on it; a routine or reminder
-costs nothing itself (the lead's answer counts as chat). A month lists 50 rows a page; while older
+The activity lists job runs from your job board, routine runs, and reminders. Each shows
+`running` or `waiting` (above your limit, or a reminder before its time) while it lasts, and
+`done` once it ended, with its cost: a job costs what its ledger counts over every run and review;
+a routine or reminder costs nothing itself (the lead's answer counts as chat). A month lists 50 rows a page; while older
 rows of the month remain the last line says `older: secbot activity --page 2`, and on the last
 page it names the month before. `--month` and `--page` combine. Activity is kept with no pruning.
 
