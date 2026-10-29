@@ -79,9 +79,9 @@ export const REQUESTS_PER_JOB_MAX = 3;
 export const REQUESTS_PER_BOARD_MAX = 10;
 
 export const requestsPerJobText = (max: number) =>
-  `You already have ${max} jobs waiting for the lead to start; go on with your own job until the lead starts or leaves them.`;
+  `You already have ${max} jobs waiting for the lead to start; go on with your own job until the lead starts or leaves them, and name the work you still need in your final answer so the lead can start it later.`;
 export const requestsPerBoardText = (max: number) =>
-  `The lead's board already has ${max} asked-for jobs waiting to start; go on with your own job.`;
+  `The lead's board already has ${max} asked-for jobs waiting to start; go on with your own job, and name the work you still need in your final answer so the lead can start it later.`;
 
 /** The lead's wake notice for a job's question. */
 export const questionNotice = (n: number) =>

@@ -128,8 +128,9 @@ has no time limit.
 A job never starts other agents. When it needs more work than it can do, it asks with
 `request_job`: a row is added to the lead's board, and only the lead can start it, with
 `start_job` and the row's number. A job may have at most three such rows waiting to start, and
-the board at most ten, with a brief of up to 8,000 characters; past that the request is refused
-and the job goes on with its own work.
+the board at most ten, with a brief of up to 8,000 characters; past that the request is refused,
+and the job goes on with its own work and names the work it still needs in its final answer, so
+the lead can start it later.
 
 ## Tools that answer in their round
 
