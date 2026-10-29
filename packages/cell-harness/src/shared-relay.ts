@@ -32,6 +32,8 @@ import { addToolUsage, costOnlyUsage } from "./month-ledger.ts";
 import {
   RESULT_WAKE_MS,
   SHARED_CHARGE_KEY,
+  SHARED_OFFER_OPEN_MS,
+  SHARED_OPS_UNSENT_AFTER,
   SHARED_SYNC_TIMEOUT_MS,
   sharedJoinedText,
   sharedOfferText,
@@ -150,11 +152,15 @@ async function reconcile(
   parts: SharedParts,
   sent: readonly { readonly op: SharedOp; readonly job: number }[],
   answer: SharedSyncAnswer,
-): Promise<{ notices: SharedNotice[]; charged: { job: number; usd: number; split: string }[] }> {
+): Promise<{
+  notices: SharedNotice[];
+  charged: { job: number; household: number; usd: number; split: string }[];
+  offers: { job: number; household: number; waited: number }[];
+}> {
   const now = parts.now();
   const board = await tx.doc(JobBoardDoc);
   const notices: SharedNotice[] = [];
-  const charged: { job: number; usd: number; split: string }[] = [];
+  const charged: { job: number; household: number; usd: number; split: string }[] = [];
   const jobOfOp = new Map(sent.map((each) => [each.op.opId, each]));
   for (const ack of answer.acks) {
     const found = jobOfOp.get(ack.opId);
@@ -286,7 +292,12 @@ async function reconcile(
         await addToolUsage(tx, row.conversationId, SHARED_CHARGE_KEY, costOnlyUsage(charge.usd));
       }
       link.charges.push(charge.id);
-      charged.push({ job: row.number, usd: charge.usd, split: charge.split });
+      charged.push({
+        job: row.number,
+        household: remote.household,
+        usd: charge.usd,
+        split: charge.split,
+      });
     }
   }
   // A routine result unpulled for 30 minutes sends one late notice, as the job task does.
@@ -308,7 +319,18 @@ async function reconcile(
       requestId: `wake:${row.number}:late`,
     });
   }
-  return { notices, charged };
+  // Offers to this person still unanswered, with how long each has waited.
+  const offers = Object.values(board.jobs).flatMap((row) => {
+    const link = row.shared;
+    return link === null ||
+      link.role !== "other" ||
+      link.household === null ||
+      (link.consent !== "offered" && link.consent !== "shown") ||
+      ENDED.has(row.status)
+      ? []
+      : [{ job: row.number, household: link.household, waited: now - row.createdAt }];
+  });
+  return { notices, charged, offers };
 }
 
 const resultNotice = (n: number, kind: ResultKind): SharedNotice => ({
@@ -372,6 +394,29 @@ async function sendNotices(parts: SharedParts, notices: readonly SharedNotice[],
 
 const running = new WeakMap<Harness, Promise<SyncOutcome>>();
 
+/**
+ * What each cell's exchanges logged once: each op's failed exchanges in a row (and when it first
+ * failed), the ops already logged as unsent, and the offers already logged as open. Kept in the
+ * process, so a restarted cell may log a line once more.
+ */
+const diagnostics = new WeakMap<
+  Harness,
+  {
+    readonly failures: Map<string, { count: number; since: number }>;
+    readonly unsent: Set<string>;
+    readonly open: Set<number>;
+  }
+>();
+
+function diagnosticsOf(harness: Harness) {
+  let found = diagnostics.get(harness);
+  if (found === undefined) {
+    found = { failures: new Map(), unsent: new Set(), open: new Set() };
+    diagnostics.set(harness, found);
+  }
+  return found;
+}
+
 function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`no answer in ${ms} ms`)), ms);
@@ -415,16 +460,49 @@ async function syncOnce(parts: SharedParts, context: Context): Promise<SyncOutco
       },
       "warn",
     );
+    const seen = diagnosticsOf(parts.harness);
+    for (const each of sent) {
+      const failed = seen.failures.get(each.op.opId) ?? { count: 0, since: parts.now() };
+      failed.count += 1;
+      seen.failures.set(each.op.opId, failed);
+      if (failed.count >= SHARED_OPS_UNSENT_AFTER && !seen.unsent.has(each.op.opId)) {
+        seen.unsent.add(each.op.opId);
+        logEvent(
+          "shared.ops_unsent",
+          {
+            cell: parts.person,
+            job: each.job,
+            op: each.op.kind,
+            failed_exchanges: failed.count,
+            waited_ms: parts.now() - failed.since,
+          },
+          "warn",
+        );
+      }
+    }
     return { outcome: "failed", error: message };
   }
   const quiet = withoutAbortSignal(context);
   const done = await parts.harness.commit((tx) => reconcile(tx, parts, sent, answer), quiet);
+  const seen = diagnosticsOf(parts.harness);
+  for (const each of sent) seen.failures.delete(each.op.opId);
   for (const each of done.charged) {
     logEvent("shared.charged", {
       cell: parts.person,
       job: each.job,
+      household: each.household,
       usd: each.usd,
       split: each.split,
+    });
+  }
+  for (const offer of done.offers) {
+    if (offer.waited < SHARED_OFFER_OPEN_MS || seen.open.has(offer.job)) continue;
+    seen.open.add(offer.job);
+    logEvent("shared.offer_open", {
+      cell: parts.person,
+      job: offer.job,
+      household: offer.household,
+      waited_ms: offer.waited,
     });
   }
   logEvent("shared.sync", {

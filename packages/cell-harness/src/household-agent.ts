@@ -22,6 +22,7 @@ import { type AlertEnv, createAlerts } from "./alerts.ts";
 import { defaultSetTimer, type SetTimer } from "./approvals.ts";
 import { type BoardView, boardView } from "./board-view.ts";
 import { createBudgetExtension } from "./budget-gate.ts";
+import { logEvent } from "./cell-parts.ts";
 import { JobBoardDoc, type JobStop } from "./docs.ts";
 import { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
@@ -37,7 +38,14 @@ import { HOUSEHOLD_AGENT_RULES, HOUSEHOLD_AGENT_TOOLS } from "./release-defaults
 import { createReviewTask } from "./result-review.ts";
 import { ensureRoutines } from "./routines.ts";
 import { cellSettings } from "./settings.ts";
-import { type Budgets, createPayerGate, exchange, overOf, rowsFor } from "./shared-jobs.ts";
+import {
+  type Budgets,
+  createPayerGate,
+  exchange,
+  overOf,
+  rowsFor,
+  SharedJobsDoc,
+} from "./shared-jobs.ts";
 import { type StopAnswer, stopJobs } from "./stop.ts";
 import { createTelemetryExtension } from "./telemetry.ts";
 import { type NextWake, nextWake, type WakeSummary, wakesOf } from "./wake-times.ts";
@@ -237,6 +245,19 @@ export async function openHouseholdAgent(options: HouseholdAgentOptions): Promis
       const quiet = withoutAbortSignal(context);
       for (const taskId of applied.aborts) await harness.abortTask(taskId, quiet);
       for (const n of applied.started) holds.wake(n);
+      if (applied.started.length > 0) {
+        // After the commit, so a retried exchange never logs a start twice.
+        const shared = await harness.snapshot(SharedJobsDoc, quiet);
+        for (const n of applied.started) {
+          const entry = shared?.jobs[String(n)];
+          logEvent("shared.started", {
+            cell,
+            job: n,
+            requester: entry?.requester ?? null,
+            other: entry?.other ?? null,
+          });
+        }
+      }
       const stopping = applied.stops.flatMap((each) => each.jobs);
       if (stopping.length > 0) await stop("person", stopping);
       if (applied.aborts.length === 0 && stopping.length === 0) return answer;

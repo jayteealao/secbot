@@ -441,6 +441,12 @@ export const SHARED_SYNC_EVERY_MS = 120_000;
 /** One exchange with the household waits at most this long: 10 seconds. */
 export const SHARED_SYNC_TIMEOUT_MS = 10_000;
 
+/** A shared-job operation that has gone out in this many failed exchanges in a row is logged once. */
+export const SHARED_OPS_UNSENT_AFTER = 3;
+
+/** A shared offer to a person still unanswered after this long is logged once. */
+export const SHARED_OFFER_OPEN_MS = 24 * 60 * 60 * 1000;
+
 /**
  * The tool key under which a person's share of a shared job is booked on that job's row
  * conversation (a colon never appears in a model tool name, so it never mixes with a real tool).

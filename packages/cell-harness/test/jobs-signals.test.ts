@@ -31,6 +31,7 @@ import {
 } from "./fixtures.ts";
 import { FIXTURE_ORDER, FIXTURE_PAGES } from "./injection-fixtures.ts";
 import { createHold, jobResponder, RESEARCH_JOB, startJobLine } from "./responders.ts";
+import { openPair, proposeFrom } from "./shared-pair.ts";
 
 let test: TestCell | undefined;
 afterEach(async () => {
@@ -619,5 +620,138 @@ describe("the stop, restart, and reorder signals", () => {
     vi.mocked(t.cell.harness.waitForTask).mockRestore();
     hold.release("research");
     await until(async () => (await job(t, 1))?.status === "done");
+  });
+});
+
+describe("the shared-job signals", () => {
+  const TITLE = "plan the May trip kiwi-5512";
+  const SHARED_BRIEF = "Shared brief that must stay out of the log: pear-9033.";
+  const PLAN = "Shared result that must stay out of the log: lime-6620.";
+
+  it("logs each shared-job line with its fields, each dark path once, and no title, brief, or result", async () => {
+    const pair = await openPair(
+      () => fauxAssistantMessage([fauxText(PLAN)]),
+      () => 0.01,
+    );
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const events = () => loggedEvents([...log.mock.calls, ...warn.mock.calls]);
+    const one = (name: string) => events().filter((event) => event.event === name);
+
+    // Proposed by the owner's lead, offered to the other lead, joined, started, charged, relayed.
+    await leadCalls(pair.owner, "propose_shared_job", {
+      title: TITLE,
+      brief: SHARED_BRIEF,
+      estimate_usd: 0.2,
+    });
+    await until(async () => (await pair.row("owner", 1))?.shared?.household === 1);
+    await pair.sync("second");
+    await leadCalls(pair.second, "offer_shared", { job: 1 });
+    expect(await pair.second.cell.answerShared(1, true)).toMatchObject({ ok: true });
+    await until(async () => {
+      await pair.sync("second");
+      await pair.sync("owner");
+      return (await pair.row("owner", 1))?.result?.text === PLAN;
+    });
+    await until(async () => {
+      await pair.sync("second");
+      await pair.sync("owner");
+      return one("shared.charged").length >= 2;
+    });
+    expect(one("shared.proposed")[0]).toMatchObject({
+      cell: "owner",
+      job: 1,
+      tier: "cheap",
+      estimate_usd: 0.2,
+    });
+    expect(one("shared.offered")[0]).toMatchObject({
+      cell: "second",
+      job: 1,
+      household: 1,
+      from: "owner",
+      payer: "half",
+    });
+    expect(one("shared.answered")[0]).toMatchObject({
+      cell: "second",
+      job: 1,
+      household: 1,
+      answer: "join",
+    });
+    expect(one("shared.started")).toEqual([
+      expect.objectContaining({ cell: "household", job: 1, requester: "owner", other: "second" }),
+    ]);
+    for (const person of ["owner", "second"]) {
+      expect(one("shared.charged").find((event) => event.cell === person)).toMatchObject({
+        job: 1,
+        household: 1,
+        split: "half",
+        usd: expect.any(Number),
+      });
+      expect(one("shared.relayed").find((event) => event.cell === person)).toMatchObject({
+        job: 1,
+        household: 1,
+        kind: "routine",
+      });
+    }
+    expect(one("shared.sync")[0]).toMatchObject({
+      outcome: "ok",
+      ops: expect.any(Number),
+      acks: expect.any(Number),
+      rows: expect.any(Number),
+      duration_ms: expect.any(Number),
+    });
+
+    // An offer nobody answers for 24 hours: logged once.
+    await proposeFrom(pair, "paint the hall");
+    await pair.sync("owner");
+    await pair.sync("second");
+    expect(one("shared.offer_open")).toEqual([]);
+    pair.clock.now += 24 * 60 * 60 * 1000;
+    await pair.sync("second");
+    await pair.sync("second");
+    expect(one("shared.offer_open")).toEqual([
+      expect.objectContaining({
+        cell: "second",
+        job: 2,
+        household: 2,
+        waited_ms: expect.any(Number),
+      }),
+    ]);
+    expect(one("shared.offer_open")[0]?.waited_ms as number).toBeGreaterThanOrEqual(
+      24 * 60 * 60 * 1000,
+    );
+
+    // An operation that goes out in three failed exchanges in a row: logged once.
+    pair.setDown(true);
+    await proposeFrom(pair, "fix the fence");
+    for (let attempt = 0; attempt < 4; attempt++) {
+      expect(await pair.sync("owner")).toMatchObject({ outcome: "failed" });
+    }
+    expect(one("shared.sync").some((event) => event.outcome === "failed")).toBe(true);
+    expect(one("shared.ops_unsent")).toEqual([
+      expect.objectContaining({
+        cell: "owner",
+        job: 3,
+        op: "propose",
+        failed_exchanges: 3,
+        waited_ms: expect.any(Number),
+        level: "warn",
+      }),
+    ]);
+    pair.setDown(false);
+
+    // No shared line carries a title, a brief, or a result.
+    const lines = JSON.stringify(
+      events().filter((event) => String(event.event).startsWith("shared.")),
+    );
+    for (const secret of [
+      "kiwi-5512",
+      "pear-9033",
+      "lime-6620",
+      "paint the hall",
+      "fix the fence",
+    ]) {
+      expect(lines).not.toContain(secret);
+    }
   });
 });
