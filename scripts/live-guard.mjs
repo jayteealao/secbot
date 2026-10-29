@@ -227,7 +227,10 @@ const describeMissing = (result) =>
  * `maxUsd` stops the run, and the cleanup step still runs.
  *
  * deps: cli(argv, { stdin }) -> { code, out, err }; chat.open(), chat.send(line), chat.text(),
- * chat.close(), chat.isOpen(); sleep(ms); now(); scale (timeouts are multiplied by it).
+ * chat.close(), chat.isOpen(); sleep(ms); now(); scale (timeouts are multiplied by it). An action
+ * with `as: "second"` or `as: "operator"` runs with `deps.cliAs[as]` (a command) or
+ * `deps.chatAs[as]` (a chat); the owner's runners serve every other action, and an operator
+ * command without its own runner.
  */
 export async function executeSteps(steps, deps, context, state, maxUsd = DEFAULT_MAX_USD) {
   const results = {};
@@ -243,17 +246,30 @@ export async function executeSteps(steps, deps, context, state, maxUsd = DEFAULT
     }
     const { result, text } = await runStep(step, deps, context, state);
     results[step.id] = result;
-    const part = `charter-part${step.part}.txt`;
     add(step.evidence, text);
-    if (step.evidence !== part) add(part, text);
+    if (step.part !== undefined) {
+      const part = `charter-part${step.part}.txt`;
+      if (step.evidence !== part) add(part, text);
+    }
     const now = await spendNow(deps);
     if (stopped === undefined && overSpend(state.startSpend, now, maxUsd)) {
       stopped = `stopped: the month's spend rose by more than $${maxUsd}`;
     }
   }
-  if (deps.chat.isOpen()) await deps.chat.close();
+  for (const chat of [deps.chat, ...Object.values(deps.chatAs ?? {})]) {
+    if (chat.isOpen()) await chat.close();
+  }
   return { results, evidence };
 }
+
+/** The command runner of the person an action runs as (`as`; the owner by default). */
+const cliOf = (deps, as = "owner") =>
+  as === "owner" || (as === "operator" && deps.cliAs?.operator === undefined)
+    ? (...args) => deps.cli(...args)
+    : deps.cliAs?.[as];
+
+/** The chat of the person an action runs as (`as`; the owner by default). */
+const chatOf = (deps, as = "owner") => (as === "owner" ? deps.chat : deps.chatAs?.[as]);
 
 const spendNow = async (deps) => spendOf((await deps.cli(["cost"], {})).out)?.spend;
 
@@ -305,18 +321,19 @@ async function runStep(step, deps, context, state) {
   const chunk = [`## ${step.id}`];
   let answerMark;
 
-  const cmd = async (argv, stdin) => {
-    const result = await deps.cli(fillArgv(argv, context), stdin === undefined ? {} : { stdin });
+  const cmd = async (argv, stdin, run = (...args) => deps.cli(...args), as = "owner") => {
+    const result = await run(fillArgv(argv, context), stdin === undefined ? {} : { stdin });
     const err = result.err ? `[stderr]\n${result.err}` : "";
-    chunk.push(`$ secbot ${argv.join(" ")}`, `${result.out}${err}[exit ${result.code}]`);
+    const who = as === "owner" ? "" : `(as ${as}) `;
+    chunk.push(`${who}$ secbot ${argv.join(" ")}`, `${result.out}${err}[exit ${result.code}]`);
     return result;
   };
 
-  const chatTurn = async (line, patterns, ms) => {
-    const mark = deps.chat.text().length;
+  const chatTurn = async (line, patterns, ms, chat = deps.chat) => {
+    const mark = chat.text().length;
     chunk.push(`> ${line}`);
-    await deps.chat.send(line);
-    const since = () => deps.chat.text().slice(mark);
+    await chat.send(line);
+    const since = () => chat.text().slice(mark);
     const result = await waitFor(since, patterns, ms * scale, deps);
     chunk.push(since().replace(/\n+$/, ""));
     return { result, text: since() };
@@ -324,10 +341,12 @@ async function runStep(step, deps, context, state) {
 
   const commandAction = async (action, patterns) => {
     const stdin = action.kind === "stdin" ? context.values[action.value] : undefined;
+    const run = cliOf(deps, action.as);
+    if (run === undefined) return { ok: false, detail: `no command runner for ${action.as}` };
     // A live model's tool call can land after its chat turn printed: a command with `waitMs`
     // runs again every 5 s until its patterns match or the wait ends.
     const deadline = deps.now() + (action.waitMs ?? 0) * scale;
-    let result = await cmd(action.argv, stdin);
+    let result = await cmd(action.argv, stdin, run, action.as);
     let found = check(`${result.out}${result.err}`, patterns);
     while (
       action.waitMs !== undefined &&
@@ -335,7 +354,7 @@ async function runStep(step, deps, context, state) {
       deps.now() < deadline
     ) {
       await deps.sleep(5_000 * scale);
-      result = await cmd(action.argv, stdin);
+      result = await cmd(action.argv, stdin, run, action.as);
       found = check(`${result.out}${result.err}`, patterns);
     }
     if (result.code === 0 && found.missing.length === 0 && found.present.length === 0) {
@@ -345,11 +364,13 @@ async function runStep(step, deps, context, state) {
     return { ok: false, detail, text: `${result.out}${result.err}` };
   };
 
-  const openAction = async (patterns) => {
-    const mark = deps.chat.text().length;
-    chunk.push("$ secbot chat");
-    await deps.chat.open();
-    const since = () => deps.chat.text().slice(mark);
+  const openAction = async (action, patterns) => {
+    const chat = chatOf(deps, action.as);
+    if (chat === undefined) return { ok: false, detail: `no chat for ${action.as}` };
+    const mark = chat.text().length;
+    chunk.push(action.as === undefined ? "$ secbot chat" : `(as ${action.as}) $ secbot chat`);
+    await chat.open();
+    const since = () => chat.text().slice(mark);
     const found = await waitFor(since, patterns, OPEN_MS * scale, deps);
     chunk.push(since().replace(/\n+$/, ""));
     answerMark = undefined;
@@ -358,22 +379,24 @@ async function runStep(step, deps, context, state) {
   };
 
   const chatAction = async (action, patterns) => {
-    if (!deps.chat.isOpen()) {
-      chunk.push("$ secbot chat");
-      await deps.chat.open();
+    const chat = chatOf(deps, action.as);
+    if (chat === undefined) return { ok: false, detail: `no chat for ${action.as}` };
+    if (!chat.isOpen()) {
+      chunk.push(action.as === undefined ? "$ secbot chat" : `(as ${action.as}) $ secbot chat`);
+      await chat.open();
     }
     const ms = action.timeoutMs ?? MODEL_TURN_MS;
-    const start = deps.chat.text().length;
-    const since = () => deps.chat.text().slice(start);
+    const start = chat.text().length;
+    const since = () => chat.text().slice(start);
     const seen = () => check(since(), patterns).missing.length === 0;
     // A repeated line waits for each turn's usage line, then checks the whole action's output.
     const perTurn = action.repeat === undefined ? patterns : { expect: [CONTRACT.usage] };
     for (let sent = 0; sent < (action.repeat ?? 1) && !seen(); sent++) {
-      await chatTurn(action.say, perTurn, ms);
+      await chatTurn(fillLine(action.say, state), perTurn, ms, chat);
     }
     for (const line of action.plainer ?? []) {
       if (seen()) break;
-      await chatTurn(line, patterns, ms);
+      await chatTurn(fillLine(line, state), patterns, ms, chat);
     }
     if (action.keep === "pending") state.pendingHeld = newestHeld(since());
     const found = check(since(), patterns);
@@ -429,7 +452,7 @@ async function runStep(step, deps, context, state) {
   const runAction = async (action) => {
     const patterns = { expect: action.expect ?? [], reject: action.reject ?? [] };
     if (action.kind === "cmd" || action.kind === "stdin") return commandAction(action, patterns);
-    if (action.kind === "open") return openAction(patterns);
+    if (action.kind === "open") return openAction(action, patterns);
     if (action.kind === "chat") return chatAction(action, patterns);
     if (action.kind === "answer") return answerAction(action, patterns);
     if (action.kind === "limit") return limitAction(action, patterns);
@@ -456,15 +479,30 @@ async function runStep(step, deps, context, state) {
   return { result, text: `${chunk.join("\n")}\n${tail}\n\n` };
 }
 
+/**
+ * A chat line with `{job:<name>}` filled from the job numbers a step kept (`state.jobs`), so a
+ * later line can name a job the run started. Other text is unchanged. Pure.
+ */
+export function fillLine(line, state) {
+  return String(line).replace(/\{job:([a-z0-9-]+)\}/g, (whole, name) =>
+    state?.jobs?.[name] === undefined ? whole : String(state.jobs[name]),
+  );
+}
+
 // ---- the live processes ------------------------------------------------------------------------
 
+/** The environment of a person's command line: `configDir` holds that person's device file. */
+const envWith = (env, configDir) =>
+  configDir === undefined ? env : { ...env, SECBOT_CONFIG_DIR: configDir };
+
 /** One `secbot` run as a child process; a value for standard input is written, never echoed. */
-export function cliProcess(env = process.env) {
+export function cliProcess(env = process.env, { configDir } = {}) {
+  const childEnv = envWith(env, configDir);
   return (argv, { stdin } = {}) =>
     new Promise((done, fail) => {
       const child = spawn(process.execPath, ["--no-warnings=ExperimentalWarning", CLI, ...argv], {
         cwd: root,
-        env,
+        env: childEnv,
         stdio: ["pipe", "pipe", "pipe"],
       });
       let out = "";
@@ -486,7 +524,8 @@ export function cliProcess(env = process.env) {
 }
 
 /** `secbot chat` as a child process with piped input and output. */
-export function chatProcess(env = process.env) {
+export function chatProcess(env = process.env, { configDir } = {}) {
+  const childEnv = envWith(env, configDir);
   let child;
   let text = "";
   return {
@@ -495,7 +534,7 @@ export function chatProcess(env = process.env) {
     async open() {
       child = spawn(process.execPath, ["--no-warnings=ExperimentalWarning", CLI, "chat"], {
         cwd: root,
-        env,
+        env: childEnv,
         stdio: ["pipe", "pipe", "pipe"],
       });
       child.stdout.setEncoding("utf8").on("data", (chunk) => {

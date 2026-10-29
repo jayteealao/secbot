@@ -12,6 +12,7 @@ import { test } from "node:test";
 import {
   checkModels,
   executeSteps,
+  fillLine,
   PREFLIGHT_PAD,
   preflight,
   setTestModels,
@@ -654,4 +655,72 @@ test("the charter refuses to start while a role uses Opus or the decision model 
   ]);
   assert.equal(decisionModelOf("owner  mode shadow  decision model jev\n"), "jev");
   assert.equal(decisionModelOf("no such line"), undefined);
+});
+
+test("an action marked as the second person runs on that person's command line and chat", async () => {
+  const deps = fakeDeps({ answers: {}, chatReplies: () => "", spends: [0.1] });
+  const secondCalls = [];
+  let secondText = "";
+  let secondOpen = false;
+  deps.cliAs = {
+    second: async (argv) => {
+      secondCalls.push(argv);
+      return { code: 0, out: "JOBS second\n", err: "" };
+    },
+  };
+  deps.chatAs = {
+    second: {
+      isOpen: () => secondOpen,
+      text: () => secondText,
+      async open() {
+        secondOpen = true;
+        secondText += "connected to second lead\n";
+      },
+      send: async (line) => {
+        secondText += `second heard: ${line}\n`;
+      },
+      async close() {
+        secondOpen = false;
+      },
+    },
+  };
+  const steps = [
+    {
+      id: "as-second",
+      checks: ["check-2"],
+      evidence: "as-second.txt",
+      actions: [
+        { kind: "cmd", as: "second", argv: ["jobs"], expect: [/JOBS second/] },
+        { kind: "open", as: "second", expect: [/connected to second lead/] },
+        { kind: "chat", as: "second", say: "hello", expect: [/second heard: hello/] },
+      ],
+    },
+    {
+      id: "no-runner",
+      checks: ["check-3"],
+      evidence: "no-runner.txt",
+      actions: [{ kind: "cmd", as: "third", argv: ["jobs"], expect: [/x/] }],
+    },
+  ];
+  const { results, evidence } = await executeSteps(
+    steps,
+    deps,
+    { person: "owner" },
+    {
+      startSpend: 0.1,
+    },
+  );
+  assert.deepEqual(secondCalls, [["jobs"]]);
+  assert.equal(deps.calls.filter((call) => call.argv[0] === "jobs").length, 0);
+  assert.equal(results["as-second"].status, "pass", results["as-second"].detail);
+  assert.notEqual(results["no-runner"].status, "pass");
+  assert.equal(secondOpen, false);
+  assert.match(evidence["as-second.txt"], /\(as second\) \$ secbot jobs/);
+  assert.equal(evidence["charter-partundefined.txt"], undefined);
+});
+
+test("a chat line names a job the run kept by its number", () => {
+  assert.equal(fillLine("stop job {job:slow}", { jobs: { slow: 7 } }), "stop job 7");
+  assert.equal(fillLine("stop job {job:other}", { jobs: {} }), "stop job {job:other}");
+  assert.equal(fillLine("plain", undefined), "plain");
 });
