@@ -37,6 +37,7 @@ import {
   type NextWake,
   openHouseholdAgent,
   type ReportSpendResult,
+  type SetTimer,
   type SharedSyncAnswer,
   type StopAnswer,
   type WakeSummary,
@@ -76,6 +77,8 @@ export interface HouseholdCellOptions {
   readonly persons?: readonly string[];
   /** Tests: the model gateway of the household agent (default: the fleet's key). */
   readonly models?: Models;
+  /** Tests: the timer a shared job waiting on both people's limits checks them again with. */
+  readonly setTimer?: SetTimer;
 }
 
 interface Opened {
@@ -156,6 +159,7 @@ export class HouseholdCell {
       onWakeChange: () => this.rearmSoon(),
       ...(this.options.fetch === undefined ? {} : { fetch: this.options.fetch }),
       ...(this.options.models === undefined ? {} : { models: this.options.models }),
+      ...(this.options.setTimer === undefined ? {} : { setTimer: this.options.setTimer }),
       budgets: async () => (await board.board()).reports,
       household: { read: (document) => log.read(document), apply: (change) => log.apply(change) },
       persons: this.options.persons ?? [],

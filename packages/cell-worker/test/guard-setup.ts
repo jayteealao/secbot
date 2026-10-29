@@ -9,6 +9,7 @@ import {
   type CellHarness,
   type OpenCellOptions,
   openCellHarness,
+  type SetTimer,
 } from "@secbot/cell-harness";
 import {
   createFauxGateway,
@@ -77,6 +78,8 @@ export async function guardSetup(
     readonly persons?: readonly string[];
     /** The fetch the household cell uses for its outbound calls (heartbeat pings). */
     readonly householdFetch?: typeof fetch;
+    /** The timer the household's shared jobs check both people's limits again with. */
+    readonly householdSetTimer?: SetTimer;
     /** Extra worker settings per person cell (for example a household reached over HTTP). */
     readonly personEnv?: (person: string) => Record<string, string>;
     /** The person cells' environment (for example the alert stand-in's settings). */
@@ -115,6 +118,9 @@ export async function guardSetup(
                 models: gateway.models,
                 ...(options.now === undefined ? {} : { now: options.now }),
                 ...(options.householdFetch === undefined ? {} : { fetch: options.householdFetch }),
+                ...(options.householdSetTimer === undefined
+                  ? {}
+                  : { setTimer: options.householdSetTimer }),
               },
         )
       : undefined;

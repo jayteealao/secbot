@@ -237,13 +237,39 @@ describe("an offer to a person whose limit is reached", () => {
     );
     await until(async () => (await wakeNoticesOf(pair.second.cell.root)).length === 1);
 
-    // With nobody over, the household asks for half: that offer waits on the limit.
+    // With nobody over, the household asks for half: that offer waits on the limit, and the
+    // exchanges go on meanwhile (the board keeps mirroring the household).
     reports.length = 0;
     await proposeFrom(pair, "paint the hall");
     await pair.sync("owner");
-    const waiting = syncShared(parts, BACKGROUND_CONTEXT);
+    expect(await syncShared(parts, BACKGROUND_CONTEXT)).toMatchObject({
+      outcome: "ok",
+      notices: [{ requestId: "shared:2:offer" }],
+    });
+    expect(await syncShared(parts, BACKGROUND_CONTEXT)).toMatchObject({ outcome: "ok" });
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(await wakeNoticesOf(pair.second.cell.root)).toHaveLength(1);
-    void waiting;
+  });
+
+  it("delivers a waiting notice once the limit allows it, without holding the exchanges", async () => {
+    const pair = await openPair();
+    let open = () => {};
+    const under = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    let over = true;
+    const gate = {
+      isOver: async () => over,
+      waitUntilUnder: () => under,
+    };
+    const parts = { ...pair.parts("second"), gate: () => gate };
+    await proposeFrom(pair);
+    await pair.sync("owner");
+    expect(await syncShared(parts, BACKGROUND_CONTEXT)).toMatchObject({ outcome: "ok" });
+    expect(await syncShared(parts, BACKGROUND_CONTEXT)).toMatchObject({ outcome: "ok" });
+    expect(await wakeNoticesOf(pair.second.cell.root)).toHaveLength(0);
+    over = false;
+    open();
+    await until(async () => (await wakeNoticesOf(pair.second.cell.root)).length === 1);
   });
 });

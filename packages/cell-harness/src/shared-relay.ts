@@ -317,33 +317,57 @@ const resultNotice = (n: number, kind: ResultKind): SharedNotice => ({
   requestId: `wake:${n}:${kind}`,
 });
 
+/** Notices that wait on a person's limit, delivered in order behind each other, per cell. */
+const deferred = new WeakMap<Harness, Promise<void>>();
+
+/** Submits one notice to the lead (sent once across restarts by its request id). */
+async function deliver(parts: SharedParts, notice: SharedNotice, context: Context) {
+  const lead = await parts.harness.conversation(ROOT_CONVERSATION_ID, context);
+  await lead?.submit(
+    { type: "input", content: notice.text, whenBusy: "followUp", requestId: notice.requestId },
+    context,
+  );
+  await parts.harness.commit(async (tx) => {
+    const result = (await tx.doc(JobBoardDoc)).jobs[String(notice.job)]?.result;
+    if (result !== undefined && result !== null && notice.requestId.startsWith("wake:")) {
+      result.wokeAt ??= parts.now();
+    }
+  }, context);
+}
+
 /**
  * Sends each notice to the lead as a follow-up, after the person's limit allows it; an offer this
- * person pays nothing for goes at once, so a person whose limit is reached still sees it.
+ * person pays nothing for goes at once, so a person whose limit is reached still sees it. While
+ * the limit is reached, the waiting notices go behind the exchange, so later exchanges still
+ * mirror the household.
  */
 async function sendNotices(parts: SharedParts, notices: readonly SharedNotice[], context: Context) {
-  if (notices.length === 0) return;
-  const lead = await parts.harness.conversation(ROOT_CONVERSATION_ID, context);
+  const gate = parts.gate?.();
+  const later: SharedNotice[] = [];
   for (const notice of notices) {
-    if (notice.ungated !== true) {
-      await parts
-        .gate?.()
-        ?.waitUntilUnder(
-          { budget: "person", taskId: `shared:${notice.job}`, what: `job ${notice.job} result` },
-          context,
-        );
-    }
-    await lead?.submit(
-      { type: "input", content: notice.text, whenBusy: "followUp", requestId: notice.requestId },
-      context,
-    );
-    await parts.harness.commit(async (tx) => {
-      const result = (await tx.doc(JobBoardDoc)).jobs[String(notice.job)]?.result;
-      if (result !== undefined && result !== null && notice.requestId.startsWith("wake:")) {
-        result.wokeAt ??= parts.now();
-      }
-    }, context);
+    const waits =
+      notice.ungated !== true &&
+      gate !== undefined &&
+      (later.length > 0 || (await gate.isOver("person", context)));
+    if (waits) later.push(notice);
+    else await deliver(parts, notice, context);
   }
+  if (later.length === 0 || gate === undefined) return;
+  const before = deferred.get(parts.harness) ?? Promise.resolve();
+  const next = before.then(async () => {
+    for (const notice of later) {
+      await gate.waitUntilUnder(
+        { budget: "person", taskId: `shared:${notice.job}`, what: `job ${notice.job} result` },
+        context,
+      );
+      await deliver(parts, notice, context);
+    }
+  });
+  // A failed delivery (a closing cell) only ends this chain; the next exchange starts a new one.
+  deferred.set(
+    parts.harness,
+    next.catch(() => {}),
+  );
 }
 
 const running = new WeakMap<Harness, Promise<SyncOutcome>>();

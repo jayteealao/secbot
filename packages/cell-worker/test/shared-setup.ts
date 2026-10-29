@@ -169,6 +169,11 @@ export async function sharedSetup(options: {
   readonly stepCostUsd?: (modelId: string) => number;
   /** Wraps the scripted models (for example a hold that keeps a role at its next model step). */
   readonly wrap?: (respond: Responder) => Responder;
+  /**
+   * How often a shared job held on both people's limits checks them again, in ms (the release
+   * waits a minute; a test that raises a limit waits less).
+   */
+  readonly payerPollMs?: number;
 }): Promise<SharedSetup> {
   const householdFetches: string[] = [];
   const householdFetch: typeof fetch = async (input) => {
@@ -180,6 +185,14 @@ export async function sharedSetup(options: {
     persons: PERSONS,
     respond: options.wrap === undefined ? sharedResponder : options.wrap(sharedResponder),
     householdFetch,
+    ...(options.payerPollMs === undefined
+      ? {}
+      : {
+          householdSetTimer: (_ms: number, fire: () => void) => {
+            const timer = setTimeout(fire, options.payerPollMs);
+            return () => clearTimeout(timer);
+          },
+        }),
     sockets: true,
     stepCostUsd: options.stepCostUsd ?? (() => 0.01),
     ...(options.clock === undefined ? {} : { now: options.clock }),
