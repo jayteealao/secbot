@@ -161,6 +161,7 @@ describe("the stop", () => {
   });
   it("lifts the lock when an abort throws, and a lock left by a dead stop is lifted on open", async () => {
     vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const hold = createHold();
     test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
     const t = test;
@@ -168,12 +169,20 @@ describe("the stop", () => {
     await lead(t, start("flights", "research"));
     await until(() => hold.waiting("research") === 1);
     const abort = vi.spyOn(t.cell.harness, "abortTask").mockRejectedValueOnce(new Error("gone"));
+    // A failed job abort does not skip the lead turn's abort.
+    const turn = vi.spyOn(t.cell.root, "abort");
     await stopJobs(
       { harness: t.cell.harness, root: t.cell.root, person: "owner", now: () => 7_000 },
       "person",
       BACKGROUND_CONTEXT,
     );
     abort.mockRestore();
+    expect(turn).toHaveBeenCalledTimes(1);
+    expect(
+      loggedEvents(warn.mock.calls).some(
+        (line) => line.event === "stop.abort_failed" && line.job === 1,
+      ),
+    ).toBe(true);
     expect((await t.cell.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.active).toBeNull();
     hold.release("research");
     // A stop that died between its two commits leaves the lock set; the next open lifts it.

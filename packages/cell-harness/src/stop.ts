@@ -101,20 +101,36 @@ export async function stopJobs(
   const count = marked.length + locked.shared;
   await seams.afterLock?.();
   const quiet = withoutAbortSignal(context);
+  // Each move runs whatever the one before it did: a failed job abort skips neither the lead
+  // turn's abort nor the wait, and the lock is lifted below whatever an abort did (a lock left set
+  // would refuse every later start, restart, and resume until another stop).
+  const aborts = await Promise.allSettled(
+    marked.map((job) => harness.abortTask(job.taskId, quiet)),
+  );
+  aborts.forEach((outcome, index) => {
+    if (outcome.status === "rejected") {
+      logEvent(
+        "stop.abort_failed",
+        { cell: person, job: marked[index]?.number ?? null, ...errorFields(outcome.reason) },
+        "warn",
+      );
+    }
+  });
   try {
-    await Promise.all(marked.map((job) => harness.abortTask(job.taskId, quiet)));
     // Not `background: true`: that would also abort routines, reminders, and reviews.
     await root.abort(quiet);
-    // A job that has not ended by the bound is counted as left running below.
-    await within(
-      STOP_WAIT_MS,
-      Promise.all(marked.map((job) => harness.waitForTask(job.taskId, quiet))),
-    );
   } catch (error) {
-    // The lock is lifted below whatever an abort did: a lock left set would refuse every later
-    // start, restart, and resume until another stop.
-    logEvent("stop.abort_failed", { cell: person, ...errorFields(error) }, "warn");
+    logEvent("stop.abort_failed", { cell: person, job: null, ...errorFields(error) }, "warn");
   }
+  // A job that has not ended by the bound is counted as left running below.
+  await within(
+    STOP_WAIT_MS,
+    Promise.allSettled(
+      marked
+        .filter((_, index) => aborts[index]?.status === "fulfilled")
+        .map((job) => harness.waitForTask(job.taskId, quiet)),
+    ),
+  );
   const left = await harness.commit(async (tx) => {
     const stop = await tx.doc(StopDoc);
     stop.active = null;
