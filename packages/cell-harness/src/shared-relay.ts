@@ -12,7 +12,7 @@ import type { Context } from "@earendil-works/chord";
 import { withoutAbortSignal } from "@earendil-works/chord/context";
 import { type Harness, ROOT_CONVERSATION_ID, type Tx } from "@earendil-works/pi-durable";
 import type { BudgetWaiter } from "./budget-gate.ts";
-import { logEvent } from "./cell-parts.ts";
+import { errorFields, logEvent } from "./cell-parts.ts";
 import {
   ENDED,
   JobBoardDoc,
@@ -432,12 +432,18 @@ async function sendNotices(parts: SharedParts, notices: readonly SharedNotice[],
       }
     }
   });
-  // A failed delivery (a closing cell) only ends this chain; the next exchange starts a new one.
-  // The notices it did not reach may be queued again by a later exchange.
+  // A failed delivery (a closing cell, or any other failure) ends this chain and is logged; the
+  // next exchange starts a new one.
+  // The notices it did not reach stay on their rows and are queued again by a later exchange.
   deferred.set(
     parts.harness,
-    next.catch(() => {
+    next.catch((error: unknown) => {
       for (const notice of fresh) waiting.delete(notice.requestId);
+      logEvent(
+        "shared.notice_failed",
+        { cell: parts.person, jobs: fresh.map((notice) => notice.job), ...errorFields(error) },
+        "warn",
+      );
     }),
   );
 }
