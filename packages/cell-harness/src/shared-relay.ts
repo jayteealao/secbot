@@ -430,6 +430,8 @@ async function sendNotices(parts: SharedParts, notices: readonly SharedNotice[],
   if (fresh.length === 0 || gate === undefined) return;
   for (const notice of fresh) waiting.add(notice.requestId);
   const before = deferred.get(parts.harness) ?? Promise.resolve();
+  // How far the chain got: the notice it was delivering when it failed, and those after it.
+  let reached = 0;
   const next = before.then(async () => {
     for (const notice of fresh) {
       try {
@@ -438,6 +440,7 @@ async function sendNotices(parts: SharedParts, notices: readonly SharedNotice[],
           context,
         );
         await deliver(parts, notice, context);
+        reached += 1;
       } finally {
         waiting.delete(notice.requestId);
       }
@@ -452,7 +455,12 @@ async function sendNotices(parts: SharedParts, notices: readonly SharedNotice[],
       for (const notice of fresh) waiting.delete(notice.requestId);
       logEvent(
         "shared.notice_failed",
-        { cell: parts.person, jobs: fresh.map((notice) => notice.job), ...errorFields(error) },
+        {
+          cell: parts.person,
+          failed_job: fresh[reached]?.job ?? null,
+          undelivered: fresh.slice(reached).map((notice) => notice.job),
+          ...errorFields(error),
+        },
         "warn",
       );
     }),

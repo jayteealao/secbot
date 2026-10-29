@@ -375,4 +375,26 @@ describe("an offer to a person whose limit is reached", () => {
     open();
     await until(async () => (await wakeNoticesOf(pair.second.cell.root)).length === 1);
   });
+
+  it("logs the notice a failed delivery chain was on, and the ones it did not reach", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pair = await openPair();
+    const gate = {
+      isOver: async () => true,
+      waitUntilUnder: () => Promise.reject(new Error("closing")),
+    };
+    const parts = { ...pair.parts("second"), gate: () => gate };
+    await proposeFrom(pair);
+    await pair.sync("owner");
+    expect(await syncShared(parts, BACKGROUND_CONTEXT)).toMatchObject({ outcome: "ok" });
+    await until(() =>
+      loggedEvents(warn.mock.calls).some((line) => line.event === "shared.notice_failed"),
+    );
+    const failed = loggedEvents(warn.mock.calls).find(
+      (line) => line.event === "shared.notice_failed",
+    );
+    expect(failed).toMatchObject({ cell: "second", error: "closing" });
+    expect(failed?.undelivered).toEqual([failed?.failed_job]);
+    warn.mockRestore();
+  });
 });
