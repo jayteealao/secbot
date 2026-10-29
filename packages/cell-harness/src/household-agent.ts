@@ -264,6 +264,16 @@ export async function openHouseholdAgent(options: HouseholdAgentOptions): Promis
     exchange: async (request) => {
       const deps = { task, budgets: options.budgets, now, waiting: () => payers.waiting() };
       const { answer, applied } = await exchange(harness, request, deps, context);
+      const kinds = new Map(request.ops.map((op) => [op.opId, op.kind]));
+      for (const ack of answer.acks) {
+        if (ack.error === undefined) continue;
+        // A refused operation changes nothing; the log is the only trace of it here.
+        logEvent(
+          "shared.op_refused",
+          { cell, person: request.person, op: kinds.get(ack.opId) ?? null, error: ack.error },
+          "warn",
+        );
+      }
       const quiet = withoutAbortSignal(context);
       for (const taskId of applied.aborts) await harness.abortTask(taskId, quiet);
       for (const n of applied.started) holds.wake(n);

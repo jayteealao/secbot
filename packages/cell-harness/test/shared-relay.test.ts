@@ -6,8 +6,8 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { describe, expect, it, vi } from "vitest";
 import { JobBoardDoc } from "../src/docs.ts";
 import { readMonth } from "../src/month-ledger.ts";
-import { syncShared } from "../src/shared-relay.ts";
-import { openTestCell, type TestCell, until } from "./fixtures.ts";
+import { sharedOpId, syncShared } from "../src/shared-relay.ts";
+import { loggedEvents, openTestCell, type TestCell, until } from "./fixtures.ts";
 import { wakeNoticesOf } from "./job-helpers.ts";
 import { answerFrom, open, openPair, proposeFrom } from "./shared-pair.ts";
 
@@ -69,6 +69,40 @@ describe("the person side's reconcile", () => {
     expect((await pair.row("owner", 1))?.shared).toMatchObject({ household: 1, outbox: [] });
     const rows = (await pair.agent.exchange({ person: "owner", ops: [] })).rows;
     expect(rows).toHaveLength(1);
+  });
+
+  it("logs an operation the household refused, on both sides, and drops it from the outbox", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const pair = await openPair();
+    const n = await proposeFrom(pair);
+    await pair.sync("owner");
+    // The requesting person cannot answer their own offer.
+    await pair.owner.cell.harness.commit(async (tx) => {
+      const link = (await tx.doc(JobBoardDoc)).jobs[String(n)]?.shared;
+      if (link === null || link === undefined || link.household === null)
+        throw new Error("no link");
+      link.outbox.push({
+        kind: "answer",
+        opId: sharedOpId("owner", pair.clock.now),
+        person: "owner",
+        household: link.household,
+        local: n,
+        join: true,
+      });
+    }, BACKGROUND_CONTEXT);
+    await pair.sync("owner");
+    const refused = loggedEvents(warn.mock.calls).filter(
+      (event) => event.event === "shared.op_refused",
+    );
+    expect(refused).toHaveLength(2);
+    expect(refused).toContainEqual(
+      expect.objectContaining({ cell: "owner", job: n, op: "answer", level: "warn" }),
+    );
+    expect(refused).toContainEqual(
+      expect.objectContaining({ person: "owner", op: "answer", level: "warn" }),
+    );
+    expect((await pair.row("owner", n))?.shared?.outbox).toEqual([]);
+    warn.mockRestore();
   });
 
   it("ends the requesting row failed with the decline text, and the offer row too", async () => {
