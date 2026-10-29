@@ -127,9 +127,12 @@ function householdToolCheck(allowed: ReadonlySet<string>): Extension {
   });
 }
 
-/** The test cell's slow fixture tool alone, for household jobs (no failing lookup there). */
-function slowFixtureOnly(slowMs: number): Extension {
-  const tools = (createFixtureToolsExtension({ slowMs }).tools ?? []).filter(
+/**
+ * The test cell's slow fixture tool alone, for household jobs (no failing lookup there). The tool
+ * reads the wait from `fixtureTools` at each call.
+ */
+function slowFixtureOnly(fixtureTools: { readonly slowMs: number }): Extension {
+  const tools = (createFixtureToolsExtension(fixtureTools).tools ?? []).filter(
     (tool) => tool.name === "fixture_slow_lookup",
   );
   return defineExtension({ name: "secbot-household-fixture-tools", tools });
@@ -160,8 +163,7 @@ export async function openHouseholdAgent(options: HouseholdAgentOptions): Promis
   const holds = new JobHolds();
   const telemetry = createTelemetryExtension(cell, monitor);
   const budget = createBudgetExtension(() => payers);
-  const fixture =
-    options.fixtureTools === undefined ? [] : [slowFixtureOnly(options.fixtureTools.slowMs)];
+  const fixture = options.fixtureTools === undefined ? [] : [slowFixtureOnly(options.fixtureTools)];
   const fixtureNames = fixture.flatMap((extension) => (extension.tools ?? []).map((t) => t.name));
   const jobList: readonly Extension[] = [
     householdToolCheck(new Set([...HOUSEHOLD_JOB_TOOLS, ...fixtureNames])),

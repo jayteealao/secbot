@@ -100,6 +100,10 @@ export async function guardSetup(
     readonly sockets?: boolean;
     /** Fixed web pages a job can read with `read_fixture_page`. */
     readonly fixturePages?: OpenCellOptions["fixturePages"];
+    /** The test cell's lookup tools in the person cells, with this wait (read at each call). */
+    readonly fixtureTools?: OpenCellOptions["fixtureTools"];
+    /** The test-cell switch in the household cell, with this slow lookup wait. */
+    readonly householdFixtures?: { readonly slowMs: number };
   } = {},
 ): Promise<GuardSetup> {
   const gateway = createFauxGateway(
@@ -110,11 +114,14 @@ export async function guardSetup(
     options.household === true
       ? new HouseholdCell(
           { storage: new FakeCelldStorage() },
-          {},
+          options.householdFixtures === undefined ? {} : { SECBOT_TEST_FIXTURES: "1" },
           options.persons === undefined
             ? {}
             : {
                 persons: options.persons,
+                ...(options.householdFixtures === undefined
+                  ? {}
+                  : { fixtureTools: options.householdFixtures }),
                 models: gateway.models,
                 ...(options.now === undefined ? {} : { now: options.now }),
                 ...(options.householdFetch === undefined ? {} : { fetch: options.householdFetch }),
@@ -196,6 +203,7 @@ export async function guardSetup(
             ...(extras.fixturePages === undefined ? {} : { fixturePages: extras.fixturePages }),
             ...(extras.fixtureTools === undefined ? {} : { fixtureTools: extras.fixtureTools }),
             ...(options.fixturePages === undefined ? {} : { fixturePages: options.fixturePages }),
+            ...(options.fixtureTools === undefined ? {} : { fixtureTools: options.fixtureTools }),
             ...(options.persons === undefined ? {} : { persons: options.persons }),
             // A passing decision model unless a test gives its own: the suites that are not about
             // the model layers keep their request counts.

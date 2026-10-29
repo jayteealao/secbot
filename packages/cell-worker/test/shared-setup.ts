@@ -174,6 +174,14 @@ export async function sharedSetup(options: {
    * waits a minute; a test that raises a limit waits less).
    */
   readonly payerPollMs?: number;
+  /**
+   * More of the guard setup's options: the guard, the alert settings and fetch, the fixture pages
+   * and the lookup tools of the test cell.
+   */
+  readonly more?: Pick<
+    NonNullable<Parameters<typeof guardSetup>[1]>,
+    "guard" | "cellEnv" | "fetch" | "fixturePages" | "fixtureTools" | "householdFixtures"
+  >;
 }): Promise<SharedSetup> {
   const householdFetches: string[] = [];
   const householdFetch: typeof fetch = async (input) => {
@@ -181,6 +189,7 @@ export async function sharedSetup(options: {
     return new Response(null, { status: 204 });
   };
   const setup = await guardSetup(options.fleets === 2 ? "second,household" : undefined, {
+    ...options.more,
     household: true,
     persons: PERSONS,
     respond: options.wrap === undefined ? sharedResponder : options.wrap(sharedResponder),

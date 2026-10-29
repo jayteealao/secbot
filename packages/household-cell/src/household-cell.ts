@@ -86,6 +86,11 @@ export interface HouseholdCellOptions {
   readonly models?: Models;
   /** Tests: the timer a shared job waiting on both people's limits checks them again with. */
   readonly setTimer?: SetTimer;
+  /**
+   * Tests: the slow lookup tool's wait when the test-cell switch is on, in place of the release's
+   * (read at each call, so a test can change it between jobs).
+   */
+  readonly fixtureTools?: { readonly slowMs: number };
 }
 
 interface Opened {
@@ -171,7 +176,7 @@ export class HouseholdCell {
       household: { read: (document) => log.read(document), apply: (change) => log.apply(change) },
       persons: this.options.persons ?? [],
       ...(this.env.SECBOT_TEST_FIXTURES === "1"
-        ? { fixtureTools: { slowMs: FIXTURE_SLOW_MS } }
+        ? { fixtureTools: this.options.fixtureTools ?? { slowMs: FIXTURE_SLOW_MS } }
         : {}),
     });
     try {
