@@ -165,6 +165,13 @@ export {
   pingRoutineHeartbeat,
 } from "./heartbeat.ts";
 export {
+  HOUSEHOLD_JOB_TOOLS,
+  HOUSEHOLD_TOOL_REFUSAL,
+  type HouseholdAgent,
+  type HouseholdAgentOptions,
+  openHouseholdAgent,
+} from "./household-agent.ts";
+export {
   type BudgetAlertSent,
   type BudgetAlertStatus,
   type BudgetBoard,
@@ -186,13 +193,6 @@ export {
   type SpendReport,
 } from "./household-contract.ts";
 export {
-  HOUSEHOLD_JOB_TOOLS,
-  HOUSEHOLD_TOOL_REFUSAL,
-  type HouseholdAgent,
-  type HouseholdAgentOptions,
-  openHouseholdAgent,
-} from "./household-agent.ts";
-export {
   costFromReport,
   type HouseholdCostRow,
   type HouseholdCostView,
@@ -210,6 +210,7 @@ export {
 export {
   type BoardState,
   blockReason,
+  createSharedRow,
   ENDED,
   liveRows,
   markUrgent,

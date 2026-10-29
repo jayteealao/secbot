@@ -670,6 +670,10 @@ export class PersonCell {
       if (request.method === "POST" && jobPriorityRoute !== null) {
         return this.jobPriorityRoute(request, cell, Number(jobPriorityRoute[1]));
       }
+      const sharedRoute = /^\/jobs\/([1-9][0-9]{0,8})\/(join|decline)$/.exec(route);
+      if (request.method === "POST" && sharedRoute !== null) {
+        return this.sharedAnswerRoute(cell, Number(sharedRoute[1]), sharedRoute[2] === "join");
+      }
       const jobAnswerRoute = /^\/jobs\/([1-9][0-9]{0,8})\/answer$/.exec(route);
       if (request.method === "POST" && jobAnswerRoute !== null) {
         return this.jobAnswerRoute(request, cell, Number(jobAnswerRoute[1]));
@@ -830,6 +834,22 @@ export class PersonCell {
     this.keepBusy(cell);
     this.rearmSoon(cell.person);
     return json({ job: answered.job, title: answered.title });
+  }
+
+  /**
+   * The person joins or declines a shared job the other person proposed. The answer goes to the
+   * household, never to the lead; only a join starts the job there.
+   */
+  private async sharedAnswerRoute(cell: CellHarness, n: number, join: boolean): Promise<Response> {
+    const answered = await cell.answerShared(n, join);
+    if (!answered.ok) return json({ error: answered.message }, 404);
+    this.rearmSoon(cell.person);
+    return json({
+      job: answered.job,
+      title: answered.title,
+      from: answered.from,
+      payer: answered.payer,
+    });
   }
 
   /**
@@ -1031,6 +1051,7 @@ export class PersonCell {
       } = await cell.missed(device);
       // Job questions put to the person, read before the missed page goes out.
       const questions = await cell.openQuestions();
+      const offers = await cell.openOffers();
       const shown = new Set(waiting.map((call) => call.number));
       for (const call of waiting) deliver({ type: "held", call, count: waiting.length });
       const noticed = new Set(notices.map((notice) => notice.seq));
@@ -1049,6 +1070,11 @@ export class PersonCell {
       const asked = new Set(questions.map((question) => question.job));
       for (const question of questions) {
         deliver({ type: "question", job: question.job, title: question.title });
+      }
+      // Then each shared-job offer the lead gave the person and they have not answered.
+      const offered = new Set(offers.map((offer) => offer.job));
+      for (const { job, title, from, payer } of offers) {
+        deliver({ type: "shared", job, title, from, payer });
       }
       // Held frames follow, minus what the missed page carried. While older messages are still left
       // for `missed`, a held answer stays there too: sending it would move the cursor past them.
@@ -1072,6 +1098,8 @@ export class PersonCell {
           // Already sent above with the unseen notices.
         } else if (frame.type === "question" && asked.has(frame.job)) {
           // Already sent above with the open questions.
+        } else if (frame.type === "shared" && offered.has(frame.job)) {
+          // Already sent above with the open offers.
         } else {
           deliver(frame);
         }

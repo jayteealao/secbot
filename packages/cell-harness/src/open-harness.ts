@@ -148,7 +148,12 @@ import {
 import type { Rule, RuleLevel } from "./rules.ts";
 import { createSecretsExtension, redactionLoader, type SecretsClient } from "./secret-tools.ts";
 import { createLeadExtension, type TimeEnv, timeZoneOf } from "./sections.ts";
-import { type Frame, openSessionStream, type SessionStream } from "./session-stream.ts";
+import {
+  type Frame,
+  openSessionStream,
+  personOffers,
+  type SessionStream,
+} from "./session-stream.ts";
 import { cellSettings } from "./settings.ts";
 import {
   kickShared,
@@ -501,6 +506,67 @@ export class CellHarness implements CellParts {
       });
     }
     return answer;
+  }
+
+  /**
+   * The person joins or declines a shared job the other person proposed: an offer on this board
+   * that the lead gave or the household sent. One commit queues the answer for the household, then
+   * one exchange (bounded) delivers it; a household that does not answer gets it at the next one.
+   */
+  async answerShared(
+    n: number,
+    join: boolean,
+    context: Context = BACKGROUND_CONTEXT,
+  ): Promise<
+    | {
+        readonly ok: true;
+        readonly job: number;
+        readonly title: string;
+        readonly from: string;
+        readonly payer: "half" | "you" | "them";
+      }
+    | { readonly ok: false; readonly message: string }
+  > {
+    const at = this.now();
+    const person = this.person;
+    const done = await this.harness.commit(async (tx) => {
+      const row = (await tx.doc(JobBoardDoc)).jobs[String(n)];
+      const link = row?.shared;
+      if (
+        row === undefined ||
+        link === null ||
+        link === undefined ||
+        link.role !== "other" ||
+        link.household === null ||
+        (link.consent !== "offered" && link.consent !== "shown")
+      ) {
+        return null;
+      }
+      link.consent = join ? "joined" : "declined";
+      link.outbox.push({
+        kind: "answer",
+        opId: sharedOpId(person, at),
+        person,
+        household: link.household,
+        local: n,
+        join,
+      });
+      return { title: row.title, from: link.with, payer: link.payer, household: link.household };
+    }, context);
+    if (done === null) return { ok: false, message: `no shared job #${n} waits for you` };
+    logEvent("shared.answered", {
+      cell: person,
+      job: n,
+      household: done.household,
+      answer: join ? "join" : "decline",
+    });
+    await this.syncShared(context).catch(() => undefined);
+    return { ok: true, job: n, title: done.title, from: done.from, payer: done.payer };
+  }
+
+  /** The shared-job offers the lead gave the person that wait for their answer, by number. */
+  async openOffers(context: Context = BACKGROUND_CONTEXT) {
+    return personOffers((await this.board(context)).jobs).sort((a, b) => a.job - b.job);
   }
 
   /** The questions put to the person that wait for their answer, oldest first. */

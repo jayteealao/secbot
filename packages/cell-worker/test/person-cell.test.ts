@@ -2,7 +2,13 @@
 // the version and its roles, the model, tier-cap, and template routes, chat input (which steers a
 // busy lead) and frames over a socket, missed messages, and the live job tasks.
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
-import { type CellHarness, JobBoardDoc, openCellHarness, StopDoc } from "@secbot/cell-harness";
+import {
+  type CellHarness,
+  createSharedRow,
+  JobBoardDoc,
+  openCellHarness,
+  StopDoc,
+} from "@secbot/cell-harness";
 import {
   ALTERNATE_MODEL,
   createFauxGateway,
@@ -366,6 +372,77 @@ describe("PersonCell", () => {
       const again = await answer(1, { text: "home address" });
       expect(again.status).toBe(409);
       expect(await again.json()).toEqual({ error: "job 1 has no question waiting" });
+    });
+
+    it("sends each open shared offer after the questions, and joins or declines it through the routes", async () => {
+      const { s, harness, server } = await opening();
+      const offer = (title: string, payer: "half" | "them") =>
+        harness.harness.commit(async (tx) => {
+          const row = await createSharedRow(tx, {
+            title,
+            brief: title,
+            priority: "routine",
+            deadline: null,
+            tier: "cheap",
+            effort: { requested: "low", applied: "low" },
+            owner: "owner",
+            createdAt: 1,
+            shared: {
+              household: 7,
+              role: "other",
+              with: "second",
+              consent: "shown",
+              payer,
+              estimateUsd: 0.25,
+              outbox: [],
+              charges: [],
+              resultAt: null,
+              waitingBudget: false,
+              syncedAt: 1,
+            },
+          });
+          return row.number;
+        }, BACKGROUND_CONTEXT);
+      const first = await offer("plan the May trip", "half");
+      const second = await offer("paint the hall", "them");
+      await open(s);
+      const shared = server.sent.filter((frame) => frame.type === "shared");
+      expect(shared).toEqual([
+        { type: "shared", job: first, title: "plan the May trip", from: "second", payer: "half" },
+        { type: "shared", job: second, title: "paint the hall", from: "second", payer: "all" },
+      ]);
+      const kinds = server.sent.map((frame) => String(frame.type));
+      expect(kinds.indexOf("shared")).toBeGreaterThan(kinds.indexOf("connected"));
+
+      const join = (n: number) => call(s, "POST", `/v1/cells/owner/jobs/${n}/join`);
+      const decline = (n: number) => call(s, "POST", `/v1/cells/owner/jobs/${n}/decline`);
+      const joined = await join(first);
+      expect(joined.status).toBe(200);
+      expect(await joined.json()).toEqual({
+        job: first,
+        title: "plan the May trip",
+        from: "second",
+        payer: "half",
+      });
+      const row = (await harness.board()).jobs[String(first)];
+      expect(row?.shared?.consent).toBe("joined");
+      expect(row?.shared?.outbox).toEqual([
+        expect.objectContaining({ kind: "answer", household: 7, local: first, join: true }),
+      ]);
+      const again = await join(first);
+      expect(again.status).toBe(404);
+      expect(await again.json()).toEqual({ error: `no shared job #${first} waits for you` });
+      const declined = await decline(second);
+      expect(await declined.json()).toEqual({
+        job: second,
+        title: "paint the hall",
+        from: "second",
+        payer: "them",
+      });
+      expect((await harness.board()).jobs[String(second)]?.shared?.outbox).toEqual([
+        expect.objectContaining({ kind: "answer", join: false }),
+      ]);
+      expect((await decline(99)).status).toBe(404);
     });
 
     it("sends an answer once when both the missed page and the live watch carry it", async () => {
