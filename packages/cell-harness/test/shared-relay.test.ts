@@ -44,6 +44,7 @@ export interface SharedPair {
   dropNext(who: "owner" | "second"): void;
   readonly requests: SharedSyncRequest[];
   clock: { now: number };
+  setDown(value: boolean): void;
 }
 
 export async function openPair(
@@ -71,9 +72,11 @@ export async function openPair(
   open.agent = agent;
   const requests: SharedSyncRequest[] = [];
   const drop = { owner: false, second: false };
+  const down = { value: false };
   const clientOf = (who: "owner" | "second"): HouseholdClient => ({
     ...createHouseholdStub(),
     sharedSync: async (request) => {
+      if (down.value) throw new Error("household unreachable");
       requests.push(request);
       const answer = await agent.exchange(request);
       if (drop[who]) {
@@ -115,6 +118,9 @@ export async function openPair(
     },
     requests,
     clock,
+    setDown: (value) => {
+      down.value = value;
+    },
   };
 }
 
@@ -363,5 +369,28 @@ describe("charges on the person's month", () => {
     expect(owner.person.byRole.household).toBeCloseTo(0.05, 6);
     expect(second.person.byRole.household).toBeCloseTo(0.05, 6);
     expect((await pair.row("owner", 1))?.shared?.charges).toEqual(["shared:1:1:owner"]);
+  });
+});
+
+describe("the sync routine and its triggers", () => {
+  it("stores the routine's wake time, delivers an outbox op without the routine, and reads the board with the household down", async () => {
+    const pair = await openPair();
+    const wakes = await pair.owner.cell.wakes();
+    expect(JSON.stringify(wakes)).toContain("shared-sync");
+    const n = await proposeFrom(pair);
+    pair.owner.cell.kickShared();
+    await until(async () => (await pair.row("owner", n))?.shared?.outbox.length === 0);
+    expect((await pair.row("owner", n))?.shared?.household).toBe(1);
+    pair.setDown(true);
+    const view = await pair.owner.cell.jobsView();
+    expect(view.rows.map((row) => [row.number, row.status])).toEqual([[n, "waiting"]]);
+  });
+
+  it("has no routine and no exchange in a cell with no household", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const alone = await openTestCell();
+    open.cells.push(alone);
+    expect(JSON.stringify(await alone.cell.wakes())).not.toContain("shared-sync");
+    expect(await alone.cell.syncShared()).toEqual({ outcome: "skipped" });
   });
 });

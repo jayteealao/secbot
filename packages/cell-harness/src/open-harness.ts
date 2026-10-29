@@ -123,7 +123,11 @@ import { listRoleModels, type RoleModel, setRoleModel, setTierCap } from "./mode
 import { ledgerConversations } from "./month-ledger.ts";
 import { createFixtureReaderExtension, outsideReviewOf } from "./outside-tools.ts";
 import { openReceipts, type ReceiptTask } from "./receipts.ts";
-import type { DecisionAdapter, OutsideKind } from "./release-defaults.ts";
+import {
+  type DecisionAdapter,
+  type OutsideKind,
+  SHARED_SYNC_EVERY_MS,
+} from "./release-defaults.ts";
 import {
   createReminderExtension,
   createReminderRoutine,
@@ -131,7 +135,7 @@ import {
 } from "./reminder.ts";
 import { createReviewer, type Reviewer } from "./reviewer.ts";
 import { addTemplate, ensureRoster } from "./roster.ts";
-import { ensureRoutines, type Routine } from "./routines.ts";
+import { defineRoutine, ensureRoutines, type Routine } from "./routines.ts";
 import {
   addRule,
   listRules,
@@ -146,6 +150,7 @@ import { createSecretsExtension, redactionLoader, type SecretsClient } from "./s
 import { createLeadExtension, type TimeEnv, timeZoneOf } from "./sections.ts";
 import { type Frame, openSessionStream, type SessionStream } from "./session-stream.ts";
 import { cellSettings } from "./settings.ts";
+import { kickShared, type SharedParts, type SyncOutcome, syncShared } from "./shared-relay.ts";
 import { type StopAnswer, stopJobs } from "./stop.ts";
 import { agentNames, createTelemetryExtension } from "./telemetry.ts";
 import { templatesOf } from "./templates.ts";
@@ -270,6 +275,21 @@ export class CellHarness implements CellParts {
   /** Where paused and questioning jobs wait (job-holds.ts); the gate and the lead share it. */
   holds: JobHolds = new JobHolds();
 
+  /** The shared-job exchange with the household; undefined in a cell with no household. */
+  shared: SharedParts | undefined;
+
+  /** One shared-job exchange with the household now (the routine runs one every 2 minutes). */
+  syncShared(context: Context = BACKGROUND_CONTEXT): Promise<SyncOutcome> {
+    return this.shared === undefined
+      ? Promise.resolve({ outcome: "skipped" })
+      : syncShared(this.shared, context);
+  }
+
+  /** Starts an exchange in the background, after a shared action; never awaited by a tool. */
+  kickShared(context: Context = BACKGROUND_CONTEXT): void {
+    if (this.shared !== undefined) kickShared(this.shared, context);
+  }
+
   /**
    * The person answers a job's question that was put to them. A job waiting on it goes on; the
    * answer to an escalation question (a job that used its raise and its restart) goes to the lead,
@@ -365,6 +385,9 @@ export class CellHarness implements CellParts {
    * warning when more jobs run than the cell was measured at.
    */
   async jobsView(context: Context = BACKGROUND_CONTEXT): Promise<BoardView> {
+    // Shared jobs first catch up with the household (bounded); a failed exchange shows the last
+    // mirrored state.
+    await this.syncShared(context).catch(() => undefined);
     const board = await this.board(context);
     const waits = (await this.harness.snapshot(BudgetWaitsDoc, context))?.tasks ?? {};
     const { mode } = await readGuardMode(this.harness, context);
@@ -911,7 +934,29 @@ export async function openCellHarness(
   );
   loadRedaction().catch(() => {});
   const reminder = createReminderExtension(reminders, { ...hooks, now, timeZone });
-  const recurring = [{ routine: heartbeat }, ...(options.routines ?? [])];
+  // Every person cell with a household exchanges its shared jobs every 2 minutes (no model call).
+  let shared: SharedParts | undefined;
+  const SHARED_SYNC_ROUTINE = "shared-sync";
+  const sharedRoutine =
+    options.household === undefined
+      ? []
+      : [
+          {
+            routine: defineRoutine(
+              {
+                name: SHARED_SYNC_ROUTINE,
+                every: SHARED_SYNC_EVERY_MS,
+                spends: false,
+                run: async (fire) => {
+                  if (shared === undefined) return { outcome: "skipped" };
+                  return { outcome: (await syncShared(shared, fire.context)).outcome };
+                },
+              },
+              hooks,
+            ),
+          },
+        ];
+  const recurring = [{ routine: heartbeat }, ...sharedRoutine, ...(options.routines ?? [])];
   const routines = defineExtension({
     name: "secbot-routines",
     tasks: recurring.map(({ routine }) => routine.task),
@@ -1082,6 +1127,9 @@ export async function openCellHarness(
       reports,
       tasks: { job: jobs.JobTask, receipt: jobs.ReceiptTask },
       holds,
+      onShared: (parts) => {
+        shared = parts;
+      },
     });
   } catch (error) {
     // A failure after the open (roster, routines, inspect) must not leave this harness running on
@@ -1116,6 +1164,8 @@ async function finishOpen(
     readonly database: CelldSqliteDatabase;
     readonly reminders: Routine<ReminderPayload>;
     readonly recurring: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
+    /** The shared-job exchange's parts, once the cell is built (the routine reads them). */
+    readonly onShared: (parts: SharedParts) => void;
     readonly timeZone: string;
     readonly alerts: ReturnType<typeof createAlerts>;
     readonly gate: BudgetGate;
@@ -1168,6 +1218,16 @@ async function finishOpen(
   );
   cell.tasks = parts.tasks;
   cell.holds = parts.holds;
+  if (options.household !== undefined) {
+    cell.shared = {
+      harness,
+      person,
+      household: () => options.household,
+      now,
+      gate: () => parts.gate,
+    };
+    parts.onShared(cell.shared);
+  }
 
   // What the last run left: live work, and routines whose time passed while the cell was down.
   // Read before this open creates anything and before resume(), so nothing has run yet.
