@@ -12,7 +12,9 @@ const DISPATCH_DIRS = [join(packages, "cli", "src"), join(packages, "cell-worker
 /**
  * Not dispatch code: the storage conformance run on the test cell compares assertion errors and
  * carries no messages; the test cell's durability lab holds a scripted model that stands in for
- * the lead's decision, like the tests' responders, and is never deployed to a person cell. The
+ * the lead's decision, like the tests' responders, and is never deployed to a person cell; the test
+ * cell's capacity bench is the same (its scripted lead starts research jobs to measure memory and
+ * latency, and it runs only in the test-cell bundle). The
  * held-call answer parser (the CLI's `held.ts`) sends an exact `/allow N`, `/always N`, or
  * `/deny N` line to the cell's approval route, never to any agent, and leaves every other line to
  * go to the lead unchanged; `held-chat.test.ts` proves both halves. The job-answer parser (the
@@ -31,6 +33,7 @@ const DISPATCH_DIRS = [join(packages, "cli", "src"), join(packages, "cell-worker
  */
 const NOT_DISPATCH = new Set([
   "budget-names.ts",
+  "capacity-bench.ts",
   "cell-assertions.ts",
   "cell-names.ts",
   "conformance-cell.ts",
