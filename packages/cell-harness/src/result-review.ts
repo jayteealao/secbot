@@ -254,7 +254,7 @@ export function reviewHold(row: Pick<JobRow, "number" | "result" | "review">): s
     return `job ${row.number}'s result is under review; you get a notice when it is done.`;
   }
   if (row.review.status === "rejected") {
-    return `job ${row.number} review rejected: ${row.review.reason}. Choose set_job or restart_job.`;
+    return `job ${row.number} review rejected: ${row.review.reason}. Run it again with restart_job and a failure note.`;
   }
   return null;
 }

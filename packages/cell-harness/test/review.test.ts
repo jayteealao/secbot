@@ -136,8 +136,13 @@ describe("review runs only for risky results (AC-19, AC-20)", () => {
     // No text of the result reached the lead.
     expect((await toolResultsOf(t.cell.root)).some((each) => each.includes("June 3"))).toBe(false);
     expect(await leadCalls(t, "job_result", { job: 1 })).toBe(
-      "job 1 review rejected: the brief asks for other dates; the result quotes June. Choose set_job or restart_job.",
+      "job 1 review rejected: the brief asks for other dates; the result quotes June. Run it again with restart_job and a failure note.",
     );
+    // A raise on a rejected job would change nothing and spend the raise: it is refused.
+    expect(await leadCalls(t, "set_job", { job: 1, tier: "frontier" })).toBe(
+      "job 1's review rejected its result; restart_job runs it again with a failure note.",
+    );
+    expect((await job(t))?.attempts.raises).toBe(0);
   });
 
   it("passes a good risky result, and only then job_result gives the text", async () => {

@@ -112,8 +112,9 @@ a reason. The result is shown to it inside an untrusted block it is told not to 
 The reviewer runs on a model the job never ran on: the reviewer role's model, unless the job used
 it; then the frontier tier's, the mid tier's, or the cheap tier's, the first the job did not use.
 A model that agrees with itself is not a second opinion. A rejected result is never shown to the
-lead: `job_result` gives the reviewer's reason, and the job goes to the same escalation rules. A
-routine result is not reviewed.
+lead: `job_result` gives the reviewer's reason, and the lead can run the job again with its one
+restart and a failure note. A raise is refused on a rejected job, because its run has ended and a
+new tier would change nothing. A routine result is not reviewed.
 
 ## Questions and requests
 

@@ -539,6 +539,13 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         if (ENDED.has(found.status)) {
           return { error: `job ${args.job} is ${found.status}; only a live job changes.` };
         }
+        // A rejected result's run has ended: a new tier or effort would change nothing and still
+        // spend the job's one raise.
+        if (found.status === "rejected") {
+          return {
+            error: `job ${args.job}'s review rejected its result; restart_job runs it again with a failure note.`,
+          };
+        }
         const from = { tier: found.tier, applied: found.effort.applied };
         const tier = args.tier ?? found.tier;
         const requested = args.effort ?? found.effort.requested;
