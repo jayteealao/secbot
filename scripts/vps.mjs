@@ -907,30 +907,16 @@ export const dayOf = (at) => new Date(at).toISOString().slice(0, 10);
 async function measureCapacity({ env, levels, slow, out }) {
   const results = [];
   for (const jobs of levels) {
-    const level = await withLease("capacity", async () => {
-      const idle = [];
-      for (let i = 0; i < 10; i++) {
-        idle.push(parseJson(await runRemote(["state", "--env", "all"], { echo: false }), "state"));
-        await pause(1_000);
-      }
-      const before = await lab(env, "capacity-state");
-      await lab(env, "capacity", ["--jobs", String(jobs), "--slow", String(slow)]);
-      const samples = [];
-      let state = before;
-      const end = Date.now() + (slow + 300) * 1000;
-      while (Date.now() < end) {
-        samples.push(
-          parseJson(await runRemote(["state", "--env", "all"], { echo: false }), "state"),
-        );
-        if (samples.length % 5 === 0) {
-          state = await lab(env, "capacity-state").catch(() => state);
-          if (state.done === true && state.level > (before.level ?? 0)) break;
-        }
-        await pause(1_000);
-      }
-      state = await lab(env, "capacity-state").catch(() => state);
-      return levelOf(samples, state, { idle, jobs, processStartedAt: before.processStartedAt });
-    });
+    let level;
+    try {
+      level = await measureLevel(env, jobs, slow);
+    } catch (error) {
+      // The levels already measured are paid runs: they are written, and this one fails.
+      const message = error instanceof Error ? error.message : String(error);
+      results.push({ jobs, ok: false, error: message });
+      console.log(`level ${jobs}: not measured: ${message}`.slice(0, LINE_WIDTH));
+      break;
+    }
     results.push(level);
     for (const line of capacityLines({ measured: null, on: "", levels: [level] }).slice(0, 2)) {
       console.log(line);
@@ -945,9 +931,35 @@ async function measureCapacity({ env, levels, slow, out }) {
   };
   await mkdir(out, { recursive: true });
   await writeFile(join(out, "capacity.json"), `${JSON.stringify(result, null, 2)}\n`);
-  console.log(capacityLines(result).at(-1));
+  console.log(capacityLines({ ...result, levels: [] }).at(-1));
   if (result.measured === null) throw new Error("capacity: no level passed; no measured number");
   return result;
+}
+
+/** One capacity level under the lease: idle samples, the level's jobs, then celld every second. */
+function measureLevel(env, jobs, slow) {
+  return withLease("capacity", async () => {
+    const idle = [];
+    for (let i = 0; i < 10; i++) {
+      idle.push(parseJson(await runRemote(["state", "--env", "all"], { echo: false }), "state"));
+      await pause(1_000);
+    }
+    const before = await lab(env, "capacity-state");
+    await lab(env, "capacity", ["--jobs", String(jobs), "--slow", String(slow)]);
+    const samples = [];
+    let state = before;
+    const end = Date.now() + (slow + 300) * 1000;
+    while (Date.now() < end) {
+      samples.push(parseJson(await runRemote(["state", "--env", "all"], { echo: false }), "state"));
+      if (samples.length % 5 === 0) {
+        state = await lab(env, "capacity-state").catch(() => state);
+        if (state.done === true && state.level > (before.level ?? 0)) break;
+      }
+      await pause(1_000);
+    }
+    state = await lab(env, "capacity-state").catch(() => state);
+    return levelOf(samples, state, { idle, jobs, processStartedAt: before.processStartedAt });
+  });
 }
 
 export async function measureHeap({
