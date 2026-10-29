@@ -666,6 +666,30 @@ describe("the stop, restart, and reorder signals", () => {
     hold.release("research");
     await until(async () => (await job(t, 1))?.status === "done");
   });
+
+  it("logs a stop's failed wait apart from a slow job", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const hold = createHold();
+    test = await openTestCell({ gateway: createFauxGateway(hold.wrap(jobResponder)) });
+    const t = test;
+    hold.hold("research");
+    await start(t, 1);
+    await until(() => hold.waiting("research") === 1);
+    vi.spyOn(t.cell.harness, "abortTask").mockResolvedValue(undefined as never);
+    vi.spyOn(t.cell.harness, "waitForTask").mockRejectedValue(new Error("wait broke"));
+    expect(await stopJobs(stopParts(t), "owner", BACKGROUND_CONTEXT)).toMatchObject({
+      jobs: 0,
+      running: 1,
+    });
+    expect(
+      loggedEvents(warn.mock.calls).filter((line) => line.event === "stop.wait_failed"),
+    ).toMatchObject([{ event: "stop.wait_failed", level: "warn", cell: "owner", job: 1 }]);
+    vi.mocked(t.cell.harness.abortTask).mockRestore();
+    vi.mocked(t.cell.harness.waitForTask).mockRestore();
+    hold.release("research");
+    await until(async () => (await job(t, 1))?.status === "done");
+  });
 });
 
 describe("the shared-job signals", () => {

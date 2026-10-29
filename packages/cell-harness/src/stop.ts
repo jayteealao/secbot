@@ -136,7 +136,16 @@ export async function stopJobs(
     Promise.allSettled(
       marked
         .filter((_, index) => aborts[index]?.status === "fulfilled")
-        .map((job) => harness.waitForTask(job.taskId, quiet)),
+        .map((job) =>
+          harness.waitForTask(job.taskId, quiet).catch((error: unknown) => {
+            // A failed wait is told apart from a slow job; the job is still counted as left running.
+            logEvent(
+              "stop.wait_failed",
+              { cell: person, job: job.number, ...errorFields(error) },
+              "warn",
+            );
+          }),
+        ),
     ),
   );
   const left = await harness.commit(async (tx) => {
