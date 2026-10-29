@@ -125,7 +125,12 @@ export function sharedResponder(request: FauxRequest) {
     const proposed = /^job \d+ waits for (\S+) to agree to share the cost;/.exec(said);
     if (proposed !== null) return fauxAssistantMessage([fauxText(askedText(proposed[1] ?? ""))]);
     const pulled = /^job \d+ "[^\n]*" \([a-z]+\), brief: [^\n]*\nResult:\n([\s\S]*)$/.exec(said);
-    if (pulled !== null) return fauxAssistantMessage([fauxText(relayText(pulled[1] ?? ""))]);
+    if (pulled !== null) {
+      // A shared result comes as data inside a delimiter; the lead relays only what is inside.
+      const body = pulled[1] ?? "";
+      const inside = /<untrusted-result>\n([\s\S]*)\n<\/untrusted-result>$/.exec(body);
+      return fauxAssistantMessage([fauxText(relayText(inside?.[1] ?? body))]);
+    }
   }
   return scripted(request);
 }
