@@ -17,12 +17,12 @@ import {
 } from "@earendil-works/pi-durable";
 import { logEvent } from "./cell-parts.ts";
 import { JobBoardDoc, type JobQuestion, TemplatesDoc } from "./docs.ts";
-import { askQuestion, createJobRow } from "./job-board.ts";
-import { DEFAULT_JOB_EFFORT } from "./release-defaults.ts";
-import { templateNamed, templatesOf } from "./templates.ts";
-import type { JobHolds } from "./job-holds.ts";
 import { type HistoryHit, searchHistoryWindow } from "./history-search.ts";
+import { askQuestion, createJobRow } from "./job-board.ts";
+import type { JobHolds } from "./job-holds.ts";
+import { DEFAULT_JOB_EFFORT } from "./release-defaults.ts";
 import { jobOf } from "./telemetry.ts";
+import { templateNamed, templatesOf } from "./templates.ts";
 
 export interface JobToolsDeps {
   readonly person: string;
@@ -31,6 +31,11 @@ export interface JobToolsDeps {
   readonly now: () => number;
   /** Every other tool a job conversation has: each call is recorded on the job's row. */
   readonly wrapped: readonly string[];
+  /**
+   * The household agent's jobs: no lead to ask, so no `ask_lead` and no `request_job`; searching
+   * the job's own earlier attempts and the tools-used marks stay.
+   */
+  readonly household?: boolean;
 }
 
 /**
@@ -259,7 +264,7 @@ export function createJobToolsExtension(deps: JobToolsDeps): Extension {
     },
   });
 
-  const tools = [askLead, requestJob, searchOldJob];
+  const tools = deps.household === true ? [searchOldJob] : [askLead, requestJob, searchOldJob];
   return defineExtension({
     name: "secbot-job-tools",
     tools,
