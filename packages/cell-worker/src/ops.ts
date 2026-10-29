@@ -225,6 +225,19 @@ async function stopOne(deps: OpsDeps, cell: string): Promise<CellStop | null> {
 const ending = (stopped: StopAnswer) =>
   stopped.running !== undefined && stopped.running > 0 ? { running: stopped.running } : {};
 
+/**
+ * The log fields of the owner's stop for the cells that left aborted jobs still ending, and how
+ * many jobs those are; none when every stopped job ended.
+ */
+export function stillEnding(cells: readonly CellStop[]): Record<string, unknown> {
+  const ending = cells.filter((each) => each.running !== undefined && each.running > 0);
+  if (ending.length === 0) return {};
+  return {
+    still_ending: ending.map((each) => each.cell),
+    still_ending_jobs: ending.reduce((all, each) => all + (each.running ?? 0), 0),
+  };
+}
+
 /** `work`, or a rejection once `ms` have passed. */
 async function bounded<T>(ms: number, work: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -290,7 +303,7 @@ async function stopRoute(deps: OpsDeps): Promise<Response> {
   const [here, there] = await Promise.all([stopServed(deps), stopElsewhere(deps)]);
   const cells = [...here.cells, ...there.cells];
   const missing = [...here.missing, ...there.missing];
-  logEvent("ops.stop", { cells: cells.map((each) => each.cell), missing });
+  logEvent("ops.stop", { cells: cells.map((each) => each.cell), missing, ...stillEnding(cells) });
   return json({ cells, missing });
 }
 
@@ -393,6 +406,7 @@ export async function internalJobs(
       cells: stopped.cells.map((each) => each.cell),
       missing: stopped.missing,
       forwarded: true,
+      ...stillEnding(stopped.cells),
     });
     return json(stopped);
   }

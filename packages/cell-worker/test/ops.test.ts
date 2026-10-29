@@ -20,7 +20,13 @@ import type { CellDump } from "@secbot/cell-storage";
 import { HouseholdCell } from "@secbot/household-cell";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { OPERATOR_HEADER } from "../src/internal-rpc.ts";
-import { CELL_STOP_TIMEOUT_MS, type OpsDeps, type SnapshotBucket, stopServed } from "../src/ops.ts";
+import {
+  CELL_STOP_TIMEOUT_MS,
+  type OpsDeps,
+  type SnapshotBucket,
+  stillEnding,
+  stopServed,
+} from "../src/ops.ts";
 import { PERSON_HEADER, PersonCell } from "../src/person-cell.ts";
 import { route, type WorkerEnv } from "../src/routes.ts";
 
@@ -554,5 +560,18 @@ describe("the owner's stop of this fleet's cells", () => {
     expect(
       loggedEvents(warn.mock.calls).find((line) => line.event === "ops.stop_failed"),
     ).toMatchObject({ cell: "owner" });
+  });
+});
+
+describe("the owner's stop log", () => {
+  it("names the cells that left jobs still ending, and how many", () => {
+    expect(
+      stillEnding([
+        { cell: "owner", jobs: 2, turn: true, shared: false },
+        { cell: "second", jobs: 1, turn: false, shared: false, running: 2 },
+        { cell: "household", jobs: 0, turn: false, shared: true, running: 1 },
+      ]),
+    ).toEqual({ still_ending: ["second", "household"], still_ending_jobs: 3 });
+    expect(stillEnding([{ cell: "owner", jobs: 2, turn: true, shared: false }])).toEqual({});
   });
 });
