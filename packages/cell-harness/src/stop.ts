@@ -61,9 +61,11 @@ export async function stopJobs(
     const board = await tx.doc(JobBoardDoc);
     const jobs: { number: number; taskId: TaskId }[] = [];
     // A joined shared job runs in the household: one stop op asks it to stop them all. An offer
-    // nobody joined has nothing running and stays as it is.
+    // nobody joined has nothing running and stays as it is. The owner's stop of everything reaches
+    // the household itself, which stops and counts its shared jobs, so it sends no op here.
     const shared = Object.values(board.jobs).filter(
       (row) =>
+        by !== "owner" &&
         parts.shared !== undefined &&
         row.shared !== null &&
         row.shared.household !== null &&

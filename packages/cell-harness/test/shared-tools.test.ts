@@ -249,6 +249,30 @@ describe("the person's restart of a shared job", () => {
     }
   });
 
+  it("leaves a shared job to the household in the owner's stop of everything, and counts it there", async () => {
+    const { pair, hold } = await joinedAndRunning();
+    try {
+      // The owner's stop reaches the household itself, which stops and counts the shared job.
+      expect(await pair.owner.cell.stop("owner")).toMatchObject({ jobs: 0 });
+      expect(await pair.second.cell.stop("owner")).toMatchObject({ jobs: 0 });
+      for (const who of ["owner", "second"] as const) {
+        expect((await pair.row(who, 1))?.shared?.outbox ?? []).toEqual([]);
+      }
+      const stopping = pair.agent.stop("owner");
+      await until(
+        async () =>
+          (await pair.agent.harness.snapshot(StopDoc, BACKGROUND_CONTEXT))?.active != null,
+      );
+      hold.release("household");
+      expect(await stopping).toMatchObject({ jobs: 1 });
+      // A person's own stop still sends the household a stop of their shared jobs.
+      await pair.sync("owner");
+      expect((await pair.row("owner", 1))?.status).toBe("stopped");
+    } finally {
+      hold.release("household");
+    }
+  });
+
   it("refuses a shared job that is not stopped, and an offer not yet answered", async () => {
     const { pair, hold } = await joinedAndRunning();
     try {

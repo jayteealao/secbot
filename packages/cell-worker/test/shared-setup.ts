@@ -441,14 +441,19 @@ export function chatSession(setup: SharedSetup, person: string): ChatSession {
   return session;
 }
 
-/** The household's own board row for its job `n` (where its task id and conversation live). */
-export async function householdRow(setup: SharedSetup, n: number): Promise<JobRow | undefined> {
+/** The household cell's harness (its board, its stop, its conversations). */
+export async function householdHarness(setup: SharedSetup): Promise<Harness> {
   const household = setup.household as unknown as
     | { open(): Promise<{ readonly harness: Harness }> }
     | undefined;
   if (household === undefined) throw new Error("no household cell");
-  // The household cell keeps its harness private; the stand-in reads its board directly.
-  const { harness } = await household.open();
+  // The household cell keeps its harness private; the stand-in reads it directly.
+  return (await household.open()).harness;
+}
+
+/** The household's own board row for its job `n` (where its task id and conversation live). */
+export async function householdRow(setup: SharedSetup, n: number): Promise<JobRow | undefined> {
+  const harness = await householdHarness(setup);
   return (await harness.snapshot(JobBoardDoc, BACKGROUND_CONTEXT))?.jobs[String(n)];
 }
 
