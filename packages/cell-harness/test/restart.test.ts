@@ -4,6 +4,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DecisionModels } from "../src/decision-model.ts";
+import { restartRow } from "../src/job-board.ts";
 import { job, leadCalls, startPausedJob } from "./escalation-helpers.ts";
 import {
   cleanContent,
@@ -177,6 +178,30 @@ describe("restart with a failure note", () => {
       "Refused: job 1 has used its restart; a raise with set_job is left.",
     );
     expect((await job(t))?.attempts).toEqual({ raises: 0, restarts: 1 });
+  });
+});
+
+describe("restart as one board move", () => {
+  it("restarts a paused job in the caller's commit, and refuses a missing or second one", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    test = await openTestCell({ gateway: createFauxGateway(failsThenAnswers) });
+    const t = test;
+    await startPausedJob(t);
+    const task = t.cell.tasks?.job;
+    if (task === undefined) throw new Error("no job task");
+    const oldTask = (await job(t))?.taskId ?? null;
+    const first = await t.cell.harness.commit(
+      (tx) => restartRow(tx, task, 1, NOTE, 9_000),
+      BACKGROUND_CONTEXT,
+    );
+    expect(first).toEqual({ ok: { number: 1, restarts: 1, raises: 0 }, oldTaskId: oldTask });
+    const row = await job(t);
+    expect(row).toMatchObject({ status: "queued", pause: null, result: null });
+    expect(row?.runs.at(-1)).toMatchObject({ taskId: oldTask, endedAt: 9_000, note: NOTE });
+    expect(
+      await t.cell.harness.commit((tx) => restartRow(tx, task, 7, NOTE, 9_100), BACKGROUND_CONTEXT),
+    ).toEqual({ missing: true });
+    if (oldTask !== null) await t.cell.harness.abortTask(oldTask, BACKGROUND_CONTEXT);
   });
 });
 

@@ -40,6 +40,7 @@ import {
   openQuestion,
   pullResult,
   type ResumeRefusal,
+  restartRow,
   resumeRow,
   setTierEffort,
 } from "./job-board.ts";
@@ -570,60 +571,9 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     execute: async (args, api, context) => {
       const at = deps.now();
       const changed = await api.commit(async (tx) => {
-        if ((await tx.doc(StopDoc)).active !== null) return { error: STOP_RUNNING };
-        const found = await rowOrError(tx, args.job);
-        if ("error" in found) return found;
-        if (found.status === "done" || found.status === "stopped" || found.status === "queued") {
-          return {
-            error: `job ${args.job} is ${found.status}; only a started, unfinished job restarts.`,
-          };
-        }
-        const counted = await escalate(tx, args.job, "restart");
-        if ("refused" in counted) {
-          if (escalationsUsed(found)) {
-            const ended = await exhaust(tx, args.job, at);
-            return {
-              exhausted: {
-                number: ended.number,
-                taskId: ended.taskId,
-                cost: ended.cost,
-                cap: ended.cap,
-              },
-            };
-          }
-          return {
-            error: `Refused: job ${args.job} has used its restart; a raise with set_job is left.`,
-          };
-        }
-        const oldTaskId = found.taskId;
-        found.cost = Math.max(found.cost, await jobCost(tx, found));
-        found.runs.push({
-          conversationId: found.conversationId,
-          taskId: found.taskId,
-          startedAt: found.runs.at(-1)?.endedAt ?? found.createdAt,
-          endedAt: at,
-          note: args.note,
-        });
-        found.conversationId = null;
-        found.pause = null;
-        // A blocked job reads its content again in the new run, and is checked again; it keeps
-        // its outside-content mark, so its outside actions still need the reviewer.
-        found.block = null;
-        found.result = null;
-        found.toolsUsed = [];
-        if (found.question?.answer === null) found.question = null;
-        found.status = "queued";
-        found.endedAt = null;
-        found.resumedAt = null;
-        found.taskId = await tx.createTask(
-          JobTask,
-          { number: found.number, attempt: found.attempts.restarts },
-          { ownership: { kind: "conversation" }, background: true },
-        );
-        return {
-          oldTaskId,
-          row: { number: found.number, attempts: { ...found.attempts } },
-        };
+        const answer = await restartRow(tx, JobTask, args.job, args.note, at);
+        if ("missing" in answer) return (await rowOrError(tx, args.job)) as { error: string };
+        return answer;
       }, context);
       if ("exhausted" in changed) {
         await endExhausted(changed.exhausted, context);
@@ -633,18 +583,18 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
       if (changed.oldTaskId !== null) {
         await deps.harness().abortTask(changed.oldTaskId, withoutAbortSignal(context));
       }
-      deps.holds.wake(changed.row.number);
+      deps.holds.wake(changed.ok.number);
       logEvent("job.restarted", {
         cell: person,
-        job: changed.row.number,
-        attempts: changed.row.attempts.raises + changed.row.attempts.restarts,
+        job: changed.ok.number,
+        attempts: changed.ok.raises + changed.ok.restarts,
         note_chars: args.note.length,
       });
       return {
         ...text(
-          `job ${changed.row.number} restarts with a fresh subagent and your note; this was its one restart.`,
+          `job ${changed.ok.number} restarts with a fresh subagent and your note; this was its one restart.`,
         ),
-        details: { job: changed.row.number },
+        details: { job: changed.ok.number },
       };
     },
   });

@@ -3,7 +3,13 @@
  * task's `runtime.commit`), so the board and the work it describes never disagree after a crash.
  * The board holds every job (C1); the lead's prompt shows only the live ones and a count of the rest.
  */
-import { type ConversationId, type Tx, UsageDoc } from "@earendil-works/pi-durable";
+import {
+  type ConversationId,
+  ROOT_CONVERSATION_ID,
+  type TaskId,
+  type Tx,
+  UsageDoc,
+} from "@earendil-works/pi-durable";
 import {
   compareKeys,
   ENDED,
@@ -23,6 +29,7 @@ import {
   StopDoc,
   TierSettingsDoc,
 } from "./docs.ts";
+import type { JobTask } from "./job-task.ts";
 import { conversationTotal } from "./month-ledger.ts";
 import {
   ESCALATION_LIMITS,
@@ -30,6 +37,7 @@ import {
   type OutsideKind,
   type Tier,
 } from "./release-defaults.ts";
+import { STOP_RUNNING } from "./stop.ts";
 import { capOf } from "./templates.ts";
 
 export { ENDED, priorityKey };
@@ -612,4 +620,81 @@ export function liveRows(board: BoardState): JobRow[] {
 /** How many jobs ended. */
 export function restCount(board: BoardState): number {
   return Object.values(board.jobs).filter((row) => ENDED.has(row.status)).length;
+}
+
+/** What restarting a job did: restarted, used up its escalations (and ended), or refused. */
+export type RestartAnswer =
+  | {
+      readonly ok: { readonly number: number; readonly restarts: number; readonly raises: number };
+      readonly oldTaskId: TaskId | null;
+    }
+  | {
+      readonly exhausted: {
+        readonly number: number;
+        readonly taskId: TaskId | null;
+        readonly cost: number;
+        readonly cap: number;
+      };
+    }
+  | { readonly missing: true }
+  | { readonly error: string };
+
+/**
+ * Restarts job `n` with a fresh run and a failure note, in the caller's commit: refused while a
+ * stop runs, for a job that has not started or is finished, and when its restart is used (a job
+ * past both escalations ends failed). The old run moves to `runs` with the note; the job keeps
+ * its number, row, and cost, and its new task starts in the background.
+ */
+export async function restartRow(
+  tx: Tx,
+  task: JobTask,
+  n: number,
+  note: string,
+  at: number,
+): Promise<RestartAnswer> {
+  if ((await tx.doc(StopDoc)).active !== null) return { error: STOP_RUNNING };
+  const found = await jobRow(tx, n);
+  if (found === undefined) return { missing: true };
+  if (found.status === "done" || found.status === "stopped" || found.status === "queued") {
+    return { error: `job ${n} is ${found.status}; only a started, unfinished job restarts.` };
+  }
+  const counted = await escalate(tx, n, "restart");
+  if ("refused" in counted) {
+    if (escalationsUsed(found)) {
+      const ended = await exhaust(tx, n, at);
+      return {
+        exhausted: { number: ended.number, taskId: ended.taskId, cost: ended.cost, cap: ended.cap },
+      };
+    }
+    return { error: `Refused: job ${n} has used its restart; a raise with set_job is left.` };
+  }
+  const oldTaskId = found.taskId;
+  found.cost = Math.max(found.cost, await jobCost(tx, found));
+  found.runs.push({
+    conversationId: found.conversationId,
+    taskId: found.taskId,
+    startedAt: found.runs.at(-1)?.endedAt ?? found.createdAt,
+    endedAt: at,
+    note,
+  });
+  found.conversationId = null;
+  found.pause = null;
+  // A blocked job reads its content again in the new run, and is checked again; it keeps its
+  // outside-content mark, so its outside actions still need the reviewer.
+  found.block = null;
+  found.result = null;
+  found.toolsUsed = [];
+  if (found.question?.answer === null) found.question = null;
+  found.status = "queued";
+  found.endedAt = null;
+  found.resumedAt = null;
+  found.taskId = (await tx.createTask(
+    task,
+    { number: found.number, attempt: found.attempts.restarts },
+    { ownership: { kind: "conversation" }, conversationId: ROOT_CONVERSATION_ID, background: true },
+  )) as TaskId;
+  return {
+    ok: { number: found.number, restarts: found.attempts.restarts, raises: found.attempts.raises },
+    oldTaskId,
+  };
 }
