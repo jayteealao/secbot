@@ -262,28 +262,16 @@ export class HouseholdCell {
   }
 
   /**
-   * RPC: the household's shared jobs as a board view for the owner. The household cell runs no
-   * agent yet, so the view is empty.
+   * RPC: the household's shared jobs as a board view for the owner. Every row there is shared, so
+   * no row carries a shared line.
    */
   async jobs(): Promise<BoardView> {
-    await this.open();
-    return {
-      person: HOUSEHOLD_CELL_NAME,
-      mode: "shadow",
-      live: 0,
-      waiting: 0,
-      rows: [],
-      finished: [],
-      shown: 0,
-      capacity: null,
-      templates: [],
-    };
+    return (await this.open()).agent.view();
   }
 
-  /** RPC: the owner's stop of the household's shared jobs; nothing runs here yet. */
+  /** RPC: the owner's stop of every unfinished household job; each keeps its state. */
   async stopJobs(): Promise<StopAnswer> {
-    await this.open();
-    return { jobs: 0, turn: false };
+    return (await this.open()).agent.stop("owner");
   }
 
   /**

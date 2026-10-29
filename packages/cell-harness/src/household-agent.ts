@@ -20,7 +20,9 @@ import {
 } from "@earendil-works/pi-durable";
 import { type AlertEnv, createAlerts } from "./alerts.ts";
 import { defaultSetTimer, type SetTimer } from "./approvals.ts";
+import { type BoardView, boardView } from "./board-view.ts";
 import { createBudgetExtension } from "./budget-gate.ts";
+import { JobBoardDoc, type JobStop } from "./docs.ts";
 import { createGatewayModels, type GatewayEnv } from "./gateway.ts";
 import { createHeartbeatRoutine, type HeartbeatEnv } from "./heartbeat.ts";
 import type { HouseholdClient, SharedSyncAnswer, SharedSyncRequest } from "./household-contract.ts";
@@ -36,6 +38,7 @@ import { createReviewTask } from "./result-review.ts";
 import { ensureRoutines } from "./routines.ts";
 import { cellSettings } from "./settings.ts";
 import { type Budgets, createPayerGate, exchange, overOf, rowsFor } from "./shared-jobs.ts";
+import { type StopAnswer, stopJobs } from "./stop.ts";
 import { createTelemetryExtension } from "./telemetry.ts";
 import { type NextWake, nextWake, type WakeSummary, wakesOf } from "./wake-times.ts";
 
@@ -79,9 +82,22 @@ export interface HouseholdAgent {
   wakes(): Promise<{ readonly summary: WakeSummary; readonly next: NextWake | undefined }>;
   /** One shared-job exchange with a person cell: their operations in, their shared jobs out. */
   exchange(request: SharedSyncRequest): Promise<SharedSyncAnswer>;
+  /** The household's shared jobs as a board view (every row there is shared). */
+  view(): Promise<BoardView>;
+  /**
+   * Stops unfinished household jobs with their state kept: every one (the owner's stop), or only
+   * those of `jobs` (a person's stop of the shared jobs they are part of).
+   */
+  stop(by: JobStop["by"], jobs?: readonly number[]): Promise<StopAnswer>;
   /** Logs the count of reports not logged yet, then closes the harness. */
   close(): Promise<void>;
 }
+
+/** The first moment of the next UTC month: a job held on both payers' limits waits until then. */
+const nextMonthUtc = (at: number): number => {
+  const date = new Date(at);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 1);
+};
 
 /** Refuses every tool call of a household job outside its fixed list; nothing is held. */
 function householdToolCheck(): Extension {
@@ -180,9 +196,37 @@ export async function openHouseholdAgent(options: HouseholdAgentOptions): Promis
     await harness.close(context).catch(() => {});
     throw error;
   }
+  const root = await harness.root(context);
+  const stop = (by: JobStop["by"], jobs?: readonly number[]) =>
+    stopJobs(
+      { harness, root, person: cell, now },
+      by,
+      withoutAbortSignal(context),
+      {},
+      jobs === undefined ? undefined : (row) => jobs.includes(row.number),
+    );
   return {
     harness,
     task,
+    stop,
+    view: async () =>
+      boardView({
+        person: cell,
+        board: (await harness.snapshot(JobBoardDoc, context)) ?? {
+          nextNumber: 1,
+          jobs: {},
+          byConversation: {},
+          queue: [],
+        },
+        budgetJobs: payers.waiting(),
+        mode: "shadow",
+        capacity: { measured: null, at: null },
+        templates: [],
+        waiting: 0,
+        resetsAt: nextMonthUtc(now()),
+        now: now(),
+        timeZone: "UTC",
+      }),
     wakes: async () => {
       const summary = wakesOf(await harness.inspect(context));
       return { summary, next: nextWake(summary, now()) };
@@ -193,7 +237,9 @@ export async function openHouseholdAgent(options: HouseholdAgentOptions): Promis
       const quiet = withoutAbortSignal(context);
       for (const taskId of applied.aborts) await harness.abortTask(taskId, quiet);
       for (const n of applied.started) holds.wake(n);
-      if (applied.aborts.length === 0) return answer;
+      const stopping = applied.stops.flatMap((each) => each.jobs);
+      if (stopping.length > 0) await stop("person", stopping);
+      if (applied.aborts.length === 0 && stopping.length === 0) return answer;
       const over = overOf(await options.budgets());
       const rows = await harness.commit(
         (tx) => rowsFor(tx, request.person, over, payers.waiting()),

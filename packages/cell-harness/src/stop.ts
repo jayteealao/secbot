@@ -14,7 +14,7 @@ import type { Context } from "@earendil-works/chord";
 import { withoutAbortSignal } from "@earendil-works/chord/context";
 import { type Conversation, type Harness, LiveDoc, type TaskId } from "@earendil-works/pi-durable";
 import { logEvent } from "./cell-parts.ts";
-import { ENDED, JobBoardDoc, type JobStop, StopDoc } from "./docs.ts";
+import { ENDED, JobBoardDoc, type JobRow, type JobStop, StopDoc } from "./docs.ts";
 
 export interface StopParts {
   readonly harness: Harness;
@@ -40,6 +40,8 @@ export async function stopJobs(
   by: JobStop["by"],
   context: Context,
   seams: StopSeams = {},
+  /** Only the rows this picks (one person's shared jobs in the household); default every row. */
+  select: (row: JobRow) => boolean = () => true,
 ): Promise<StopAnswer> {
   const { harness, root, person } = parts;
   const at = parts.now();
@@ -50,7 +52,7 @@ export async function stopJobs(
     const board = await tx.doc(JobBoardDoc);
     const jobs: { number: number; taskId: TaskId }[] = [];
     for (const row of Object.values(board.jobs)) {
-      if (ENDED.has(row.status) || row.taskId === null) continue;
+      if (ENDED.has(row.status) || row.taskId === null || !select(row)) continue;
       const task = await tx.task(row.taskId);
       if (task === undefined || task.state.status === "terminal") continue;
       row.stop = { at, by };
