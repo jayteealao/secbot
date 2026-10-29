@@ -326,7 +326,7 @@ route here. A device key never opens them, and no device-key route changes the m
 | PUT | `/ops/time-zone` | Body `{"timeZone": "<IANA zone>"}`; `{timeZone, developerLimitUsd}`. Months follow it from the next month in each cell. 400 for a zone the runtime does not know. |
 | GET | `/ops/jobs?cell=<person\|household>` | That person's `BoardView` with `operator: true`, or the household's shared jobs. A cell another fleet serves is read through that fleet's `/internal/jobs`; 503 `cell <name> did not answer` when it does not. 400 without `?cell=`. |
 | PUT | `/ops/capacity?cell=<person>` | Body `{"measured": <jobs 1-1000>, "at": <epoch ms>}` sets the person cell's measured number of jobs at once and the day it was measured; `{"measured": null, "at": null}` clears it, so the release's number (if any) applies again. Answers `{person, measured, at}`. The number only warns: the board's capacity line and one owner alert per episode; nothing is held back. Logs `ops.capacity_set` with `cell`, `ok`, and `measured`. 400 for any other body; 404 for the household or secrets cell, which have no number. |
-| POST | `/ops/stop` | The owner's stop of every cell: each person cell this fleet serves and the household cell when served, then the cells another fleet serves through its `/internal/stop` (three attempts). Answers `{cells: [{cell, jobs, turn, shared}], missing: [cell]}`; `missing` names each cell that did not answer or that no fleet address reaches. Every job stopped this way says it was the owner. A shared job is counted once, in the household cell's `shared` count; the person cells' counts leave it out. Logs `ops.stop`. Safe to repeat. |
+| POST | `/ops/stop` | The owner's stop of every cell, all at once: each person cell this fleet serves, the household cell when served, and the cells another fleet serves through its `/internal/stop` (three attempts, 30 s). Answers `{cells: [{cell, jobs, turn, shared, running?}], missing: [cell]}`; `running` (present only when above 0) counts a cell's aborted jobs that had not ended within its stop's wait. `missing` names each cell that did not answer within 20 s, failed, or that no fleet address reaches; a slow cell's stop may still finish, so repeat the stop to see the real state. Every job stopped this way says it was the owner. A shared job is counted once, in the household cell's `shared` count; the person cells' counts leave it out. Logs `ops.stop`. Safe to repeat. |
 
 `<person>` is `owner` or `second` (`person` also names the second cell). A route that needs
 `?cell=` answers 400 `send ?cell=<person>` without it. A cell this fleet does not serve answers 404
@@ -376,7 +376,7 @@ on to another fleet.
 
 | Method | Path | Request | Response | Statuses |
 | --- | --- | --- | --- | --- |
-| POST | `/internal/stop` | `{}` | `{cells: [{cell, jobs, turn, shared}], missing: [cell]}` for this fleet's cells | 200, 401 |
+| POST | `/internal/stop` | `{}` | `{cells: [{cell, jobs, turn, shared, running?}], missing: [cell]}` for this fleet's cells, each bounded at 20 s as in `/ops/stop` | 200, 401 |
 | POST | `/internal/jobs` | `{"cell": "<person\|household>"}` | that cell's `BoardView` with `operator: true` | 200, 401, 404 (served by another fleet) |
 
 ## Secrets routes: `/internal/secrets/…`
