@@ -230,9 +230,9 @@ At 80% and at 100% of your limit you get one notice, in `secbot chat` or, when n
 open, in `secbot missed`; the owner gets one alert:
 
 ```
-[ limit reached ] You have used $25.30 of $25.00 this month. Hand-offs,
-  routines, and reminders wait until the owner raises your limit or the
-  month resets on 1 Nov. Nothing is dropped. Chat with the lead continues.
+[ limit reached ] You have used $25.30 of $25.00 this month. Jobs, routines,
+  and reminders wait until the owner raises your limit or the month resets
+  on 1 Nov. Nothing is dropped. Chat with the lead continues.
   3 waiting: routine morning check (06:00), reminder bins out (19:00),
   job 4 research (13:58)
 ```
@@ -241,7 +241,7 @@ Above your limit, chat with the lead continues; jobs, routines, and reminders wa
 job finishes its current step and then waits. Nothing is dropped: the work continues when the
 owner raises your limit or the month resets (local midnight on the first, in the household time
 zone). Jobs on the developer template count against the household developer budget instead, and
-wait above that budget the same way. (The notice still calls jobs "hand-offs".)
+wait above that budget the same way.
 
 Every person starts at a limit of 25 dollars a month, the owner included. When the owner's own
 spend is already above 25 dollars, the owner's jobs, routines, and reminders wait until the

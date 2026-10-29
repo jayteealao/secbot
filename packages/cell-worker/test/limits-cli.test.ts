@@ -138,9 +138,9 @@ describe("secbot cost and secbot limits against the cell routes", () => {
     ]);
     const missed = await secbot(s, false, "missed");
     expect(missed.out.split("\n").slice(0, 3)).toEqual([
-      "[ 80% of limit ] You have used $0.82 of $1.00 this month. At $1.00,",
-      "  hand-offs, routines, and reminders wait. Chat with the lead continues.",
-      expect.stringMatching(/^ {2}Your limit resets on \d{1,2} [A-Z][a-z]{2}\.$/),
+      "[ 80% of limit ] You have used $0.82 of $1.00 this month. At $1.00, jobs,",
+      "  routines, and reminders wait. Chat with the lead continues. Your limit",
+      expect.stringMatching(/^ {2}resets on \d{1,2} [A-Z][a-z]{2}\.$/),
     ]);
     expect((await secbot(s, false, "missed")).out).toBe("no missed messages\n");
     await addSpend(cell, 0.2);
@@ -153,7 +153,7 @@ describe("secbot cost and secbot limits against the cell routes", () => {
     ]);
     const over = await secbot(s, false, "missed");
     expect(over.out.split("\n")[0]).toBe(
-      "[ limit reached ] You have used $1.02 of $1.00 this month. Hand-offs,",
+      "[ limit reached ] You have used $1.02 of $1.00 this month. Jobs, routines,",
     );
     expect(plainText(over.out)).toBe(true);
   });

@@ -125,7 +125,7 @@ monthly limit, 25 dollars by default. The developer specialist's spend counts ag
 household developer budget instead, 50 dollars by default, so developer work does not use up one
 person's limit. At 80% and at 100% of a limit, the person gets one notice and the owner gets one
 alert. Above a limit, only direct chat
-with the lead runs. Hand-offs, routines, and reminders wait and are not dropped, so a limit never
+with the lead runs. Jobs, routines, and reminders wait and are not dropped, so a limit never
 loses work. A hard stop on all work was rejected, because it would also stop the chat the person
 uses to ask for help.
 

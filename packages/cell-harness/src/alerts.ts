@@ -68,8 +68,8 @@ export function limitDescription(limit: LimitAlert): string {
       : "Developer jobs have used most of the developer budget. At the budget they wait; other work continues. Raise it with secbot limits developer <usd>.";
   }
   return limit.line >= 100
-    ? "Hand-offs, routines, and reminders wait until you raise this person's limit (secbot limits set <person> <usd>) or the month resets. Nothing is dropped; chat with the lead continues."
-    : "This person's agents have used most of their monthly limit. At the limit, hand-offs, routines, and reminders wait; chat with the lead continues. Raise it with secbot limits set <person> <usd>.";
+    ? "Jobs, routines, and reminders wait until you raise this person's limit (secbot limits set <person> <usd>) or the month resets. Nothing is dropped; chat with the lead continues."
+    : "This person's agents have used most of their monthly limit. At the limit, jobs, routines, and reminders wait; chat with the lead continues. Raise it with secbot limits set <person> <usd>.";
 }
 
 /** The summary of a capacity alert: the jobs running at once and the measured number. */
