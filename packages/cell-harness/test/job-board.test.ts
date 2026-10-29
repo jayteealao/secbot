@@ -368,7 +368,11 @@ describe("the job documents", () => {
     expect(await harness.snapshot(HandoffNoteDoc, BACKGROUND_CONTEXT)).toEqual(note);
     expect(await harness.snapshot(CapacityDoc, BACKGROUND_CONTEXT)).toEqual(capacity);
     await test.reopen();
-    expect(await test.cell.harness.snapshot(StopDoc, BACKGROUND_CONTEXT)).toEqual(stop);
+    // A reopen lifts a lock no stop holds any more; the last stop stays.
+    expect(await test.cell.harness.snapshot(StopDoc, BACKGROUND_CONTEXT)).toEqual({
+      ...stop,
+      active: null,
+    });
     expect(await test.cell.harness.snapshot(HandoffNoteDoc, BACKGROUND_CONTEXT)).toEqual(note);
   });
 
