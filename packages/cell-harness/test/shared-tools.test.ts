@@ -4,7 +4,7 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobBoardDoc, type JobRow, StopDoc } from "../src/docs.ts";
-import { SHARED_KEEPS_TIER, SHARED_NO_MARK, SHARED_NO_QUESTIONS } from "../src/lead-tools.ts";
+import { SHARED_KEEPS_TIER, SHARED_NO_MARK, SHARED_NO_QUESTIONS } from "../src/lead-texts.ts";
 import { leadCalls } from "./escalation-helpers.ts";
 import {
   createFauxGateway,

@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { JobBoardDoc, type JobRow } from "../src/docs.ts";
 import { createSharedRow } from "../src/job-board.ts";
 import { questionNotice } from "../src/job-tools.ts";
-import { askPersonText } from "../src/lead-tools.ts";
+import { askPersonText } from "../src/lead-texts.ts";
 import { type Frame, personOffers } from "../src/session-stream.ts";
 import {
   createFauxGateway,

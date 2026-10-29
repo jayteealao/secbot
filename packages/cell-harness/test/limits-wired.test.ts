@@ -13,7 +13,7 @@ import type { SetTimer } from "../src/approvals.ts";
 import type { BudgetWaiter } from "../src/budget-gate.ts";
 import { createDecisionModels, type DecisionModels } from "../src/decision-model.ts";
 import { leadMessageOf } from "../src/delivery.ts";
-import { JOB_WAITS_NOTE } from "../src/lead-tools.ts";
+import { JOB_WAITS_NOTE } from "../src/lead-texts.ts";
 import { costOnlyUsage } from "../src/month-ledger.ts";
 import { defineRoutine } from "../src/routines.ts";
 import {

@@ -10,7 +10,7 @@ import {
   requestNotice,
   requestsPerJobText,
 } from "../src/job-tools.ts";
-import { askPersonText } from "../src/lead-tools.ts";
+import { askPersonText } from "../src/lead-texts.ts";
 import { job, leadCalls } from "./escalation-helpers.ts";
 import {
   createFauxGateway,

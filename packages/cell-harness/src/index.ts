@@ -239,11 +239,8 @@ export { JobHolds } from "./job-holds.ts";
 export { JOB_KIND } from "./job-task.ts";
 export { createJobToolsExtension, type JobToolsDeps } from "./job-tools.ts";
 export { doneRecord, jobLabel, jobRowLabel, liveJobs } from "./jobs.ts";
-export {
-  ANSWER_MAX_CHARS as JOB_ANSWER_MAX_CHARS,
-  createJobsExtension,
-  jobSummary,
-} from "./lead-tools.ts";
+export { ANSWER_MAX_CHARS as JOB_ANSWER_MAX_CHARS } from "./lead-texts.ts";
+export { createJobsExtension, jobSummary } from "./lead-tools.ts";
 export {
   type BudgetLine,
   type BudgetState,

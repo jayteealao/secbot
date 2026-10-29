@@ -15,7 +15,6 @@ import {
   LiveDoc,
   type TaskId,
   type ToolExecutionApi,
-  type Tx,
 } from "@earendil-works/pi-durable";
 import type { BudgetWaiter } from "./budget-gate.ts";
 import { logEvent } from "./cell-parts.ts";
@@ -32,7 +31,6 @@ import {
   answerQuestion,
   blockReason,
   createJobRow,
-  createSharedRow,
   ENDED,
   escalate,
   escalationsUsed,
@@ -41,13 +39,32 @@ import {
   markRisky,
   openQuestion,
   pullResult,
-  type ResumeRefusal,
   restartRow,
   resumeRow,
   setTierEffort,
 } from "./job-board.ts";
 import type { JobHolds } from "./job-holds.ts";
 import { configureJob, createJobTask, type JobTask, type JobTaskDeps } from "./job-task.ts";
+import {
+  ANSWER_MAX_CHARS,
+  askPersonText,
+  exhaustedText,
+  ISO_DATE,
+  JOB_WAITS_NOTE,
+  jobParameter,
+  literals,
+  refusal,
+  resumeRefusalText,
+  rowOrError,
+  SHARED_KEEPS_TIER,
+  SHARED_NO_MARK,
+  SHARED_NO_QUESTIONS,
+  sharedNotStartedText,
+  sharedPayerText,
+  sharedRestartOwnerText,
+  sharedRestartUsedText,
+  text,
+} from "./lead-texts.ts";
 import { budgetOf } from "./month-ledger.ts";
 import {
   createReadResultTool,
@@ -59,8 +76,8 @@ import {
 import { DEFAULT_JOB_EFFORT, JOB_EFFORTS, TIERS } from "./release-defaults.ts";
 import { createReviewTask, type ReviewTask, reviewHold, startReview } from "./result-review.ts";
 import { logResumed, resumeInCommit } from "./resume-job.ts";
+import { createSharedLeadTools } from "./shared-lead-tools.ts";
 import { sharedOpId } from "./shared-relay.ts";
-import { payerText } from "./shared-split.ts";
 import { STOP_RUNNING } from "./stop.ts";
 import { appliedEffort, capOf, templateNamed, templatesOf, tierModelOf } from "./templates.ts";
 
@@ -89,58 +106,6 @@ export interface JobsExtensionDeps {
   readonly shared?: () => { readonly other: string; kick(): void } | undefined;
 }
 
-/** What the lead hears after proposing a shared job. */
-export const proposedText = (n: number, other: string) =>
-  `job ${n} waits for ${other} to agree to share the cost; tell the person you asked them.`;
-
-/** What the lead hears after giving the person a shared offer. */
-export const offerText = (n: number) =>
-  `Ask the person in your own words now; the chat adds "[ job ${n} shared ]" and their /join or /decline goes to the household.`;
-
-/** The lead's refusal when a move would change a shared job both people agreed to. */
-export const SHARED_KEEPS_TIER =
-  "a shared job keeps the tier both people agreed to; ask the person whether to start a new shared job.";
-
-/** The lead's refusal of a question move on a shared job: the household agent asks nobody. */
-export const SHARED_NO_QUESTIONS =
-  "a shared job asks no questions; the household agent states its assumptions in its answer.";
-
-/** The lead's refusal of a risky mark on a shared job: the household marks and reviews it. */
-export const SHARED_NO_MARK =
-  "a shared job's result is marked and reviewed in the household before either lead gets it.";
-
-/** The other person's refusal: only the requesting lead restarts a shared job. */
-export const sharedRestartOwnerText = (requester: string) =>
-  `only ${requester}'s lead restarts this shared job.`;
-
-/** The requesting lead's refusal once the shared job's one restart is used. */
-export const sharedRestartUsedText = (n: number) =>
-  `Refused: shared job ${n} has used its restart. Ask the person in your own words whether to start a new shared job at a higher tier.`;
-
-/** The lead's refusal while a shared job waits for the other person's yes: nothing runs yet. */
-export const sharedNotStartedText = (n: number, other: string) =>
-  `job ${n} waits for ${other} to agree to share the cost; nothing runs yet.`;
-
-/** Who pays a shared job, from this person's side. */
-export function sharedPayerText(link: NonNullable<JobRow["shared"]>): string {
-  return payerText(link.payer, link.with);
-}
-
-/** The lead's note when a job will wait above a limit before it starts. */
-export const JOB_WAITS_NOTE =
-  " The person is over their monthly limit, so the job waits until the limit rises or the month resets.";
-
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-
-const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
-const refusal = (value: string) => ({ ...text(value), isError: true });
-
-const literals = <T extends string>(values: readonly T[], description: string) =>
-  Type.Union(
-    values.map((value) => Type.Literal(value)),
-    { description },
-  );
-
 /** The lead run's first input while the lead is busy (the run's turn), else null. */
 export async function turnOf(
   api: Pick<ToolExecutionApi, "snapshot" | "conversationId">,
@@ -149,20 +114,6 @@ export async function turnOf(
   const live = await api.snapshot(LiveDoc, api.conversationId, context);
   const first = live?.run?.inputs[0];
   return first === undefined ? null : Number(first);
-}
-
-/** The row of job `n` in a commit, or an error naming the jobs that exist. */
-async function rowOrError(tx: Tx, n: number): Promise<JobRow | { readonly error: string }> {
-  const board = await tx.doc(JobBoardDoc);
-  const row = Object.hasOwn(board.jobs, String(n)) ? board.jobs[String(n)] : undefined;
-  if (row !== undefined) return row;
-  const numbers = Object.keys(board.jobs);
-  return {
-    error:
-      numbers.length === 0
-        ? `No job ${n}: the board has no jobs.`
-        : `No job ${n}. Jobs on the board: ${numbers.join(", ")}.`,
-  };
 }
 
 /** One line about a job for the lead. */
@@ -191,13 +142,6 @@ export function jobSummary(row: JobRow): string {
       : ` Shared with ${row.shared.with} (${sharedPayerText(row.shared)}), proposed by ${row.shared.role === "requester" ? "you" : "them"}, consent ${row.shared.consent}.`;
   return `job ${row.number} "${row.title}": ${row.status}, ${row.template} on ${row.tier}, ${effort}, $${row.cost.toFixed(2)} of $${row.cap}, priority ${row.priority}${due}, ${row.attempts.raises} raises and ${row.attempts.restarts} restarts; ${result}.${question}${blocked}${shared}`;
 }
-
-/** The longest answer to a job's question, from the lead or the person. */
-export const ANSWER_MAX_CHARS = 2_000;
-
-/** What the lead hears after ask_person. */
-export const askPersonText = (n: number) =>
-  `Ask the person in your own words now; the chat adds "[ job ${n} asks ]" and their /answer goes to the job.`;
 
 /** The most a job transcript gives the lead, in characters. */
 export const TRANSCRIPT_MAX_CHARS = 4_000;
@@ -249,24 +193,6 @@ export function transcriptText(entries: readonly EntryRecord[], max: number): st
   return kept.reverse().join("\n");
 }
 
-/** What the lead hears when a resume is refused. */
-export function resumeRefusalText(n: number, reason: ResumeRefusal, status = ""): string {
-  switch (reason) {
-    case "no-job":
-      return `No job ${n} on the board.`;
-    case "locked":
-      return STOP_RUNNING;
-    case "paused":
-      return `job ${n} is paused, not stopped: raise it with set_job or restart it with restart_job.`;
-    default:
-      return `job ${n} is ${status || "not stopped"}; only a stopped or blocked job resumes.`;
-  }
-}
-
-/** The lead's refusal when a job has used both escalations: the job has stopped. */
-export const exhaustedText = (n: number) =>
-  `Refused: job ${n} has used its raise and its restart. It has stopped; ask the person in your own words what to do — the chat adds the /answer line.`;
-
 export function createJobsExtension(deps: JobsExtensionDeps): {
   readonly extension: Extension;
   readonly JobTask: JobTask;
@@ -287,8 +213,6 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     extensions: deps.jobExtensions,
     ...(deps.onJobsChanged === undefined ? {} : { onJobsChanged: deps.onJobsChanged }),
   });
-  const jobParameter = Type.Integer({ minimum: 1, description: "The job's number." });
-
   /**
    * A lead move on a shared row becomes one operation in the row's outbox for the household, which
    * runs the job; the background exchange delivers it. Null when job `n` is not shared.
@@ -662,135 +586,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
     },
   });
 
-  const proposeSharedJob = defineTool({
-    name: "propose_shared_job",
-    description:
-      "Propose a job that belongs to both people in the household: the household agent runs it, and the other person's lead asks them first; only their yes starts it, and the cost splits evenly. Write a self-contained brief for both people. Returns at once.",
-    parameters: Type.Object({
-      title: Type.String({
-        minLength: 1,
-        maxLength: 80,
-        description: "A few words on the job, on one line with no brackets.",
-      }),
-      brief: Type.String({ minLength: 1, maxLength: 8_000, description: "The brief, for both." }),
-      priority: Type.Optional(
-        literals(["urgent", "deadline", "routine", "research"] as const, "Default routine."),
-      ),
-      deadline: Type.Optional(
-        Type.String({ description: "The date both people need it by, as YYYY-MM-DD." }),
-      ),
-      tier: Type.Optional(literals(TIERS, "Default: the household template's tier.")),
-      effort: Type.Optional(literals(JOB_EFFORTS, `Default ${DEFAULT_JOB_EFFORT}.`)),
-    }),
-    // A crash mid-call gives the model an interrupted result instead of a second proposal.
-    replay: "unsafe",
-    execute: async (args, api, context) => {
-      const shared = deps.shared?.();
-      if (shared === undefined) return refusal("This cell has no household to share a job with.");
-      // The household refuses such a title: the other lead reads it inside a bracketed notice.
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
-      if (/[[\]\u0000-\u001f\u007f]/.test(args.title)) {
-        return refusal("Write the title on one line with no brackets.");
-      }
-      if (args.deadline !== undefined && !ISO_DATE.test(args.deadline)) {
-        return refusal(`The deadline "${args.deadline}" is not a date like 2026-11-30.`);
-      }
-      const now = deps.now();
-      const proposed = await api.commit(async (tx) => {
-        if ((await tx.doc(StopDoc)).active !== null) return { error: STOP_RUNNING };
-        const template = templateNamed(
-          templatesOf((await tx.doc(TemplatesDoc)).custom),
-          "household",
-        );
-        if ("error" in template) return template;
-        const tier = args.tier ?? template.tier;
-        const requested = args.effort ?? DEFAULT_JOB_EFFORT;
-        const cap = capOf(tier, (await tx.doc(TierSettingsDoc)).caps);
-        // The other person agrees to the most the job can cost them: the estimate is the tier's
-        // cap, never a lower figure, because their half of the real cost is charged up to it.
-        const estimate = cap;
-        const row = await createSharedRow(tx, {
-          title: args.title.trim(),
-          brief: args.brief,
-          priority: args.priority ?? (args.deadline === undefined ? "routine" : "deadline"),
-          deadline: args.deadline ?? null,
-          tier,
-          effort: {
-            requested,
-            applied: appliedEffort(
-              deps.models(),
-              tierModelOf(tier, (await tx.doc(RoleModelsDoc)).overrides),
-              requested,
-            ),
-          },
-          owner: person,
-          createdAt: now,
-          shared: {
-            household: null,
-            role: "requester",
-            with: shared.other,
-            consent: "asking",
-            payer: "half",
-            estimateUsd: estimate,
-            outbox: [],
-            charges: [],
-            resultAt: null,
-            waitingBudget: false,
-          },
-        });
-        row.status = "waiting";
-        row.shared?.outbox.push({
-          kind: "propose",
-          opId: sharedOpId(person, now),
-          person,
-          other: shared.other,
-          local: row.number,
-          title: row.title,
-          brief: row.brief,
-          priority: row.priority,
-          deadline: row.deadline,
-          tier,
-          effort: requested,
-          estimateUsd: estimate,
-        });
-        return { number: row.number, tier, estimate };
-      }, context);
-      if ("error" in proposed) return refusal(proposed.error);
-      shared.kick();
-      logEvent("shared.proposed", {
-        cell: person,
-        job: proposed.number,
-        tier: proposed.tier,
-        estimate_usd: proposed.estimate,
-      });
-      return {
-        ...text(proposedText(proposed.number, shared.other)),
-        details: { job: proposed.number },
-      };
-    },
-  });
-
-  const offerShared = defineTool({
-    name: "offer_shared",
-    description:
-      "Give the person a shared job the other person proposed: then ask them in your own words whether to share the cost. Their /join or /decline goes to the household, never to you.",
-    parameters: Type.Object({ job: jobParameter }),
-    replay: "safe",
-    execute: async (args, api, context) => {
-      const shown = await api.commit(async (tx) => {
-        const row = await rowOrError(tx, args.job);
-        if ("error" in row) return row;
-        const consent = row.shared?.role === "other" ? row.shared.consent : null;
-        if (consent !== "offered" && consent !== "shown") {
-          return { error: `job ${args.job} is not a shared offer waiting for the person.` };
-        }
-        if (row.shared !== null) row.shared.consent = "shown";
-        return { number: row.number };
-      }, context);
-      if ("error" in shown) return refusal(shown.error);
-      return { ...text(offerText(shown.number)), details: { job: shown.number } };
-    },
-  });
+  const { proposeSharedJob, offerShared } = createSharedLeadTools(deps);
 
   const restartJob = defineTool({
     name: "restart_job",
