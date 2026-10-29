@@ -44,11 +44,13 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 ### Spend and limits
 
 A person cell counts its month-to-date spend from its own model ledger: every model response
-(failed attempts included) of the lead and each specialist, plus the guard's decision-model and
+(failed attempts included) of the lead, each job's conversations (every run and its result
+review, under the job's template as the role), and each frozen specialist, plus the guard's
+decision-model and
 reviewer calls, which the guard adds under the tool keys `secbot-guard:decision` and
 `secbot-guard:reviewer` of the calling conversation's `pi.usage`, in the commit that records its
 verdict. A month runs from local midnight on the first, in the household time zone, to the next
-first. The developer specialist's spend counts against the household developer budget (50 dollars
+first. The spend of jobs on the developer template counts against the household developer budget (50 dollars
 by default, summed across every person cell); everything else counts against the person's monthly
 limit (25 dollars by default). Only the owner changes either, through the operator routes.
 
@@ -58,8 +60,8 @@ limitUsd, percent, line}}`. `line` is `normal`, `warn` (80% or more of the limit
 or more); `percent` is rounded to a whole number; `hours` is spend by local hour (`"0"` to `"23"`)
 and role; `resetsAt` is the next month's start (milliseconds since 1970).
 
-Above the person's limit, hand-offs, routines, and reminders wait, and a specialist's running job
-waits before its next model request; chat with the lead and its own calls continue. Above the
+Above the person's limit, jobs, routines, and reminders wait, and a running job waits before its
+next model request; chat with the lead and its own calls continue. Above the
 developer budget, the developer's jobs wait. Nothing is dropped: a waiting task continues when the
 owner raises the limit or the month resets, also after a restart. A `Waiting` is `{what, since,
 budget}`, for example `{"what": "routine morning check", "since": 1791489066251, "budget":
@@ -102,13 +104,14 @@ An answer is applied once: allow runs the call once (a second call cannot use th
 answer: `this approval was already used`), deny gives the agent `denied by <person>`, and an
 answer never lets a call run that a rule now prohibits. A held call survives a restart; it is not
 asked again after one. While the lead waits on its own held call, chat lines are accepted and
-queued for it; specialists, routines, and reminders keep running.
+queued for it; jobs, routines, and reminders keep running.
 
 ### Rules
 
 A `Rule` is `{id, agent, tool, verdict, match?, source, addedAt}`:
 
-- `agent`: `all`, `lead`, or a specialist's name.
+- `agent`: `all`, `lead`, or a job template's name (a job's calls run as its template). A rule
+  naming a frozen specialist still reads, and matches nothing new.
 - `tool`: a tool name, `pay` (every tool named `pay_…`), or `*` (any tool).
 - `verdict`: `permit`, `ask-first`, or `prohibit`.
 - `match`: `{kind, field, value}` on one argument. `kind` is `exact`, `prefix`, `email-domain`,
@@ -161,13 +164,17 @@ ruleLevel, arguments, cost, mode?, decision?, fallback?}`, written before the ca
   `reason` `allowed once by <person>`, `allowed always by <person>`, or `denied by <person>`.
 - `kind: "lapsed"`: nobody answered in 24 hours (`no answer in 24 h; refused`) or the agent's job
   was aborted (`the agent's job was aborted; refused`); `verdict` `lapsed`, `layer` `person`.
-- `kind: "job"`: a hand-off or a routine run (each reminder included); `layer` `job`, `verdict`
-  its state, `tool` its label (`job: <first words of the brief>`, `reminder: <text>`,
-  `routine: <name>`), `agent` the specialist (a hand-off) or `lead` (a routine), `cost` its cost.
+- `kind: "job"`: a job run from the board or a routine run (each reminder included); `layer`
+  `job`, `verdict` its state, `tool` its label (`job <n>: <title>`, `reminder: <text>`,
+  `routine: <name>`; a hand-off still draining from before the upgrade keeps `job: <first words of
+  the brief>`), `agent` the job's template (a job) or `lead` (a routine), `cost` its cost (a
+  job's ledger over every run and review).
   A job is stored once, as `done`, in the commit that ends it (key `job:<task id>`), with `reason`
-  `answered the lead`, `failed: <why>`, `no answer`, `stopped`, or `delivered to the lead`. While
-  it runs or waits it is listed in `live` instead (key `live:<task id>`): `running` with `step 1
-  of 2: <specialist> is working` or `step 2 of 2: reporting to the lead`, or `waiting` with
+  `answered; waits for the lead` or the job's end (`failed`, `stopped`, `blocked`); a hand-off
+  still draining from before the upgrade ends with `answered the lead`, `failed: <why>`, `no
+  answer`, `stopped`, or `delivered to the lead`. While it runs or waits it is listed in `live`
+  instead (key `live:<task id>`): `running` with `working on <tier>` or `queued` (a hand-off:
+  `step 1 of 2: <specialist> is working` or `step 2 of 2: reporting to the lead`), or `waiting` with
   `waits above your limit since HH:MM` (`... the developer budget ...`) or `due <d Mon HH:MM>`.
   A routine that spends nothing (the heartbeat) is not listed.
 
@@ -175,10 +182,10 @@ ruleLevel, arguments, cost, mode?, decision?, fallback?}`, written before the ca
 `[redacted]` and capped at 2 KiB (the fields a rule matched are kept). Records are kept forever.
 Later releases add record kinds and fields; a client ignores what it does not know.
 
-A job's cost: a hand-off costs the specialist conversation's ledger growth since the later of the
-job's start and the end of that specialist's previous job, so one specialist's job costs add up
-to its spend (the guard cost of the specialist's own calls included, which also shows on those
-calls' rows). A routine run costs `0`: it only sends a message to the lead, whose answer is chat
+A job's cost: a board job costs the sum of its conversations' ledgers, every run and its result
+review (the guard cost of the job's own calls included, which also shows on those calls' rows). A
+hand-off still draining from before the upgrade costs the specialist conversation's ledger growth
+since the later of the job's start and the end of that specialist's previous job. A routine run costs `0`: it only sends a message to the lead, whose answer is chat
 spend. A running job's `cost` is its cost so far.
 
 `spentUsd`: for the month the spending ledger is in, the month to date (the same number as the
