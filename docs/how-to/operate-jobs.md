@@ -61,6 +61,41 @@ counting. It does not use the restart the lead may use when a job goes wrong. A 
 restarted the same way; its pages are checked again. A paused job is the lead's to go on with:
 ask the lead in chat. You can also ask the lead to resume a stopped job for you.
 
+## Share a job with the other person
+
+Ask your lead for something that is for both of you, for example "plan the May trip for both of
+us". The lead proposes a shared job and tells you it asked the other person. The job waits on your
+board with `waiting for alex to agree to share the cost` until they answer; on theirs it waits
+with `waiting for you to agree to share the cost`. Nothing runs and nothing is spent until they
+answer `/join <#>` in their chat (see the command line how-to). If they decline, your lead tells
+you. An offer nobody answers keeps waiting, with no spend.
+
+Once they join, the job runs in the household cell and shows on both boards, each with its own
+number and a line under the row:
+
+```
+15  plan the May trip         routine     cheap/low  0+0  $0.09/.25  running
+      shared with alex; you pay half
+```
+
+When it is done, your lead tells you the result in its own words; the household never talks to
+either of you directly.
+
+### Who pays
+
+Each of you pays half of a shared job's cost, booked on your own month as it runs. When one
+person's monthly limit is reached, the other pays all, and the line under the row says so
+(`you pay all` or `alex pays all`). While both limits are reached, the job waits on both boards
+with `over your monthly limit; waits for the owner or <date>` and spends nothing until the owner
+raises a limit or the month resets.
+
+### Stop or restart a shared job
+
+Either person's `secbot stop` stops a shared job too: it shows `stopped` on both boards with its
+state kept, and the other person's own jobs are not touched. Either person restarts it by number
+with `secbot jobs restart <#>`, using the number on their own board; it goes on in the household
+from its kept brief and transcript.
+
 ## Stop every cell of the household (owner)
 
 ```
@@ -71,6 +106,9 @@ With the operator key, this stops every person's jobs and lead turn, and the hou
 jobs, in both fleets, and lists each cell with what stopped. If a fleet does not answer, stderr
 names its cells and the command exits 1; run it again, which is safe. Each job stopped this way
 says it was stopped by the owner, and the person restarts it with `secbot jobs restart`.
+
+A shared job is counted once, on the household line (`household 1 shared job`); each person's
+line counts only their own jobs.
 
 To read a person's board, use `secbot jobs --person <name>`; for the shared jobs, `secbot jobs
 --household`.

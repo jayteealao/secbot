@@ -118,6 +118,41 @@ waits with no time limit and no spend until you answer. A plain chat line never 
 and a line that only looks like an answer (`/answer eleven home`) is not sent at all. A question
 asked while no session was open is shown again the next time you open `secbot chat`.
 
+### Join or decline a shared job
+
+When the other person's lead proposes a job for both of you, your lead tells you in its own
+words, and the chat adds a line with the job's number on your board:
+
+```
+Sam asked me to plan the May trip for both of you. Want to share it?
+
+[ job 15 shared ] /join 15 to share the cost, /decline 15 to leave it to sam
+```
+
+Answer with `/join <job>` or `/decline <job>`, for example `/join 15`. The answer goes to the
+household, never to the lead:
+
+```
+/join 15
+[ joined ] #15 plan the May trip; you pay half
+/decline 15
+[ declined ] #15 plan the May trip; sam's lead was told
+```
+
+Only `/join` starts the job; nothing runs and nothing is spent before it. After a decline, the
+other person's lead tells them. When your monthly limit is reached, the other person pays all,
+and the line says so:
+
+```
+[ job 15 shared ] your limit is reached, so sam pays all; /join 15 to see it on
+  your board, /decline 15 to leave it
+```
+
+The line prints once per job in a session, also after a reconnect, and again the next time you
+open `secbot chat` while the offer waits. A plain chat line never answers it, and a line that
+only looks like an answer (`/join fifteen`) is not sent at all: the chat prints `not sent: answer
+with /join <#> or /decline <#>`. An offer nobody answers waits on both boards with no spend.
+
 ### Your job board
 
 ```
@@ -138,6 +173,9 @@ one of each), and `COST/CAP` the job's cost over every run against the cap of it
 status but `queued`, `running`, and `done` has a reason line under the row. A title over 24
 characters ends in `...`. When more jobs run at once than the cell was measured at, a line above
 the column header says so; nothing is held back. Older jobs are in `secbot activity`.
+
+A shared job has a line under its row: `shared with alex; you pay half` (or `you pay all`, or
+`alex pays all` when one person's limit is reached).
 
 ### Reorder a job
 

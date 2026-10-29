@@ -38,6 +38,8 @@ private host names the cell was deployed with. A refusal answers `401` (no or un
 | POST | `/stop` | none | `{jobs, turn}`: every unfinished job with a running task (running, queued, paused, or waiting) and the lead's current turn stop, with their state kept; `jobs` is how many jobs stopped, `turn` whether the lead was in a turn. Routines, reminders, and reviews keep running. No job starts, restarts, or resumes until the stop is done | 200 |
 | POST | `/jobs/{n}/restart` | none | `{job, title}`: a stopped or blocked job resumes from its kept brief, board entry, and transcript; it does not use the job's own restart | 200, 404 (`{"error": "no stopped job #n", "reason": "no-job"}`), 409 (`reason` is `paused` with the job's `title`, `not-stopped`, or `locked` while a stop runs) |
 | POST | `/jobs/{n}/priority` | one of `{"urgent": true}`, `{"deadline": "YYYY-MM-DD" \| null}`, `{"before": <m>}` (at most 16 KiB) | `{job, title, priority, deadline, place, of, before?}`: the job's new place in the queue (1 is next) of `of` live jobs | 200, 400 (a bad body, or a date that is not a real day), 404 (`no job #n`, also for a missing `before` job), 409 (`job n has ended`), 413 |
+| POST | `/jobs/{n}/join` | none | `{job, title, from, payer}`: the person joins the shared job `from` proposed; only a join starts it in the household. `payer` is `half` (you pay half), `you` (you pay all, because `from`'s limit is reached), or `them` (`from` pays all, because your limit is reached). The answer goes to the household, never to the lead | 200, 404 (`no shared job #n waits for you`) |
+| POST | `/jobs/{n}/decline` | none | `{job, title, from, payer}`: the person declines; nothing runs, and `from`'s lead is told with a failure result (`<person> declined to share the cost`) | 200, 404 (`no shared job #n waits for you`) |
 
 ### Spend and limits
 
@@ -235,6 +237,16 @@ counts every run of the job against the `cap` of its current tier. `reason` is `
 every status but `queued`, `running`, and `done`: the text the command line prints under the row,
 for example `stopped by you at 14:20; secbot jobs restart 14`. `shared` is a shared job's line.
 
+A shared job has its own row on each person's board, with each person's own number. Its
+`shared` line names the other person and who pays: `shared with <other>; you pay half`,
+`shared with <other>; you pay all`, or `shared with <other>; <other> pays all`. Until the other
+person answers, the row is `waiting` with the reason `waiting for <other> to agree to share the
+cost` on the requesting person's board and `waiting for you to agree to share the cost` on the
+other's. While both people's limits are reached, the row is `waiting` with the reason `over your
+monthly limit; waits for the owner or <d Mon>`. A person restarts a stopped shared job with
+`POST /jobs/{n}/restart`, like any job: the restart goes to the household, which resumes the job
+from its kept brief and transcript.
+
 ## The session frames
 
 The client sends one frame type:
@@ -306,7 +318,7 @@ route here. A device key never opens them, and no device-key route changes the m
 | PUT | `/ops/limits?budget=developer` | Body `{"limitUsd": <usd>}`; `{timeZone, developerLimitUsd}`. A household setting: every person cell reads it again. 400 for a bad amount, 503 without a household cell. |
 | PUT | `/ops/time-zone` | Body `{"timeZone": "<IANA zone>"}`; `{timeZone, developerLimitUsd}`. Months follow it from the next month in each cell. 400 for a zone the runtime does not know. |
 | GET | `/ops/jobs?cell=<person\|household>` | That person's `BoardView` with `operator: true`, or the household's shared jobs. A cell another fleet serves is read through that fleet's `/internal/jobs`; 503 `cell <name> did not answer` when it does not. 400 without `?cell=`. |
-| POST | `/ops/stop` | The owner's stop of every cell: each person cell this fleet serves and the household cell when served, then the cells another fleet serves through its `/internal/stop` (three attempts). Answers `{cells: [{cell, jobs, turn, shared}], missing: [cell]}`; `missing` names each cell that did not answer or that no fleet address reaches. Every job stopped this way says it was the owner. Logs `ops.stop`. Safe to repeat. |
+| POST | `/ops/stop` | The owner's stop of every cell: each person cell this fleet serves and the household cell when served, then the cells another fleet serves through its `/internal/stop` (three attempts). Answers `{cells: [{cell, jobs, turn, shared}], missing: [cell]}`; `missing` names each cell that did not answer or that no fleet address reaches. Every job stopped this way says it was the owner. A shared job is counted once, in the household cell's `shared` count; the person cells' counts leave it out. Logs `ops.stop`. Safe to repeat. |
 
 `<person>` is `owner` or `second` (`person` also names the second cell). A route that needs
 `?cell=` answers 400 `send ?cell=<person>` without it. A cell this fleet does not serve answers 404
@@ -331,11 +343,17 @@ Auth: the operator key. A person cell in another fleet calls these to reach the 
 | POST | `/internal/household/report-spend` | a `SpendReport` with an operation id | `{board, othersDeveloperUsd, alerts: [{line, status}]}`; `status` is `yours` (this cell sends that developer alert), `taken` (another cell claimed it in the last 20 s), or `sent`; the same operation id applies once | 200, 400, 401 |
 | POST | `/internal/household/set-budget` | `{timeZone?, developerLimitUsd?}` | the new settings | 200, 400 (an unknown zone or a bad amount), 401 |
 | POST | `/internal/household/alert-sent` | `{month, budget: "developer", limitUsd, line, cell, sent}` | `{ok: true}`; `sent: false` frees the claim so the alert goes again | 200, 400, 401 |
+| POST | `/internal/household/shared-sync` | `{person, ops}`: the person's operations on shared jobs (`propose`, `answer`, `restart`, `resume`, `stop`), each with an operation id | `{acks, rows}`: one ack per operation (a household number for a proposal, or an `error`), and every shared job the person is part of, with its status, cost, cap, consent, who pays, result, and the person's charges; the same operation id applies once | 200, 400 (a refused request), 401 (without the operator key), 500 |
 
 A `SpendReport` is `{opId, cell, month, timeZone, at, spentUsd, limitUsd, mode, modeSince,
 byLayer, byRole, developerUsd, developerLimitUsd, developerLines}`. Person cells report after their
 spend changes (at most every 5 seconds, at once when a line is reached). The board is a report of
 each cell's own ledger: a person's limit is decided in that person's cell only.
+
+`shared-sync` is the one shared-job exchange. Each person cell pulls it every 2 minutes, after a
+shared action (a proposal, an answer, a restart, a stop), and before it answers a board read; the
+household never calls a person cell. A person cell in the household's fleet calls the household
+cell's binding with the same request; one in another fleet calls this route.
 
 ## Job routes across fleets: `/internal/stop`, `/internal/jobs`
 
