@@ -15,6 +15,7 @@ import { withoutAbortSignal } from "@earendil-works/chord/context";
 import { type Conversation, type Harness, LiveDoc, type TaskId } from "@earendil-works/pi-durable";
 import { errorFields, logEvent } from "./cell-parts.ts";
 import { ENDED, JobBoardDoc, type JobRow, type JobStop, StopDoc } from "./docs.ts";
+import { syncFailed } from "./shared-relay.ts";
 
 export interface StopParts {
   readonly harness: Harness;
@@ -118,7 +119,7 @@ export async function stopJobs(
   }
   if (left.length > 0) logEvent("stop.left_running", { cell: person, jobs: left.length }, "warn");
   // Bounded by the exchange's own timeout; an unanswered household keeps the op for the next one.
-  if (locked.shared > 0) await parts.shared?.sync(quiet).catch(() => undefined);
+  if (locked.shared > 0) await parts.shared?.sync(quiet).catch(syncFailed(person));
   logEvent("stop.done", {
     cell: person,
     by,
