@@ -4,9 +4,20 @@
 // (so no live reviewer), and counts every call as a fallback when the decisions route fails. Its
 // examples run scores the tuning examples and the held-out set with the decision model directly
 // (no rule, no guard) and judges each score on the release threshold.
-import { onLogEvent, thresholdFor } from "@secbot/cell-harness";
+import {
+  type CorpusResult,
+  checkContent,
+  createDecisionModel,
+  DecisionFailure,
+  falsePositiveRate,
+  INJECTION_CORPUS,
+  missRate,
+  onLogEvent,
+  thresholdFor,
+} from "@secbot/cell-harness";
 import { FakeCelldStorage, until } from "@secbot/cell-harness/testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { standInAnswer } from "../../cell-harness/test/injection-stand-in.ts";
 import {
   DECISIONS_ROUTE,
   riskyAt,
@@ -21,6 +32,8 @@ import {
   type BenchResults,
   benchExamples,
   benchHeldOut,
+  type CorpusCaseResult,
+  checkCorpusCase,
   type ExampleResults,
   GuardBenchCell,
   ownerRuleHolding,
@@ -518,5 +531,84 @@ describe("the examples verdict", () => {
     expect(rules.filter((call) => call.kind === "routine" && call.rule !== null)).toEqual([
       { name: "search: pin wheels recipe", kind: "routine", rule: "owner secret word" },
     ]);
+  });
+});
+
+describe("the guard bench's corpus run", () => {
+  it("checks every corpus case and records the model id; its rates equal the stand-in gate's", async () => {
+    stub.decide = standInAnswer;
+    const cell = bench();
+    const started = await call(cell, "POST", "/lab/guard-bench?corpus=1&adapter=jev");
+    expect(started.body).toMatchObject({
+      started: true,
+      kind: "corpus",
+      cases: 80,
+      adapter: "jev",
+    });
+    let state: Record<string, unknown> = {};
+    await until(async () => {
+      state = (await call(cell, "GET", "/lab/guard-bench-state")).body;
+      return state.done === true;
+    }, 60_000);
+    const results = state.results as {
+      cases: CorpusCaseResult[];
+      models: string[];
+      timedOut: boolean;
+    };
+    expect(results.cases).toHaveLength(80);
+    expect(results.timedOut).toBe(false);
+    expect(results.models).toEqual(["typesafe/jev-1.13-20261001"]);
+    // The stand-in gate's own run: the same check with the same answers.
+    const model = createDecisionModel("jev", { apiKey: KEY, baseUrl: stub.origin });
+    const gate: CorpusResult[] = [];
+    for (const each of INJECTION_CORPUS) {
+      const verdict = await checkContent(model, {
+        kind: each.kind,
+        tool: "corpus",
+        text: each.text,
+      });
+      gate.push({
+        name: each.name,
+        group: each.group,
+        label: each.label,
+        outcome: verdict.outcome === "clean" ? "clean" : "stopped",
+      });
+    }
+    const scored = results.cases.map(
+      (each): CorpusResult => ({
+        name: each.name,
+        group: each.group,
+        label: each.label,
+        outcome: each.outcome === "hit" ? "stopped" : "clean",
+      }),
+    );
+    expect(missRate(scored)).toEqual(missRate(gate));
+    expect(falsePositiveRate(scored)).toEqual(falsePositiveRate(gate));
+  }, 120_000);
+
+  it("keeps a timeout or an error as its own outcome", async () => {
+    const failing = (cause: "timeout" | "malformed") =>
+      ({
+        adapter: "jev",
+        checkContent: async () => {
+          throw new DecisionFailure(cause, 1);
+        },
+      }) as unknown as Parameters<typeof checkCorpusCase>[0];
+    const injected = INJECTION_CORPUS.find((each) => each.label === "injection");
+    if (injected === undefined) throw new Error("no injected case");
+    expect(await checkCorpusCase(failing("timeout"), injected)).toMatchObject({
+      outcome: "timeout",
+      cause: "timeout",
+    });
+    expect(await checkCorpusCase(failing("malformed"), injected)).toMatchObject({
+      outcome: "error",
+    });
+  });
+
+  it("refuses corpus=1 with calls or examples", async () => {
+    const cell = bench();
+    expect((await call(cell, "POST", "/lab/guard-bench?corpus=1&calls=5")).status).toBe(400);
+    expect((await call(cell, "POST", "/lab/guard-bench?corpus=1&examples=1")).status).toBe(400);
+    expect((await call(cell, "POST", "/lab/guard-bench?corpus=2")).status).toBe(400);
   });
 });
