@@ -31,7 +31,7 @@ device key is what proves the caller.
 
 | Command | What it does |
 | --- | --- |
-| `secbot chat` | A session with your lead. Answers stream in; a specialist's answer arrives later as `[from <name>] ...` while the session is open. `waiting for the model` means the model gateway is failing and your message is kept. |
+| `secbot chat` | A session with your lead. Answers stream in; a follow-up from another source, such as the household, arrives as `[from <name>] ...` while the session is open (a job that needs you prints its own line; see the job question and shared job sections). `waiting for the model` means the model gateway is failing and your message is kept. |
 | `secbot missed` | Calls waiting for your answer first, under `HELD CALLS`, then limit notices this device has not seen, then lead messages this device has not seen yet, oldest first. |
 | `secbot jobs` | Your job board: live jobs in the order they run, then jobs that ended in the last 24 hours, each with its reason line. `--person <name>` (another person) and `--household` (shared jobs) use the operator key. |
 | `secbot jobs urgent\|deadline\|move` | Changes a live job's place in the queue: `urgent <#>`, `deadline <#> YYYY-MM-DD` (or `clear`), `move <#> --before <#>`. |
