@@ -200,6 +200,8 @@ export interface OpenCellOptions {
   readonly onReport?: (error: unknown) => void;
   /** Tests: how often the count of unlogged storage-gone reports is logged (REPORT_SUMMARY_MS). */
   readonly reportSummaryMs?: number;
+  /** The household's people (person cell names): a shared job is with the other one. */
+  readonly persons?: readonly string[];
   /** More recurring routines beside the heartbeat (for example a morning briefing). */
   readonly routines?: readonly { readonly routine: Routine; readonly firstWakeMs?: number }[];
   /** Tests: more extensions for every role, after the release ones (the guard stays first). */
@@ -1021,6 +1023,16 @@ export async function openCellHarness(
     harness: current,
     // A result reviewer has no tools: it waits above a limit like a job, and its calls are logged.
     reviewExtensions: () => [budget, telemetry],
+    shared: () => {
+      const other = options.persons?.find((name) => name !== person);
+      if (options.household === undefined || other === undefined) return undefined;
+      return {
+        other,
+        kick: () => {
+          if (shared !== undefined) kickShared(shared, BACKGROUND_CONTEXT);
+        },
+      };
+    },
     remote: {
       person,
       household: () => options.household,

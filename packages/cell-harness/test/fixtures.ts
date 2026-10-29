@@ -290,6 +290,7 @@ export async function openTestCell(
     readonly fixturePages?: OpenCellOptions["fixturePages"];
     readonly readers?: OpenCellOptions["readers"];
     readonly guard?: OpenCellOptions["guard"];
+    readonly persons?: OpenCellOptions["persons"];
   } = {},
 ): Promise<TestCell> {
   const storage = options.storage ?? new FakeCelldStorage();
@@ -309,6 +310,7 @@ export async function openTestCell(
       ...(options.extensions === undefined ? {} : { extensions: options.extensions }),
       ...(options.fixturePages === undefined ? {} : { fixturePages: options.fixturePages }),
       ...(options.readers === undefined ? {} : { readers: options.readers }),
+      ...(options.persons === undefined ? {} : { persons: options.persons }),
       guard: { decision: passingDecision, ...options.guard },
     });
   const test: TestCell = {

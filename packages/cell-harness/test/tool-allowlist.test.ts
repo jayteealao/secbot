@@ -18,6 +18,8 @@ const LEAD_TOOLS = [
   "job_transcript",
   "mark_risky",
   "note_bookmark",
+  "offer_shared",
+  "propose_shared_job",
   "read_job",
   "read_result",
   "restart_job",

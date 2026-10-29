@@ -172,6 +172,8 @@ const CASES: readonly (readonly [string, Record<string, unknown>])[] = [
   ["resume_work", {}],
   ["search_history", { query: "eggs" }],
   ["set_reminder", { at: "2030-01-01T09:00:00Z", text: "bins out" }],
+  ["propose_shared_job", { title: "the May trip", brief: "Plan the May trip for both." }],
+  ["offer_shared", { job: 9 }],
 ];
 
 describe("every lead tool returns in its round (AC-9)", () => {
@@ -195,8 +197,16 @@ describe("every lead tool returns in its round (AC-9)", () => {
     models.hold("research");
     test = await openTestCell({
       gateway: createFauxGateway(models.wrap(jobResponder)),
-      household,
+      household: {
+        ...household,
+        // The shared-job exchange is held as well: a proposal never waits for it.
+        sharedSync: async () => {
+          await held.wait();
+          return { acks: [], rows: [] };
+        },
+      },
       secrets: heldSecrets(held),
+      persons: ["owner", "second"],
     });
     const t = test;
 
@@ -217,8 +227,9 @@ describe("every lead tool returns in its round (AC-9)", () => {
       const result = (await toolResultsOf(t.cell.root)).at(-1) ?? "";
       expect(result, name).not.toBe("");
     }
-    // Nothing was released while the rounds ran: the four remote calls still wait.
-    await until(() => held.waiting() === 4);
+    // Nothing was released while the rounds ran: the four remote calls and the shared-job
+    // exchange the proposal started still wait.
+    await until(() => held.waiting() === 5);
     expect(models.waiting("research")).toBe(1);
 
     held.release();
