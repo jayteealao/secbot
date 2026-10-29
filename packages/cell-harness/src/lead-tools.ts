@@ -42,6 +42,7 @@ import {
   restartRow,
   resumeRow,
   setTierEffort,
+  shownCost,
 } from "./job-board.ts";
 import type { JobHolds } from "./job-holds.ts";
 import { configureJob, createJobTask, type JobTask, type JobTaskDeps } from "./job-task.ts";
@@ -393,7 +394,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
         const row = await rowOrError(tx, args.job);
         if ("error" in row) return row;
         // A running job's cost is read from its ledgers, not the last settled figure.
-        const cost = ENDED.has(row.status) ? row.cost : Math.max(row.cost, await jobCost(tx, row));
+        const cost = await shownCost(row, () => jobCost(tx, row));
         return { summary: jobSummary({ ...row, cost }) };
       }, context);
       if ("error" in found) return refusal(found.error);

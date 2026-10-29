@@ -284,6 +284,18 @@ export async function jobCost(
 }
 
 /**
+ * A job's cost as the board, the lead's prompt, and read_job show it: an ended job's settled figure;
+ * a live job's, the larger of that and its ledgers, because a row's own cost is written only at a
+ * pause, an end, a restart, or a review. `ledgers` is read only for a live job.
+ */
+export async function shownCost(
+  row: Pick<JobRow, "status" | "cost">,
+  ledgers: () => Promise<number>,
+): Promise<number> {
+  return ENDED.has(row.status) ? row.cost : Math.max(row.cost, await ledgers());
+}
+
+/**
  * Pauses a running job before its next model step; a job that is not running (already paused,
  * waiting, ended) keeps its state and its first pause. True when this call paused it.
  */

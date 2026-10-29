@@ -32,7 +32,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { logEvent } from "./cell-parts.ts";
 import { JobBoardDoc, type JobRow } from "./docs.ts";
-import { ENDED, jobConversations, pauseRow } from "./job-board.ts";
+import { ENDED, jobConversations, pauseRow, shownCost } from "./job-board.ts";
 import type { JobHolds } from "./job-holds.ts";
 import { failingStreak, projectNext } from "./loop-guard.ts";
 import { conversationTotal } from "./month-ledger.ts";
@@ -63,10 +63,7 @@ export async function jobCostOf(
   return total;
 }
 
-/**
- * The board with each live job's cost read from its ledgers: a row's own cost is written only at a
- * pause, an end, a restart, or a review, so a running job would show its last settled figure.
- */
+/** The board with each job's cost as shown (shownCost): a live job's is read from its ledgers. */
 export async function withLiveCosts<B extends { readonly jobs: Readonly<Record<string, JobRow>> }>(
   reader: Pick<DocumentReader, "snapshot">,
   board: B,
@@ -74,9 +71,8 @@ export async function withLiveCosts<B extends { readonly jobs: Readonly<Record<s
 ): Promise<B> {
   const jobs: Record<string, JobRow> = {};
   for (const [key, row] of Object.entries(board.jobs)) {
-    jobs[key] = ENDED.has(row.status)
-      ? row
-      : { ...row, cost: Math.max(row.cost, await jobCostOf(reader, row, context)) };
+    const cost = await shownCost(row, () => jobCostOf(reader, row, context));
+    jobs[key] = cost === row.cost ? row : { ...row, cost };
   }
   return { ...board, jobs };
 }
