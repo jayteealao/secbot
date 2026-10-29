@@ -620,10 +620,10 @@ describe("escalation bounds, questions, and risk on the board", () => {
     expect(await ops((tx) => pauseRow(tx, 1, "loop", "3 failing steps", 20))).toBe(false);
     expect((await job())?.pause).toEqual({ reason: "cap", at: 10, detail: "$0.24 of $0.25" });
     expect((await job())?.status).toBe("paused");
-    expect(await ops((tx) => resumeRow(tx, 1))).toBe(true);
+    expect(await ops((tx) => resumeRow(tx, 1, 5_000))).toBe(true);
     expect(await job()).toMatchObject({ status: "running", pause: null });
     expect((await job())?.resumedAt).toEqual(expect.any(Number));
-    expect(await ops((tx) => resumeRow(tx, 1))).toBe(false);
+    expect(await ops((tx) => resumeRow(tx, 1, 5_000))).toBe(false);
   });
 
   it("ends an exhausted job failed with the escalation question to the person", async () => {

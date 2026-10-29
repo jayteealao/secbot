@@ -305,7 +305,7 @@ export async function pauseRow(
  * A paused job runs again: its pause is cleared, and the loop guard counts failing steps from
  * `at` (wall clock, as message timestamps). True when it was paused.
  */
-export async function resumeRow(tx: Tx, n: number, at: number = Date.now()): Promise<boolean> {
+export async function resumeRow(tx: Tx, n: number, at: number): Promise<boolean> {
   const row = await mustRow(tx, n);
   if (row.status !== "paused") return false;
   row.status = "running";

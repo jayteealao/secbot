@@ -597,7 +597,7 @@ export function createJobsExtension(deps: JobsExtensionDeps): {
           applied: appliedEffort(deps.models(), modelId, requested),
         });
         await configureJob(tx, row, deps.jobExtensions());
-        const resumed = paused && (await resumeRow(tx, args.job));
+        const resumed = paused && (await resumeRow(tx, args.job, deps.now()));
         return {
           from,
           raise,
