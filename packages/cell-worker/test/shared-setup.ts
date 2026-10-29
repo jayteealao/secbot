@@ -51,11 +51,7 @@ export async function evidence(name: string, ran: Ran): Promise<void> {
   await mkdir(where, { recursive: true });
   await writeFile(join(where, `${name}.stdout.txt`), ran.out);
   await writeFile(join(where, `${name}.stderr.txt`), ran.err);
-  await writeFile(
-    join(where, `${name}.exit-code`),
-    `${ran.code}
-`,
-  );
+  await writeFile(join(where, `${name}.exit-code`), `${ran.code}\n`);
 }
 
 /** Writes one JSON evidence file under SECBOT_EVIDENCE_DIR, when set. */
@@ -63,11 +59,7 @@ export async function evidenceJson(name: string, value: unknown): Promise<void> 
   const where = process.env.SECBOT_EVIDENCE_DIR;
   if (where === undefined || where === "") return;
   await mkdir(where, { recursive: true });
-  await writeFile(
-    join(where, name),
-    `${JSON.stringify(value, null, 2)}
-`,
-  );
+  await writeFile(join(where, name), `${JSON.stringify(value, null, 2)}\n`);
 }
 
 export const PERSONS = ["owner", "second"] as const;
@@ -78,7 +70,18 @@ export const HOUSEHOLD_PLAN =
 /** The lead's words when it gives a person an offer (the spec's ask). */
 export const OFFER_ASK = "Want to share this one? Answer with /join or /decline.";
 
-/** The scripted models for shared jobs; any other line falls back to the guard's `CALL` script. */
+/** The lead's words after it asked the other person to share a job. */
+export const askedText = (other: string) => `I asked ${other} to share it.`;
+
+/** The lead's words when it relays a result it pulled with `job_result`. */
+export const relayText = (result: string) => `Result for you: ${result}`;
+
+/**
+ * The scripted models for shared jobs; any other line falls back to the guard's `CALL` script.
+ * After a tool, the lead's words follow that tool's own result, never its system prompt: after
+ * giving an offer it asks; after proposing it says it asked; after `job_result` it relays the
+ * result. A failure or risky wake makes the lead pull that result.
+ */
 export function sharedResponder(request: FauxRequest) {
   if (request.role === "household") {
     return fauxAssistantMessage([fauxText(HOUSEHOLD_PLAN)]);
@@ -100,12 +103,22 @@ export function sharedResponder(request: FauxRequest) {
     }
     const joined = /Tell the person in one line: (.+)\]/.exec(request.lastText);
     if (joined !== null) return fauxAssistantMessage([fauxText(joined[1] ?? "")]);
+    const wake = /^\[job (\d+) (failure|risky): pull it with job_result\]/.exec(request.lastText);
+    if (wake !== null) {
+      return fauxAssistantMessage([fauxToolCall("job_result", { job: Number(wake[1]) })], {
+        stopReason: "toolUse",
+      });
+    }
   }
   if (request.role === "lead" && request.last?.role === "toolResult") {
-    // After giving an offer, the lead asks in its own words.
-    if (/shared offer|offer_shared|share the cost/.test(request.system + request.lastText)) {
+    const said = request.lastText;
+    if (said.startsWith("Ask the person in your own words now;")) {
       return fauxAssistantMessage([fauxText(OFFER_ASK)]);
     }
+    const proposed = /^job \d+ waits for (\S+) to agree to share the cost;/.exec(said);
+    if (proposed !== null) return fauxAssistantMessage([fauxText(askedText(proposed[1] ?? ""))]);
+    const pulled = /^job \d+ "[^\n]*" \([a-z]+\), brief: [^\n]*\nResult:\n([\s\S]*)$/.exec(said);
+    if (pulled !== null) return fauxAssistantMessage([fauxText(relayText(pulled[1] ?? ""))]);
   }
   return scripted(request);
 }
