@@ -1412,7 +1412,10 @@ async function finishOpen(
     await tx.doc(TemplatesDoc);
     await tx.doc(TierSettingsDoc);
     // The stop's lock, the lead's hand-off note, and the measured capacity.
-    await tx.doc(StopDoc);
+    // No stop runs while the cell opens (a stop lives in the process that started it), so a lock
+    // left by a stop that died mid-way is stale: lift it, or every later start would be refused.
+    const stop = await tx.doc(StopDoc);
+    if (stop.active !== null) stop.active = null;
     await tx.doc(HandoffNoteDoc);
     await tx.doc(CapacityDoc);
     for (const row of Object.values(board.jobs)) {

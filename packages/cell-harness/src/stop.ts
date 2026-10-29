@@ -13,7 +13,7 @@
 import type { Context } from "@earendil-works/chord";
 import { withoutAbortSignal } from "@earendil-works/chord/context";
 import { type Conversation, type Harness, LiveDoc, type TaskId } from "@earendil-works/pi-durable";
-import { logEvent } from "./cell-parts.ts";
+import { errorFields, logEvent } from "./cell-parts.ts";
 import { ENDED, JobBoardDoc, type JobRow, type JobStop, StopDoc } from "./docs.ts";
 
 export interface StopParts {
@@ -88,10 +88,16 @@ export async function stopJobs(
   const count = marked.length + locked.shared;
   await seams.afterLock?.();
   const quiet = withoutAbortSignal(context);
-  for (const job of marked) await harness.abortTask(job.taskId, quiet);
-  // Not `background: true`: that would also abort routines, reminders, and reviews.
-  await root.abort(quiet);
-  for (const job of marked) await harness.waitForTask(job.taskId, quiet);
+  try {
+    for (const job of marked) await harness.abortTask(job.taskId, quiet);
+    // Not `background: true`: that would also abort routines, reminders, and reviews.
+    await root.abort(quiet);
+    for (const job of marked) await harness.waitForTask(job.taskId, quiet);
+  } catch (error) {
+    // The lock is lifted below whatever an abort did: a lock left set would refuse every later
+    // start, restart, and resume until another stop.
+    logEvent("stop.abort_failed", { cell: person, ...errorFields(error) }, "warn");
+  }
   const left = await harness.commit(async (tx) => {
     const stop = await tx.doc(StopDoc);
     stop.active = null;
