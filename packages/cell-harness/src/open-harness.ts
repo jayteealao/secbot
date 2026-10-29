@@ -165,7 +165,6 @@ import {
   type SharedParts,
   type SyncOutcome,
   sharedOpId,
-  syncFailed,
   syncShared,
 } from "./shared-relay.ts";
 import { type StopAnswer, stopJobs } from "./stop.ts";
@@ -445,9 +444,9 @@ export class CellHarness implements CellParts {
    * warning when more jobs run than the cell was measured at.
    */
   async jobsView(context: Context = BACKGROUND_CONTEXT): Promise<BoardView> {
-    // Shared jobs first catch up with the household (bounded); a failed exchange shows the last
-    // mirrored state.
-    await this.syncShared(context).catch(syncFailed(this.person));
+    // The view shows the last mirrored state; an exchange in the background catches shared jobs
+    // up with the household for the next read, so a slow household never holds the view.
+    this.kickShared(context);
     const board = await withLiveCosts(this.harness, await this.board(context), context);
     const waits = (await this.harness.snapshot(BudgetWaitsDoc, context))?.tasks ?? {};
     const { mode } = await readGuardMode(this.harness, context);
@@ -557,7 +556,7 @@ export class CellHarness implements CellParts {
   /**
    * The person joins or declines a shared job the other person proposed: an offer on this board
    * that the lead gave or the household sent. One commit queues the answer for the household, then
-   * one exchange (bounded) delivers it; a household that does not answer gets it at the next one.
+   * an exchange in the background delivers it; a household that does not answer gets it at the next.
    */
   async answerShared(
     n: number,
@@ -606,7 +605,7 @@ export class CellHarness implements CellParts {
       household: done.household,
       answer: join ? "join" : "decline",
     });
-    await this.syncShared(context).catch(syncFailed(this.person));
+    this.kickShared(context);
     return { ok: true, job: n, title: done.title, from: done.from, payer: done.payer };
   }
 

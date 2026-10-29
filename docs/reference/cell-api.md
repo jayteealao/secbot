@@ -359,8 +359,9 @@ spend changes (at most every 5 seconds, at once when a line is reached). The boa
 each cell's own ledger: a person's limit is decided in that person's cell only.
 
 `shared-sync` is the one shared-job exchange. Each person cell pulls it every 2 minutes, after a
-shared action (a proposal, an answer, a restart, a stop), and before it answers a board read; the
-household never calls a person cell. A person cell in the household's fleet calls the household
+shared action (a proposal, an answer, a restart, a stop), and in the background on a board read,
+which answers with the last mirrored state without waiting for it; the household never calls a
+person cell. A person cell in the household's fleet calls the household
 cell's binding with the same request; one in another fleet calls this route.
 
 ## Job routes across fleets: `/internal/stop`, `/internal/jobs`

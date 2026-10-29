@@ -7,7 +7,13 @@ import { describe, expect, it, vi } from "vitest";
 import { JobBoardDoc } from "../src/docs.ts";
 import { readMonth } from "../src/month-ledger.ts";
 import { sharedOpId, syncShared } from "../src/shared-relay.ts";
-import { loggedEvents, openTestCell, type TestCell, until } from "./fixtures.ts";
+import {
+  createHouseholdStub,
+  loggedEvents,
+  openTestCell,
+  type TestCell,
+  until,
+} from "./fixtures.ts";
 import { wakeNoticesOf } from "./job-helpers.ts";
 import { answerFrom, open, openPair, proposeFrom } from "./shared-pair.ts";
 
@@ -103,6 +109,28 @@ describe("the person side's reconcile", () => {
     );
     expect((await pair.row("owner", n))?.shared?.outbox).toEqual([]);
     warn.mockRestore();
+  });
+
+  it("answers the board while an exchange with the household is still waiting", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    let release = () => {};
+    let asked = 0;
+    const household = {
+      ...createHouseholdStub(),
+      sharedSync: async () => {
+        asked++;
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { acks: [], rows: [] };
+      },
+    };
+    const t = await openTestCell({ person: "owner", household, persons: ["owner", "second"] });
+    open.cells.push(t);
+    const view = await t.cell.jobsView();
+    expect(view.rows).toEqual([]);
+    await until(async () => asked === 1);
+    release();
   });
 
   it("ends the requesting row failed with the decline text, and the offer row too", async () => {
