@@ -264,13 +264,22 @@ export async function openHouseholdAgent(options: HouseholdAgentOptions): Promis
     exchange: async (request) => {
       const deps = { task, budgets: options.budgets, now, waiting: () => payers.waiting() };
       const { answer, applied } = await exchange(harness, request, deps, context);
-      const kinds = new Map(request.ops.map((op) => [op.opId, op.kind]));
+      const sent = new Map(request.ops.map((op) => [op.opId, op]));
       for (const ack of answer.acks) {
         if (ack.error === undefined) continue;
-        // A refused operation changes nothing; the log is the only trace of it here.
+        // A refused operation changes nothing; the log is the only trace of it here. Its op_id
+        // joins it to the person cell's own line for the same refusal.
+        const op = sent.get(ack.opId);
         logEvent(
           "shared.op_refused",
-          { cell, person: request.person, op: kinds.get(ack.opId) ?? null, error: ack.error },
+          {
+            cell,
+            person: request.person,
+            op: op?.kind ?? null,
+            op_id: ack.opId,
+            household_job: op !== undefined && "household" in op ? op.household : null,
+            error: ack.error,
+          },
           "warn",
         );
       }

@@ -102,6 +102,9 @@ describe("the person side's reconcile", () => {
       (event) => event.event === "shared.op_refused",
     );
     expect(refused).toHaveLength(2);
+    // The two lines join on the operation id.
+    expect(refused[0]?.op_id).toEqual(expect.any(String));
+    expect(refused[0]?.op_id).toBe(refused[1]?.op_id);
     expect(refused).toContainEqual(
       expect.objectContaining({ cell: "owner", job: n, op: "answer", level: "warn" }),
     );

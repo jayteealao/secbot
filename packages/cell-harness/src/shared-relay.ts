@@ -159,13 +159,13 @@ async function reconcile(
   notices: SharedNotice[];
   charged: { job: number; household: number; usd: number; split: string }[];
   offers: { job: number; household: number; waited: number }[];
-  refused: { job: number; op: SharedOp["kind"]; error: string }[];
+  refused: { job: number; op: SharedOp["kind"]; opId: string; error: string }[];
 }> {
   const now = parts.now();
   const board = await tx.doc(JobBoardDoc);
   const notices: SharedNotice[] = [];
   const charged: { job: number; household: number; usd: number; split: string }[] = [];
-  const refused: { job: number; op: SharedOp["kind"]; error: string }[] = [];
+  const refused: { job: number; op: SharedOp["kind"]; opId: string; error: string }[] = [];
   const jobOfOp = new Map(sent.map((each) => [each.op.opId, each]));
   for (const ack of answer.acks) {
     const found = jobOfOp.get(ack.opId);
@@ -175,7 +175,7 @@ async function reconcile(
     if (row === undefined || link === null || link === undefined) continue;
     link.outbox = link.outbox.filter((op) => op.opId !== ack.opId);
     if (ack.error !== undefined)
-      refused.push({ job: row.number, op: found.op.kind, error: ack.error });
+      refused.push({ job: row.number, op: found.op.kind, opId: ack.opId, error: ack.error });
     if (found.op.kind === "propose") {
       if (ack.household !== undefined) {
         link.household = ack.household;
@@ -574,7 +574,7 @@ async function syncOnce(parts: SharedParts, context: Context): Promise<SyncOutco
   for (const each of done.refused) {
     logEvent(
       "shared.op_refused",
-      { cell: parts.person, job: each.job, op: each.op, error: each.error },
+      { cell: parts.person, job: each.job, op: each.op, op_id: each.opId, error: each.error },
       "warn",
     );
   }
