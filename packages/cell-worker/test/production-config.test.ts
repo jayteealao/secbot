@@ -85,6 +85,14 @@ describe("the production worker config", () => {
     expect(bound).not.toContain("GuardBenchCell");
     expect(Object.keys(config.vars)).not.toContain("SECBOT_MARK_THRESHOLD_CAPS");
   });
+
+  it("has no fixture switch and names no fixture tool (both are test-cell only)", () => {
+    expect(Object.keys(config.vars)).not.toContain("SECBOT_TEST_FIXTURES");
+    const text = readFileSync(join(here, "..", "wrangler.jsonc"), "utf8");
+    for (const name of ["SECBOT_TEST_FIXTURES", "fixture_lookup", "fixture_slow_lookup"]) {
+      expect(text).not.toContain(name);
+    }
+  });
 });
 
 describe("the test-cell worker config", () => {
@@ -114,6 +122,10 @@ describe("the test-cell worker config", () => {
       class_name: "GuardBenchCell",
     });
     expect(parseThresholdCaps(config.vars.SECBOT_MARK_THRESHOLD_CAPS)).toEqual({ set_reminder: 0 });
+  });
+
+  it("turns on the fixture switch", () => {
+    expect(config.vars.SECBOT_TEST_FIXTURES).toBe("1");
   });
 
   it("declares every runtime var the release tool fills, each empty", () => {

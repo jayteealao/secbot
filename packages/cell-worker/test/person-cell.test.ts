@@ -5,7 +5,9 @@ import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   type CellHarness,
   createSharedRow,
+  FIXTURE_SLOW_MS,
   JobBoardDoc,
+  LIVE_FIXTURE_PAGES,
   openCellHarness,
   StopDoc,
 } from "@secbot/cell-harness";
@@ -24,7 +26,12 @@ import {
 import { createHold, jobResponder, startJobLine } from "@secbot/cell-harness/testing/responders";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { sha256Hex } from "../src/device-auth.ts";
-import { PersonCell, type SocketLike } from "../src/person-cell.ts";
+import {
+  type OpenExtras,
+  PersonCell,
+  type SocketLike,
+  testFixturesOf,
+} from "../src/person-cell.ts";
 import { route, type WorkerEnv } from "../src/routes.ts";
 
 const KEY = "owner-laptop-key-0123456789abcdef0123456789abcdef";
@@ -767,4 +774,54 @@ describe("the job board, stop, restart, and reorder routes", () => {
       stop: { by: "owner" },
     });
   }, 60_000);
+});
+
+describe("the test-cell fixture switch", () => {
+  /** Opens a cell with `env` and returns the extras its harness was opened with. */
+  const extrasOf = async (env: Record<string, string>) => {
+    const gateway = createFauxGateway();
+    const seen: OpenExtras[] = [];
+    const opened: CellHarness[] = [];
+    const cell = new PersonCell(
+      {
+        storage: new FakeCelldStorage(),
+        getWebSockets: () => [],
+        getTags: () => [],
+        acceptWebSocket: () => {},
+      },
+      env,
+      async (storage, name, extras) => {
+        seen.push(extras);
+        const harness = await openCellHarness(storage, {
+          person: name,
+          version: "v0.0.0-test",
+          env: {},
+          models: gateway.models,
+          ...extras,
+        });
+        opened.push(harness);
+        return harness;
+      },
+    );
+    await cell.jobsOf("owner");
+    for (const harness of opened) await harness.close();
+    return seen[0];
+  };
+
+  it("opens with the fixture pages and the fixture tools when the switch is 1", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const extras = await extrasOf({ SECBOT_TEST_FIXTURES: "1" });
+    expect(extras?.fixturePages).toBe(LIVE_FIXTURE_PAGES);
+    expect(extras?.fixtureTools).toEqual({ slowMs: FIXTURE_SLOW_MS });
+  });
+
+  it("opens with neither without the switch, or with any other value", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    for (const env of [{}, { SECBOT_TEST_FIXTURES: "true" }]) {
+      const extras = await extrasOf(env);
+      expect(extras).not.toHaveProperty("fixturePages");
+      expect(extras).not.toHaveProperty("fixtureTools");
+    }
+    expect(testFixturesOf({ SECBOT_TEST_FIXTURES: "0" })).toEqual({});
+  });
 });

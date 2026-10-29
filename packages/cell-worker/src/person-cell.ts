@@ -27,6 +27,7 @@ import {
   type CellHarness,
   type CostView,
   errorFields,
+  FIXTURE_SLOW_MS,
   type Frame,
   type HeartbeatState,
   HeldCallAnswered,
@@ -40,6 +41,7 @@ import {
   isGuardMode,
   JOB_ANSWER_MAX_CHARS,
   JOB_KIND,
+  LIVE_FIXTURE_PAGES,
   logEvent,
   logName,
   MONTH,
@@ -99,6 +101,21 @@ export interface HouseholdNamespaceLike {
 
 export interface PersonCellEnv extends CellEnv, HouseholdClientEnv, SecretsClientEnv {
   readonly HOUSEHOLD_CELL?: HouseholdNamespaceLike;
+  /**
+   * The test cell only: "1" gives every job the fixture page reader and the fixture lookup tools
+   * (one that always fails, one that answers slowly), so a live run can make a job fail, read an
+   * injected page, or stay running. The production config never sets it.
+   */
+  readonly SECBOT_TEST_FIXTURES?: string;
+}
+
+/** The fixture options a test cell opens its harness with; none without the switch. */
+export function testFixturesOf(
+  env: Pick<PersonCellEnv, "SECBOT_TEST_FIXTURES">,
+): Pick<OpenExtras, "fixturePages" | "fixtureTools"> {
+  return env.SECBOT_TEST_FIXTURES === "1"
+    ? { fixturePages: LIVE_FIXTURE_PAGES, fixtureTools: { slowMs: FIXTURE_SLOW_MS } }
+    : {};
 }
 
 /** What the cell gives the harness it opens. */
@@ -108,6 +125,10 @@ export interface OpenExtras {
   readonly onWakeChange: () => void;
   /** Background work of the harness failed; the cell reopens a harness whose session broke. */
   readonly onReport?: (error: unknown) => void;
+  /** The test cell only (SECBOT_TEST_FIXTURES): the fixture pages a job can read. */
+  readonly fixturePages?: Readonly<Record<string, string>>;
+  /** The test cell only (SECBOT_TEST_FIXTURES): the fixture lookup tools' slow wait. */
+  readonly fixtureTools?: { readonly slowMs: number };
 }
 
 /** How long a reopen waits for the broken harness to close before it opens the new one. */
@@ -397,6 +418,7 @@ export class PersonCell {
             ...(secrets === undefined ? {} : { secrets }),
             onWakeChange: () => this.rearmSoon(person),
             onReport: (error) => this.reopenAfter(error, person, generation),
+            ...testFixturesOf(this.env),
           }),
         )
         .then(async (cell) => {
