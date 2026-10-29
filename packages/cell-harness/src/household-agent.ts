@@ -34,6 +34,7 @@ import { createJobTask, type JobTask } from "./job-task.ts";
 import { createJobToolsExtension } from "./job-tools.ts";
 import { ModelHealthMonitor } from "./model-health.ts";
 import { createReportGate } from "./open-harness.ts";
+import { createFixtureToolsExtension } from "./outside-tools.ts";
 import { HOUSEHOLD_AGENT_RULES, HOUSEHOLD_AGENT_TOOLS } from "./release-defaults.ts";
 import { createReviewTask } from "./result-review.ts";
 import { ensureRoutines } from "./routines.ts";
@@ -81,6 +82,12 @@ export interface HouseholdAgentOptions {
   readonly persons: readonly string[];
   readonly setTimer?: SetTimer;
   readonly context?: Context;
+  /**
+   * The test cell only: adds `fixture_slow_lookup` (reads nothing, acts on nothing) to a household
+   * job's tools, so a live run can hold a shared job running while a stop arrives. Production
+   * household jobs keep their fixed list.
+   */
+  readonly fixtureTools?: { readonly slowMs: number };
 }
 
 export interface HouseholdAgent {
@@ -108,16 +115,24 @@ const nextMonthUtc = (at: number): number => {
 };
 
 /** Refuses every tool call of a household job outside its fixed list; nothing is held. */
-function householdToolCheck(): Extension {
+function householdToolCheck(allowed: ReadonlySet<string>): Extension {
   return defineExtension({
     name: "secbot-household-tools-only",
     hooks: [
       hook(ToolTask, {
         beforeTool: async (call) =>
-          HOUSEHOLD_JOB_TOOLS.has(call.name) ? undefined : { block: HOUSEHOLD_TOOL_REFUSAL },
+          allowed.has(call.name) ? undefined : { block: HOUSEHOLD_TOOL_REFUSAL },
       }),
     ],
   });
+}
+
+/** The test cell's slow fixture tool alone, for household jobs (no failing lookup there). */
+function slowFixtureOnly(slowMs: number): Extension {
+  const tools = (createFixtureToolsExtension({ slowMs }).tools ?? []).filter(
+    (tool) => tool.name === "fixture_slow_lookup",
+  );
+  return defineExtension({ name: "secbot-household-fixture-tools", tools });
 }
 
 export async function openHouseholdAgent(options: HouseholdAgentOptions): Promise<HouseholdAgent> {
@@ -145,8 +160,11 @@ export async function openHouseholdAgent(options: HouseholdAgentOptions): Promis
   const holds = new JobHolds();
   const telemetry = createTelemetryExtension(cell, monitor);
   const budget = createBudgetExtension(() => payers);
+  const fixture =
+    options.fixtureTools === undefined ? [] : [slowFixtureOnly(options.fixtureTools.slowMs)];
+  const fixtureNames = fixture.flatMap((extension) => (extension.tools ?? []).map((t) => t.name));
   const jobList: readonly Extension[] = [
-    householdToolCheck(),
+    householdToolCheck(new Set([...HOUSEHOLD_JOB_TOOLS, ...fixtureNames])),
     budget,
     createJobGate({ person: cell, harness: current, holds, now, relay: true }),
     createJobToolsExtension({
@@ -154,11 +172,12 @@ export async function openHouseholdAgent(options: HouseholdAgentOptions): Promis
       harness: current,
       holds,
       now,
-      wrapped: [...HOUSEHOLD_AGENT_TOOLS],
+      wrapped: [...HOUSEHOLD_AGENT_TOOLS, ...fixtureNames],
       household: true,
     }),
     createHouseholdExtension(cell, () => options.household),
     telemetry,
+    ...fixture,
   ];
   const ReviewTask = createReviewTask({
     person: cell,

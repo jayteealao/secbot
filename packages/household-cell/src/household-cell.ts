@@ -24,6 +24,7 @@ import {
   type BudgetSettings,
   CellAlarm,
   errorFields,
+  FIXTURE_SLOW_MS,
   type GatewayEnv,
   HarnessSlot,
   type HeartbeatEnv,
@@ -62,7 +63,13 @@ export interface HouseholdCellState {
 }
 
 /** The household cell's config: the heartbeat, and the fleet's model key for the household agent. */
-export interface HouseholdCellEnv extends HeartbeatEnv, GatewayEnv {}
+export interface HouseholdCellEnv extends HeartbeatEnv, GatewayEnv {
+  /**
+   * The test cell only: "1" gives household jobs the slow fixture tool, so a live run can hold a
+   * shared job running while a stop arrives. The production config never sets it.
+   */
+  readonly SECBOT_TEST_FIXTURES?: string;
+}
 
 export interface HouseholdCellOptions {
   /** The release version; set by the worker from the bundle. */
@@ -163,6 +170,9 @@ export class HouseholdCell {
       budgets: async () => (await board.board()).reports,
       household: { read: (document) => log.read(document), apply: (change) => log.apply(change) },
       persons: this.options.persons ?? [],
+      ...(this.env.SECBOT_TEST_FIXTURES === "1"
+        ? { fixtureTools: { slowMs: FIXTURE_SLOW_MS } }
+        : {}),
     });
     try {
       await this.alarms.rearm(agent);

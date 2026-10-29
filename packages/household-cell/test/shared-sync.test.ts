@@ -39,18 +39,35 @@ const propose = (change: Record<string, unknown> = {}) => ({
   ...change,
 });
 
-function setup() {
+function setupWith(env: Record<string, string>) {
   vi.spyOn(console, "log").mockImplementation(() => {});
   const gateway = createFauxGateway(
     resultReviewer(() => fauxAssistantMessage([fauxText("Plan for both: the coast.")])),
   );
-  const household = new HouseholdCell(
-    { storage: new FakeCelldStorage() },
-    {},
-    { version: "v0.0.0-test", pollMs: 5, persons: PERSONS, models: gateway.models },
-  );
+  const household = new HouseholdCell({ storage: new FakeCelldStorage() }, env, {
+    version: "v0.0.0-test",
+    pollMs: 5,
+    persons: PERSONS,
+    models: gateway.models,
+  });
   cells.push(household);
-  return household;
+  return { household, gateway };
+}
+
+const setup = () => setupWith({}).household;
+
+/** Proposes and joins one shared job, and returns the tools its first request offered. */
+async function toolsOfSharedJob(env: Record<string, string>) {
+  const { household, gateway } = setupWith(env);
+  await household.sharedSync({ person: "owner", ops: [propose()] });
+  await household.sharedSync({
+    person: "second",
+    ops: [
+      { kind: "answer", opId: "second-1", person: "second", household: 1, local: 9, join: true },
+    ],
+  });
+  await until(() => gateway.requests.some((request) => request.role === "household"));
+  return gateway.requests.find((request) => request.role === "household")?.tools ?? [];
 }
 
 describe("the household cell's shared-job exchange", () => {
@@ -77,6 +94,13 @@ describe("the household cell's shared-job exchange", () => {
       local: 3,
       result: { kind: "routine", text: "Plan for both: the coast." },
     });
+  });
+
+  it("gives household jobs the slow fixture tool only with the test-cell switch", async () => {
+    expect(await toolsOfSharedJob({ SECBOT_TEST_FIXTURES: "1" })).toContain("fixture_slow_lookup");
+    const production = await toolsOfSharedJob({});
+    expect(production).toContain("household_read");
+    expect(production).not.toContain("fixture_slow_lookup");
   });
 
   it("refuses a person outside the household over RPC", async () => {

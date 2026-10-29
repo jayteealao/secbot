@@ -35,7 +35,10 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-async function open(respond: Responder): Promise<{ agent: HouseholdAgent; gateway: FauxGateway }> {
+async function open(
+  respond: Responder,
+  extra: { readonly fixtureTools?: { readonly slowMs: number } } = {},
+): Promise<{ agent: HouseholdAgent; gateway: FauxGateway }> {
   vi.spyOn(console, "log").mockImplementation(() => {});
   const gateway = createFauxGateway(resultReviewer(respond));
   agent = await openHouseholdAgent({
@@ -49,6 +52,7 @@ async function open(respond: Responder): Promise<{ agent: HouseholdAgent; gatewa
     budgets: async () => [],
     household: createHouseholdStub(),
     persons: ["owner", "second"],
+    ...extra,
   });
   return { agent, gateway };
 }
@@ -107,6 +111,53 @@ describe("the household agent", () => {
     expect(results[0]).toContain("Tool start_job is not available");
     expect(HOUSEHOLD_TOOL_REFUSAL).toContain(
       "household_read, household_change, and search_old_job",
+    );
+  });
+
+  it("lets a shared job call the slow fixture tool on the test cell, running during the wait", async () => {
+    const slow: Responder = (request) =>
+      request.last?.role === "toolResult"
+        ? fauxAssistantMessage([fauxText(`Found: ${request.lastText}`)])
+        : fauxAssistantMessage([fauxToolCall("fixture_slow_lookup", { topic: "boiler" })], {
+            stopReason: "toolUse",
+          });
+    const { agent: a, gateway } = await open(slow, { fixtureTools: { slowMs: 400 } });
+    await a.exchange({ person: "owner", ops: [propose()] });
+    await a.exchange({ person: "second", ops: [answer(1, true)] });
+    await until(() =>
+      gateway.requests.some(
+        (request) =>
+          request.system.includes("household agent") && request.last?.role !== "toolResult",
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect((await row(a, 1))?.status).toBe("running");
+    const offered = gateway.requests.find((request) => request.system.includes("household agent"));
+    expect(offered?.tools).toContain("fixture_slow_lookup");
+    expect(offered?.tools).not.toContain("fixture_lookup");
+    await until(async () => (await row(a, 1))?.status === "done");
+    expect((await row(a, 1))?.result?.text).toBe(
+      "Found: Lookup result for boiler: three options found.",
+    );
+  });
+
+  it("has no slow fixture tool without the option", async () => {
+    const slow: Responder = (request) =>
+      request.last?.role === "toolResult"
+        ? fauxAssistantMessage([fauxText("no lookup")])
+        : fauxAssistantMessage([fauxToolCall("fixture_slow_lookup", { topic: "boiler" })], {
+            stopReason: "toolUse",
+          });
+    const { agent: a } = await open(slow);
+    await a.exchange({ person: "owner", ops: [propose()] });
+    await a.exchange({ person: "second", ops: [answer(1, true)] });
+    await until(async () => (await row(a, 1))?.status === "done");
+    const id = (await row(a, 1))?.conversationId;
+    if (id === null || id === undefined) throw new Error("no job conversation");
+    const conversation = await a.harness.conversation(id, BACKGROUND_CONTEXT);
+    if (conversation === undefined) throw new Error("no conversation");
+    expect((await toolResultsOf(conversation))[0]).toContain(
+      "Tool fixture_slow_lookup is not available",
     );
   });
 
