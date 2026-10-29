@@ -281,9 +281,9 @@ async function stopElsewhere(deps: OpsDeps): Promise<{ cells: CellStop[]; missin
 }
 
 /**
- * The owner's stop across the household: this fleet's cells and, at the same time, the cells another fleet serves
- * through its `/internal/stop` (a stop is safe to repeat, so the call is retried). A cell that
- * did not answer, or that no fleet address reaches, is in `missing`.
+ * The owner's stop across the household: this fleet's cells and, at the same time, the cells
+ * another fleet serves through its `/internal/stop` (a stop is safe to repeat, so the call is
+ * retried). A cell that did not answer, or that no fleet address reaches, is in `missing`.
  */
 async function stopRoute(deps: OpsDeps): Promise<Response> {
   // This fleet and the other at the same time.
