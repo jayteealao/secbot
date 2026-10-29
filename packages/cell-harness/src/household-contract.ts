@@ -181,14 +181,14 @@ export interface SharedSyncRequest {
 }
 
 /** One charge of a shared job's cost to one person. */
-export interface SharedCharge {
+export type SharedCharge = {
   /** Unique per job, settlement, and person: a person books each id once. */
   readonly id: string;
   readonly person: string;
   readonly usd: number;
   readonly at: number;
   readonly split: "half" | "all";
-}
+};
 
 /** A shared job as one person sees it, from the household's board. */
 export interface SharedSyncRow {
