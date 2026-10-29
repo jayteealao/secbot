@@ -125,6 +125,8 @@ export interface HouseholdClient {
   /** The owner changes a household setting; the answer is the new settings. */
   setBudget?(change: Partial<BudgetSettings>): Promise<BudgetSettings>;
   alertSent?(outcome: BudgetAlertSent): Promise<void>;
+  /** One shared-job exchange: this person's operations in, this person's shared jobs out. */
+  sharedSync?(request: SharedSyncRequest): Promise<SharedSyncAnswer>;
 }
 
 /**
@@ -136,6 +138,8 @@ export type SharedOp =
       readonly kind: "propose";
       readonly opId: string;
       readonly person: string;
+      /** The other person, whose yes the job needs. */
+      readonly other: string;
       /** The job's number on the requesting person's board. */
       readonly local: number;
       readonly title: string;
@@ -169,3 +173,55 @@ export type SharedOp =
       readonly household: number;
     }
   | { readonly kind: "stop"; readonly opId: string; readonly person: string };
+
+/** One exchange of a person cell with the household about its shared jobs. */
+export interface SharedSyncRequest {
+  readonly person: string;
+  readonly ops: readonly SharedOp[];
+}
+
+/** One charge of a shared job's cost to one person. */
+export interface SharedCharge {
+  /** Unique per job, settlement, and person: a person books each id once. */
+  readonly id: string;
+  readonly person: string;
+  readonly usd: number;
+  readonly at: number;
+  readonly split: "half" | "all";
+}
+
+/** A shared job as one person sees it, from the household's board. */
+export interface SharedSyncRow {
+  readonly household: number;
+  readonly requester: string;
+  readonly other: string;
+  readonly title: string;
+  readonly consent: "asked" | "joined" | "declined";
+  readonly status: string;
+  readonly pause: { readonly reason: string; readonly at: number; readonly detail: string } | null;
+  readonly block: { readonly cause: string; readonly at: number } | null;
+  readonly waitingBudget: boolean;
+  readonly tier: "cheap" | "mid" | "frontier";
+  readonly effort: { readonly requested: "low" | "medium" | "high"; readonly applied: string };
+  readonly attempts: { readonly raises: number; readonly restarts: number };
+  readonly cost: number;
+  readonly cap: number;
+  readonly estimateUsd: number;
+  /** Who pays from this person's side now. */
+  readonly payer: "half" | "you" | "them";
+  /** This person's number for the job, or null when they have not answered an offer yet. */
+  readonly local: number | null;
+  readonly result: { readonly kind: string; readonly text: string; readonly at: number } | null;
+  /** This person's charges for the job, oldest first. */
+  readonly charges: readonly SharedCharge[];
+}
+
+/** The household's answer: one ack per operation, and every shared job of the person. */
+export interface SharedSyncAnswer {
+  readonly acks: readonly {
+    readonly opId: string;
+    readonly household?: number;
+    readonly error?: string;
+  }[];
+  readonly rows: readonly SharedSyncRow[];
+}
