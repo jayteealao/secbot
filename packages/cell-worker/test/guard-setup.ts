@@ -191,6 +191,10 @@ export async function guardSetup(
             ...(extras.secrets === undefined ? {} : { secrets: extras.secrets }),
             ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
             ...(options.now === undefined ? {} : { now: options.now }),
+            // The test-cell switch (SECBOT_TEST_FIXTURES in personEnv) gives the fixture pages and
+            // lookup tools; a test's own pages win.
+            ...(extras.fixturePages === undefined ? {} : { fixturePages: extras.fixturePages }),
+            ...(extras.fixtureTools === undefined ? {} : { fixtureTools: extras.fixtureTools }),
             ...(options.fixturePages === undefined ? {} : { fixturePages: options.fixturePages }),
             ...(options.persons === undefined ? {} : { persons: options.persons }),
             // A passing decision model unless a test gives its own: the suites that are not about
