@@ -620,6 +620,7 @@ describe("the stop, restart, and reorder signals", () => {
         cell: "owner",
         by: "person",
         jobs: 2,
+        running: 0,
         turn: false,
         duration_ms: expect.any(Number),
       },
@@ -645,9 +646,11 @@ describe("the stop, restart, and reorder signals", () => {
     // A task that does not end on its abort: the stop finds it still running.
     vi.spyOn(t.cell.harness, "abortTask").mockResolvedValue(undefined as never);
     vi.spyOn(t.cell.harness, "waitForTask").mockResolvedValue(undefined as never);
+    // It is not counted as stopped: the answer says it is still ending.
     expect(await stopJobs(stopParts(t), "owner", BACKGROUND_CONTEXT)).toEqual({
-      jobs: 1,
+      jobs: 0,
       turn: false,
+      running: 1,
     });
     expect(
       loggedEvents(warn.mock.calls).filter((line) => line.event === "stop.left_running"),
