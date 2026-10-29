@@ -13,6 +13,8 @@ import {
   type TaskId,
   type Tx,
 } from "@earendil-works/pi-durable";
+import type { SetTimer } from "./approvals.ts";
+import type { BudgetWaiter } from "./budget-gate.ts";
 import { ENDED, JobBoardDoc, type JobRow } from "./docs.ts";
 import type {
   SharedCharge,
@@ -30,7 +32,7 @@ import {
   storeResult,
 } from "./job-board.ts";
 import { type JobTask, resumeJobTask } from "./job-task.ts";
-import { SHARED_DECLINED } from "./release-defaults.ts";
+import { PAYER_POLL_MS, SHARED_DECLINED } from "./release-defaults.ts";
 import { payerOf, splitCharge } from "./shared-split.ts";
 
 /** One delivered operation's answer, kept so a repeat gets the same answer. */
@@ -363,4 +365,74 @@ export async function exchange(
     const rows = await rowsFor(tx, request.person, over, deps.waiting?.());
     return { answer: { acks: applied.acks, rows }, applied };
   }, context);
+}
+
+export interface PayerGateOptions {
+  readonly harness: () => Harness;
+  readonly budgets: Budgets;
+  readonly setTimer: SetTimer;
+  /** A job started or stopped waiting on its payers. */
+  readonly onWaitChange?: () => void;
+}
+
+/** The household's budget wait, with the jobs that wait now. */
+export interface PayerGate extends BudgetWaiter {
+  waiting(): ReadonlySet<number>;
+}
+
+const JOB_OF_WAIT = /^job ([0-9]+)(?: |$)/;
+
+/**
+ * The household's budget wait: before each model request, a shared job waits while every person
+ * who pays for it (the requesting person, and the other once they joined) is at or over their
+ * limit by their newest board report. It checks again every minute; an abort ends the wait.
+ */
+export function createPayerGate(options: PayerGateOptions): PayerGate {
+  const waiting = new Set<number>();
+  const mark = (n: number, on: boolean) => {
+    if (waiting.has(n) === on) return;
+    if (on) waiting.add(n);
+    else waiting.delete(n);
+    options.onWaitChange?.();
+  };
+  const payersOver = async (n: number, context: Context): Promise<boolean> => {
+    const entry = (await options.harness().snapshot(SharedJobsDoc, context))?.jobs[String(n)];
+    if (entry === undefined) return false;
+    const over = overOf(await options.budgets());
+    const payers = entry.consent === "joined" ? [entry.requester, entry.other] : [entry.requester];
+    return payers.every(over);
+  };
+  const pause = (context: Context) =>
+    new Promise<void>((resolve, reject) => {
+      const signal = context.abortSignal;
+      if (signal?.aborted === true) {
+        reject(signal.reason ?? new Error("aborted"));
+        return;
+      }
+      const onAbort = () => {
+        cancel();
+        reject(signal?.reason ?? new Error("aborted"));
+      };
+      const cancel = options.setTimer(PAYER_POLL_MS, () => {
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      });
+      signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  return {
+    waiting: () => waiting,
+    isOver: async () => false,
+    waitUntilUnder: async (request, context) => {
+      const n = Number(JOB_OF_WAIT.exec(request.what)?.[1] ?? Number.NaN);
+      if (!Number.isInteger(n)) return;
+      try {
+        while (await payersOver(n, context)) {
+          mark(n, true);
+          await pause(context);
+        }
+      } finally {
+        mark(n, false);
+      }
+    },
+  };
 }
