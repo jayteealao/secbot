@@ -4,7 +4,12 @@
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { answerQuestion } from "../src/job-board.ts";
-import { questionNotice, requestNotice } from "../src/job-tools.ts";
+import {
+  questionNotice,
+  REQUESTS_PER_JOB_MAX,
+  requestNotice,
+  requestsPerJobText,
+} from "../src/job-tools.ts";
 import { askPersonText } from "../src/lead-tools.ts";
 import { job, leadCalls } from "./escalation-helpers.ts";
 import {
@@ -264,5 +269,44 @@ describe("no spawn: a job asks for a new job (AC-23)", () => {
     expect(await leadCalls(t, "start_job", { request: 2 })).toBe(
       "job 2 is not a requested job waiting to start.",
     );
+  });
+
+  it("refuses a job's request once it has three waiting for the lead", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    let asked = 0;
+    let refused = "";
+    const requests: Responder = (request) => {
+      if (request.role !== "research") return jobResponder(request);
+      if (asked > REQUESTS_PER_JOB_MAX) {
+        refused = request.lastText;
+        return fauxAssistantMessage([fauxText("Done asking.")]);
+      }
+      asked++;
+      return fauxAssistantMessage(
+        [
+          fauxToolCall("request_job", {
+            title: `part ${asked}`,
+            brief: `part ${asked} of the work`,
+            template: "research",
+          }),
+        ],
+        { stopReason: "toolUse" },
+      );
+    };
+    test = await openTestCell({ gateway: createFauxGateway(requests) });
+    const t = test;
+    await (
+      await t.cell.submit(
+        startJobLine({ title: "plan", brief: "plan the move", template: "research" }),
+        "req-2",
+      )
+    ).wait(BACKGROUND_CONTEXT);
+    await until(async () => (await job(t))?.result != null);
+    await t.cell.harness.waitForIdle(BACKGROUND_CONTEXT);
+    expect(refused).toContain(requestsPerJobText(REQUESTS_PER_JOB_MAX));
+    for (let m = 2; m <= REQUESTS_PER_JOB_MAX + 1; m++) {
+      expect((await job(t, m))?.requestedBy).toBe(1);
+    }
+    expect(await job(t, REQUESTS_PER_JOB_MAX + 2)).toBeUndefined();
   });
 });

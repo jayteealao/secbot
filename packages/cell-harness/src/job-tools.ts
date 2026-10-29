@@ -71,6 +71,18 @@ const refusal = (value: string) => ({ ...text(value), isError: true });
 /** The longest question a job can ask. */
 export const QUESTION_MAX_CHARS = 1_000;
 
+/** The longest brief a job can give a job it asks for. */
+export const REQUEST_BRIEF_MAX_CHARS = 8_000;
+/** The most jobs one job may have waiting for the lead to start. */
+export const REQUESTS_PER_JOB_MAX = 3;
+/** The most asked-for jobs the board holds waiting for the lead to start. */
+export const REQUESTS_PER_BOARD_MAX = 10;
+
+export const requestsPerJobText = (max: number) =>
+  `You already have ${max} jobs waiting for the lead to start; go on with your own job until the lead starts or leaves them.`;
+export const requestsPerBoardText = (max: number) =>
+  `The lead's board already has ${max} asked-for jobs waiting to start; go on with your own job.`;
+
 /** The lead's wake notice for a job's question. */
 export const questionNotice = (n: number) =>
   `[job ${n} question: read it with read_job; answer with answer_job]`;
@@ -202,13 +214,20 @@ export function createJobToolsExtension(deps: JobToolsDeps): Extension {
       };
     },
   });
+  /** A row a job asked for that the lead has not started yet. */
+  const openRequest = (row: { requestedBy: number | null; status: string; taskId: unknown }) =>
+    row.requestedBy !== null && row.status === "queued" && row.taskId === null;
   const requestJob = defineTool({
     name: "request_job",
     description:
       "Ask the lead for a new job when this one needs work you cannot do yourself. It is added to the lead's job board and the lead decides whether to start it; you go on with your own job.",
     parameters: Type.Object({
       title: Type.String({ minLength: 1, maxLength: 80, description: "A few words on the job." }),
-      brief: Type.String({ minLength: 1, description: "A self-contained brief." }),
+      brief: Type.String({
+        minLength: 1,
+        maxLength: REQUEST_BRIEF_MAX_CHARS,
+        description: "A self-contained brief.",
+      }),
       template: Type.String({ description: "The template's name." }),
     }),
     // A crash mid-call gives an interrupted result instead of a second request.
@@ -222,6 +241,13 @@ export function createJobToolsExtension(deps: JobToolsDeps): Extension {
           args.template,
         );
         if ("error" in template) return template;
+        const open = Object.values((await tx.doc(JobBoardDoc)).jobs).filter(openRequest);
+        if (open.filter((row) => row.requestedBy === n).length >= REQUESTS_PER_JOB_MAX) {
+          return { error: requestsPerJobText(REQUESTS_PER_JOB_MAX) };
+        }
+        if (open.length >= REQUESTS_PER_BOARD_MAX) {
+          return { error: requestsPerBoardText(REQUESTS_PER_BOARD_MAX) };
+        }
         const row = await createJobRow(tx, {
           title: args.title.trim(),
           brief: args.brief,
