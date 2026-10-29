@@ -6,6 +6,7 @@ import { type Models, Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-durable";
 import { logEvent } from "./cell-parts.ts";
 import { RoleModelsDoc, StopDoc, TemplatesDoc, TierSettingsDoc } from "./docs.ts";
+import { isSharedTitle } from "./household-contract.ts";
 import { createSharedRow } from "./job-board.ts";
 import {
   ISO_DATE,
@@ -58,8 +59,7 @@ export function createSharedLeadTools(deps: SharedLeadToolsDeps) {
       const shared = deps.shared?.();
       if (shared === undefined) return refusal("This cell has no household to share a job with.");
       // The household refuses such a title: the other lead reads it inside a bracketed notice.
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
-      if (/[[\]\u0000-\u001f\u007f]/.test(args.title)) {
+      if (!isSharedTitle(args.title)) {
         return refusal("Write the title on one line with no brackets.");
       }
       if (args.deadline !== undefined && !ISO_DATE.test(args.deadline)) {

@@ -4,6 +4,7 @@
  * right shape and length. Anything else is refused before it reaches the shared store.
  */
 import {
+  isSharedTitle,
   JOB_EFFORTS,
   JOB_PRIORITIES,
   SHARED_OPS_MAX,
@@ -37,14 +38,10 @@ function text(op: Fields, field: string, max: number): string {
   return value;
 }
 
-/**
- * One line of text with no brackets or control characters: the other person's lead reads it inside
- * a bracketed notice, so a title cannot close that notice and add an order of its own.
- */
+/** One line of text with no brackets or control characters: the contract's shared title rule. */
 function line(op: Fields, field: string, max: number): string {
   const value = text(op, field, max);
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
-  if (/[[\]\u0000-\u001f\u007f]/.test(value)) {
+  if (!isSharedTitle(value)) {
     refuse(`${field} must be one line with no brackets`);
   }
   return value;

@@ -191,6 +191,7 @@ export {
   type HouseholdClient,
   type HouseholdDocument,
   type HouseholdItem,
+  isSharedTitle,
   JOB_PRIORITIES,
   type ReportSpendResult,
   SHARED_OPS_MAX,

@@ -14,6 +14,16 @@ export const JOB_PRIORITIES = ["urgent", "deadline", "routine", "research"] as c
 /** The most operations one shared-job exchange carries; a person cell sends no more at once. */
 export const SHARED_OPS_MAX = 50;
 
+/**
+ * Whether a shared job's title is one line with no brackets or control characters. The other
+ * person's lead reads it inside a bracketed notice, so a title cannot close that notice and add an
+ * order of its own; the lead's tool and the household both refuse any other title.
+ */
+export function isSharedTitle(title: string): boolean {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: control characters are what it refuses
+  return !/[[\]\u0000-\u001f\u007f]/.test(title);
+}
+
 /** A cell name: owner, second, household, and later cells. */
 export const CELL_NAME = /^[a-z][a-z0-9-]{0,31}$/;
 
