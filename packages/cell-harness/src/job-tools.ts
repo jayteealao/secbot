@@ -20,6 +20,7 @@ import { JobBoardDoc, type JobQuestion, TemplatesDoc } from "./docs.ts";
 import { type HistoryHit, searchHistoryWindow } from "./history-search.ts";
 import { askQuestion, createJobRow } from "./job-board.ts";
 import type { JobHolds } from "./job-holds.ts";
+import { refusal, text } from "./lead-texts.ts";
 import { DEFAULT_JOB_EFFORT } from "./release-defaults.ts";
 import { jobOf } from "./telemetry.ts";
 import { templateNamed, templatesOf } from "./templates.ts";
@@ -64,9 +65,6 @@ export function toolsUsedWraps(names: readonly string[]): Wrap[] {
     })),
   );
 }
-
-const text = (value: string) => ({ content: [{ type: "text" as const, text: value }] });
-const refusal = (value: string) => ({ ...text(value), isError: true });
 
 /** The longest question a job can ask. */
 export const QUESTION_MAX_CHARS = 1_000;
