@@ -663,7 +663,8 @@ export class PersonCell {
         await cell.addSpecialist({
           name: body.name,
           instruction: body.instruction,
-          ...(typeof body.model === "string" ? { model: body.model } : {}),
+          // Any model the body names is refused, whatever its type: a template starts on a tier.
+          ...(Object.hasOwn(body, "model") ? { model: String(body.model) } : {}),
         });
         this.rearmSoon(person);
         return json({ name: body.name, status: "added" }, 201);

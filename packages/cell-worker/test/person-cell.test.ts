@@ -191,6 +191,14 @@ describe("PersonCell", () => {
     });
     expect(withModel.status).toBe(400);
     expect(((await withModel.json()) as { error: string }).error).toContain("starts on a tier");
+    // A model of any type is refused the same way, never silently ignored.
+    const nullModel = await call(s, "POST", "/v1/cells/owner/specialists", {
+      name: "tax",
+      instruction: "Forms.",
+      model: null,
+    });
+    expect(nullModel.status).toBe(400);
+    expect(((await nullModel.json()) as { error: string }).error).toContain("starts on a tier");
     expect((await (await call(s, "GET", "/v1/cells/owner/status")).json()) as object).toMatchObject(
       { roles: expect.arrayContaining(["garden"]) },
     );
