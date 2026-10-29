@@ -1,8 +1,10 @@
 // The household's shared store: each operation from a person cell applies once by its operation
 // id; only the other person's yes starts the job; a decline ends it; restart, resume, and stop
 // follow who may do them.
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { applyOps, SharedJobsDoc } from "../src/shared-jobs.ts";
+import { JobBoardDoc } from "../src/docs.ts";
+import { applyOps, exchange, rowsFor, SharedJobsDoc, settle } from "../src/shared-jobs.ts";
 import { type Responder, until } from "./fixtures.ts";
 import { createHold } from "./responders.ts";
 import {
@@ -144,5 +146,108 @@ describe("shared operations in the household", () => {
     ]);
     expect((await h.row(1))?.status).toBe("queued");
     hold.release("household");
+  });
+});
+
+describe("settlement and rows", () => {
+  const nobodyOver = () => false;
+  const setCost = (h: HouseholdStandIn, n: number, usd: number) =>
+    h.commit(async (tx) => {
+      const row = (await tx.doc(JobBoardDoc)).jobs[String(n)];
+      if (row !== undefined) row.cost = usd;
+    });
+
+  async function joinedJob(respond?: Responder) {
+    const opened = await open(respond);
+    await opened.apply("owner", propose());
+    await opened.apply("second", answer(1, true));
+    return opened;
+  }
+
+  it("charges half each when both have budget", async () => {
+    const { h } = await joinedJob();
+    await setCost(h, 1, 0.4);
+    const made = await h.commit((tx) => settle(tx, nobodyOver, 5_000));
+    expect(made).toEqual([
+      { id: "shared:1:1:owner", person: "owner", usd: 0.2, at: 5_000, split: "half" },
+      { id: "shared:1:1:second", person: "second", usd: 0.2, at: 5_000, split: "half" },
+    ]);
+    expect(await h.commit((tx) => settle(tx, nobodyOver, 6_000))).toEqual([]);
+  });
+
+  it("charges the requester all when the other person's budget is used up", async () => {
+    const { h } = await joinedJob();
+    await setCost(h, 1, 0.4);
+    const made = await h.commit((tx) => settle(tx, (p) => p === "second", 5_000));
+    expect(made).toEqual([
+      { id: "shared:1:1:owner", person: "owner", usd: 0.4, at: 5_000, split: "all" },
+    ]);
+  });
+
+  it("splits each settlement by who is over then, when it changes mid-job", async () => {
+    const { h } = await joinedJob();
+    await setCost(h, 1, 0.2);
+    await h.commit((tx) => settle(tx, nobodyOver, 5_000));
+    await setCost(h, 1, 0.5);
+    const second = await h.commit((tx) => settle(tx, (p) => p === "owner", 6_000));
+    expect(second).toEqual([
+      { id: "shared:1:2:second", person: "second", usd: 0.3, at: 6_000, split: "all" },
+    ]);
+    const rows = await h.commit((tx) => rowsFor(tx, "second", nobodyOver));
+    expect(rows[0]?.charges.map((c) => c.usd)).toEqual([0.1, 0.3]);
+  });
+
+  it("charges nothing for a job still waiting for the other person", async () => {
+    const { h, apply } = await open();
+    await apply("owner", propose());
+    await setCost(h, 1, 0.4);
+    expect(await h.commit((tx) => settle(tx, nobodyOver, 5_000))).toEqual([]);
+  });
+
+  it("gives each person the rows they are part of, with their own number and payer", async () => {
+    const { h, apply } = await open();
+    await apply("owner", propose());
+    const owner = await h.commit((tx) => rowsFor(tx, "owner", (p) => p === "second"));
+    expect(owner).toEqual([
+      expect.objectContaining({
+        household: 1,
+        requester: "owner",
+        other: "second",
+        consent: "asked",
+        status: "queued",
+        local: 4,
+        payer: "you",
+        estimateUsd: 0.25,
+        result: null,
+        charges: [],
+      }),
+    ]);
+    const second = await h.commit((tx) => rowsFor(tx, "second", (p) => p === "second"));
+    expect(second[0]).toMatchObject({ local: null, payer: "them" });
+    expect(await h.commit((tx) => rowsFor(tx, "third", nobodyOver))).toEqual([]);
+  });
+
+  it("runs operations, settlement, and rows in one exchange", async () => {
+    const { h } = await open();
+    const deps = { task: h.task, budgets: async () => [], now: () => 7_000 };
+    const first = await exchange(
+      h.harness,
+      { person: "owner", ops: [propose()] },
+      deps,
+      BACKGROUND_CONTEXT,
+    );
+    expect(first.answer.acks[0]?.household).toBe(1);
+    expect(first.answer.rows.map((row) => row.household)).toEqual([1]);
+    const offered = await exchange(
+      h.harness,
+      { person: "second", ops: [] },
+      deps,
+      BACKGROUND_CONTEXT,
+    );
+    expect(offered.answer.rows[0]).toMatchObject({
+      consent: "asked",
+      local: null,
+      title: "plan the May trip",
+    });
   });
 });

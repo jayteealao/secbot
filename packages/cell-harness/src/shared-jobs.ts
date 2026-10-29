@@ -5,12 +5,33 @@
  * pull everything through one exchange (`exchange`): their operations go in, each applied once by
  * its operation id, and their shared jobs come out. The household never calls a person cell.
  */
-import { defineDoc, ROOT_CONVERSATION_ID, type TaskId, type Tx } from "@earendil-works/pi-durable";
-import { ENDED, JobBoardDoc } from "./docs.ts";
-import type { SharedCharge, SharedOp } from "./household-contract.ts";
-import { createJobRow, endRow, type ResumeRefusal, restartRow, storeResult } from "./job-board.ts";
+import type { Context } from "@earendil-works/chord";
+import {
+  defineDoc,
+  type Harness,
+  ROOT_CONVERSATION_ID,
+  type TaskId,
+  type Tx,
+} from "@earendil-works/pi-durable";
+import { ENDED, JobBoardDoc, type JobRow } from "./docs.ts";
+import type {
+  SharedCharge,
+  SharedOp,
+  SharedSyncAnswer,
+  SharedSyncRequest,
+  SharedSyncRow,
+} from "./household-contract.ts";
+import {
+  createJobRow,
+  endRow,
+  jobCost,
+  type ResumeRefusal,
+  restartRow,
+  storeResult,
+} from "./job-board.ts";
 import { type JobTask, resumeJobTask } from "./job-task.ts";
 import { SHARED_DECLINED } from "./release-defaults.ts";
+import { payerOf, splitCharge } from "./shared-split.ts";
 
 /** One delivered operation's answer, kept so a repeat gets the same answer. */
 export type SharedAck = { opId: string; household?: number; error?: string };
@@ -206,4 +227,140 @@ export async function applyOps(
     acks.push({ ...ack });
   }
   return { acks, ...out };
+}
+
+/** One person's newest month as the household budget board has it. */
+export type PayerReport = {
+  readonly cell: string;
+  readonly spentUsd: number;
+  readonly limitUsd: number;
+};
+
+/** Reads every person's newest report from the household budget board. */
+export type Budgets = () => Promise<readonly PayerReport[]>;
+
+/** Whether a person's budget is used up: their newest report is at or over their limit. */
+export function overOf(reports: readonly PayerReport[]): (person: string) => boolean {
+  const used = new Set(reports.filter((r) => r.spentUsd >= r.limitUsd).map((r) => r.cell));
+  return (person) => used.has(person);
+}
+
+/**
+ * Splits every joined job's cost since its last settlement into one charge per paying person
+ * (half each; all to the other person when one budget is used up), in the caller's commit. Charge
+ * ids name the job, the settlement, and the person, so a person books each one once.
+ */
+export async function settle(
+  tx: Tx,
+  over: (person: string) => boolean,
+  now: number,
+): Promise<SharedCharge[]> {
+  const shared = await tx.doc(SharedJobsDoc);
+  const board = await tx.doc(JobBoardDoc);
+  const made: SharedCharge[] = [];
+  for (const [n, entry] of Object.entries(shared.jobs)) {
+    const row = board.jobs[n];
+    if (entry.consent !== "joined" || row === undefined) continue;
+    const cost = Math.max(row.cost, await jobCost(tx, row));
+    const due = cost - entry.settledUsd;
+    if (due < 0.000001) continue;
+    entry.chargeSeq += 1;
+    const { shares, split } = splitCharge(due, entry.requester, entry.other, over);
+    for (const person of [entry.requester, entry.other]) {
+      const usd = shares[person] ?? 0;
+      if (usd <= 0) continue;
+      const charge = {
+        id: `shared:${n}:${entry.chargeSeq}:${person}`,
+        person,
+        usd,
+        at: now,
+        split,
+      };
+      entry.charges.push(charge);
+      made.push(charge);
+    }
+    entry.settledUsd = cost;
+  }
+  return made;
+}
+
+/** What a person's lead may relay of a household result: a risky one only after its review. */
+function relayable(row: JobRow): SharedSyncRow["result"] {
+  const result = row.result;
+  if (result === null) return null;
+  if (result.kind !== "risky") return { kind: result.kind, text: result.text, at: result.at };
+  if (row.review?.status === "passed") return { kind: "risky", text: result.text, at: result.at };
+  if (row.review?.status === "rejected") {
+    return { kind: "failure", text: `review rejected: ${row.review.reason}`, at: row.review.at };
+  }
+  return null;
+}
+
+/** Every shared job a person proposed or was asked into, from their side. */
+export async function rowsFor(
+  tx: Tx,
+  person: string,
+  over: (person: string) => boolean,
+  waiting: ReadonlySet<number> = new Set(),
+): Promise<SharedSyncRow[]> {
+  const shared = await tx.doc(SharedJobsDoc);
+  const board = await tx.doc(JobBoardDoc);
+  const rows: SharedSyncRow[] = [];
+  for (const [n, entry] of Object.entries(shared.jobs)) {
+    if (entry.requester !== person && entry.other !== person) continue;
+    const row = board.jobs[n];
+    if (row === undefined) continue;
+    const role = entry.requester === person ? "requester" : "other";
+    rows.push({
+      household: row.number,
+      requester: entry.requester,
+      other: entry.other,
+      title: row.title,
+      consent: entry.consent,
+      status: row.status,
+      pause: row.pause === null ? null : { ...row.pause },
+      block: row.block === null ? null : { cause: row.block.cause, at: row.block.at },
+      waitingBudget: waiting.has(row.number),
+      tier: row.tier,
+      effort: { ...row.effort },
+      attempts: { ...row.attempts },
+      cost: row.cost,
+      cap: row.cap,
+      estimateUsd: entry.estimateUsd,
+      payer: payerOf(role, over(entry.requester), over(entry.other)),
+      local: entry.local[person] ?? null,
+      result: relayable(row),
+      charges: entry.charges.filter((charge) => charge.person === person).map((c) => ({ ...c })),
+    });
+  }
+  return rows;
+}
+
+export interface ExchangeDeps {
+  readonly task: JobTask;
+  readonly budgets: Budgets;
+  readonly now: () => number;
+  /** Household jobs held until a payer has budget again (the payer gate). */
+  readonly waiting?: () => ReadonlySet<number>;
+}
+
+/**
+ * One exchange with a person cell, in one commit: the person's operations, then settlement of
+ * every joined job, then that person's rows. The stops and aborts it asks for are the caller's to
+ * run after the commit.
+ */
+export async function exchange(
+  harness: Harness,
+  request: SharedSyncRequest,
+  deps: ExchangeDeps,
+  context: Context,
+): Promise<{ readonly answer: SharedSyncAnswer; readonly applied: Applied }> {
+  const over = overOf(await deps.budgets());
+  const now = deps.now();
+  return harness.commit(async (tx) => {
+    const applied = await applyOps(tx, request.person, request.ops, { task: deps.task, now });
+    await settle(tx, over, now);
+    const rows = await rowsFor(tx, request.person, over, deps.waiting?.());
+    return { answer: { acks: applied.acks, rows }, applied };
+  }, context);
 }
