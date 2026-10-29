@@ -324,7 +324,10 @@ export async function capacityLine({ out, "measured-from": from }) {
     try {
       const status = await putCapacity(values, person, back);
       console.log(`capacity set back to ${back.measured ?? "none"}: ${status}`);
-      if (status < 200 || status > 299) throw new Error(`status ${status}`);
+      if (status < 200 || status > 299) {
+        code = 1;
+        console.error(`capacity NOT restored (status ${status}); run the PUT by hand`);
+      }
     } catch (error) {
       code = 1;
       console.error(
