@@ -286,9 +286,13 @@ export async function capacityLine({ out, "measured-from": from }) {
   const deps = liveDeps();
   const lines = ["## capacity setup"];
   const at = Date.now();
-  lines.push(
-    `PUT /ops/capacity measured 1: ${await putCapacity(values, person, { measured: 1, at })}`,
-  );
+  const set = await putCapacity(values, person, { measured: 1, at });
+  lines.push(`PUT /ops/capacity measured 1: ${set}`);
+  // A number that was not set would make the check pass or fail for the wrong reason.
+  if (set < 200 || set > 299) {
+    console.error(`capacity-line: setting the number failed (${set}); no job started`);
+    return 1;
+  }
   let code = 1;
   try {
     const start = await executeSteps(
@@ -317,8 +321,17 @@ export async function capacityLine({ out, "measured-from": from }) {
     code = Object.values(results).every((result) => result.status === "pass") ? 0 : 1;
   } finally {
     const back = measuredBack(file);
-    const status = await putCapacity(values, person, back);
-    console.log(`capacity set back to ${back.measured ?? "none"}: ${status}`);
+    try {
+      const status = await putCapacity(values, person, back);
+      console.log(`capacity set back to ${back.measured ?? "none"}: ${status}`);
+      if (status < 200 || status > 299) throw new Error(`status ${status}`);
+    } catch (error) {
+      code = 1;
+      console.error(
+        `capacity NOT restored (${error instanceof Error ? error.message : String(error)}); run the PUT by hand`,
+      );
+    }
+    // The slow jobs started for the check stop whatever the set-back did.
     await deps.cli(["stop"], {});
   }
   return code;
